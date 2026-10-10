@@ -790,6 +790,29 @@ impl PerPeerImpairer {
                 report.changes_made += 1;
                 report.default_modified = true;
             }
+            // A leaf at the pre-0.31 `ffff:` (#485): delete it, then add one
+            // at the new handle.
+            (Some(default), Some(q)) if q.handle() != default_leaf_handle => {
+                if !opts.dry_run {
+                    conn.del_qdisc_by_index_full(ifindex, default_classid, Some(q.handle()))
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: remove legacy default leaf")
+                        })?;
+                    conn.add_qdisc_by_index_full(
+                        ifindex,
+                        default_classid,
+                        Some(default_leaf_handle),
+                        default.netem.clone(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        e.with_context("PerPeerImpairer::reconcile: re-add default netem leaf")
+                    })?;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+            }
             (Some(default), Some(q)) => {
                 if q.kind() != Some("netem") || !netem_matches(&default.netem, q) {
                     if !opts.dry_run {

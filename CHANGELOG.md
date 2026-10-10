@@ -32,6 +32,24 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The rate and impairment recipes could not share a device with an
+  ingress or clsact qdisc (#485).** `PerHostLimiter` always, and
+  `PerPeerImpairer` with a default impairment, put the default class's leaf
+  at `ffff:`. That is the ingress/clsact qdisc's handle, which
+  `qdisc_alloc_handle` never hands out. With an ingress qdisc present the
+  recipe failed with "Cannot move an existing qdisc to a different
+  parent", and the other way round the ingress qdisc could not be added.
+  That ruled out `RateLimiter`'s own ingress half and any BPF program on
+  clsact. The leaf is now at `8000:`, a major the kernel's auto-allocation
+  (`8001:`–`fffe:`) never reaches. `reconcile()` deletes a default leaf at
+  any other handle and re-adds it there, so a tree from 0.30 converges.
+  The new `TcHandle::is_reserved_major()` reports `ffff:`, and nlink
+  refuses to add a qdisc there anywhere but at the ingress hook. Root
+  tests apply both recipes next to an ingress and a clsact qdisc, and add
+  an ingress qdisc after one; on master that failed as above. Another
+  root test moves a 0.30 `ffff:` leaf with one reconcile, after which the
+  next reconcile is a no-op.
+
 - **nftables `reject()` in an `ip` or `ip6` table dropped silently, and a TCP
   reset had no protocol guard (#480).** `reject()` always sent
   `NFT_REJECT_ICMPX_UNREACH`. The `ip` and `ip6` reject expressions handle
@@ -711,6 +729,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`TcHandle::is_reserved_major()`** (#485).
 
 - **`Rule::{reject_tcp_reset, reject_icmp, reject_icmpv6}`** and
   `NFT_REJECT_ICMPX_{NO_ROUTE, PORT_UNREACH, HOST_UNREACH,
