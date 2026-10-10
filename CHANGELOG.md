@@ -36,6 +36,27 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **GENL interface lookups and `Diagnostics::watch()` used the process's
+  namespace, not the connection's (#497).** The WireGuard, ethtool and
+  MACsec connections resolved an ifindex, or a name, with a new
+  `Connection::<Route>::new()`, which is in the *process's* namespace. So
+  in a lab the host's ifindex 2 named the host's `eth0`. `Diagnostics::
+  watch()` subscribed on a new host connection, so
+  `Diagnostics::new(lab_conn).watch()` watched the host. It also named a
+  removed address's interface through the host's `/sys/class/net`.
+  - All of these now use a Route connection in the namespace the
+    connection's own socket is in (`ioctl(SIOCGSKNS)`). If that ioctl is
+    refused for lack of `CAP_NET_ADMIN`, they use the process's namespace
+    only when the two namespaces' `SO_NETNS_COOKIE`s match.
+  - `IssueStream` names interfaces from the link events it already
+    receives.
+  - `TcMessage::resolve_name` is documented as host-only.
+
+  Root tests query ethtool by index inside a lab namespace; on master that
+  gave `InterfaceNotFound { name: "ifindex 10" }`. They also watch a lab
+  `Diagnostics` and expect the address removal there, named `w0`; on
+  master nothing arrived. A unit test checks the cookie fallback.
+
 - **nftables: diffs and applies were not generation-checked, and
   `apply_reconcile` retried deterministic failures (#482).** A diff took
   3 + 2N dumps with no generation check across them. An apply then

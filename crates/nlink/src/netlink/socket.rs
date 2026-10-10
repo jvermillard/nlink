@@ -211,6 +211,46 @@ impl NetlinkSocket {
         Ok(socket)
     }
 
+    /// A file descriptor for the network namespace this socket lives in
+    /// (`ioctl(SIOCGSKNS)`, Linux 4.9). The kernel wants `CAP_NET_ADMIN`
+    /// over that namespace (#497).
+    pub(crate) fn netns_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+        // linux/sockios.h; not in the libc crate.
+        const SIOCGSKNS: libc::c_ulong = 0x894C;
+        // SAFETY: SIOCGSKNS takes no argument and returns a new fd or -1.
+        let fd = unsafe { libc::ioctl(self.as_raw_fd(), SIOCGSKNS as _) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the kernel just handed us this fd; nothing else owns it.
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// The cookie of the network namespace this socket lives in
+    /// (`SO_NETNS_COOKIE`, Linux 5.14): equal cookies, same namespace.
+    /// Needs no privilege.
+    pub(crate) fn netns_cookie(&self) -> std::io::Result<u64> {
+        // asm-generic/socket.h; not in every libc crate release.
+        const SO_NETNS_COOKIE: libc::c_int = 71;
+        let mut cookie = 0u64;
+        let mut len = std::mem::size_of::<u64>() as libc::socklen_t;
+        // SAFETY: a u64 out-parameter of the size we pass.
+        let rc = unsafe {
+            libc::getsockopt(
+                self.as_raw_fd(),
+                libc::SOL_SOCKET,
+                SO_NETNS_COOKIE,
+                (&raw mut cookie).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(cookie)
+    }
+
     /// The marker this socket's namespace was opened through (#504).
     pub(crate) fn namespace_marker(&self) -> Option<&super::namespace::NamespaceMarker> {
         self.namespace_marker.as_ref()

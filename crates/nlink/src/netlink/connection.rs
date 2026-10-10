@@ -662,6 +662,30 @@ impl<P: ProtocolState> Connection<P> {
         self.socket.set_ext_ack(on)
     }
 
+    /// A `Connection<Route>` in the network namespace this connection's
+    /// socket lives in — which is not necessarily the process's (#497).
+    ///
+    /// A GENL connection opened in a lab namespace that needs a link name
+    /// or index resolved, or a diagnostics run that wants an event socket
+    /// beside its own, used `Connection::<Route>::new()`: the *process's*
+    /// namespace, so the host's ifindex 2 named the host's `eth0`. This
+    /// opens the sibling through `SIOCGSKNS`. Without `CAP_NET_ADMIN` over
+    /// that namespace the ioctl is refused; the process's own namespace is
+    /// then used if, and only if, its cookie matches.
+    pub(crate) fn route_sibling(&self) -> Result<Connection<super::protocol::Route>> {
+        use super::protocol::Route;
+        match self.socket.netns_fd() {
+            Ok(ns) => Connection::<Route>::new_in_namespace_fd(ns),
+            Err(refused) => {
+                let here = Connection::<Route>::new()?;
+                match (self.socket.netns_cookie(), here.socket.netns_cookie()) {
+                    (Ok(ours), Ok(theirs)) if ours == theirs => Ok(here),
+                    _ => Err(Error::Io(refused)),
+                }
+            }
+        }
+    }
+
     /// Acquire the request lock as an *owned* guard, for one mutex-mode
     /// request/response cycle or a `DumpStream`'s lifetime (0.19 Finding
     /// B: the owned guard outlives the `&Connection` borrow, so a stream
@@ -4182,5 +4206,20 @@ mod send_sync_tests {
                 "{missing}: {got:?}"
             );
         }
+    }
+
+    /// #497: a sibling Route connection is in this connection's namespace.
+    /// As a regular user `SIOCGSKNS` is refused, and the namespaces'
+    /// cookies decide; here both are the host's, so the sibling is too.
+    #[tokio::test]
+    async fn a_route_sibling_is_in_the_same_namespace() {
+        let conn = Connection::<Route>::new().expect("socket open");
+        let sibling = conn.route_sibling().expect("sibling");
+        assert_eq!(
+            sibling.socket().netns_cookie().unwrap(),
+            conn.socket().netns_cookie().unwrap()
+        );
+        let lo = sibling.get_link_by_index(1).await.unwrap().expect("lo");
+        assert_eq!(lo.name(), Some("lo"));
     }
 }

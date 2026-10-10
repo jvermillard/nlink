@@ -1103,12 +1103,17 @@ impl Diagnostics {
     /// Watch for issues in real-time.
     ///
     /// Returns a stream of issues detected from network events.
+    ///
+    /// The events come from the namespace this `Diagnostics`' connection is
+    /// in. It used to subscribe on a new connection in the process's
+    /// namespace, so a `Diagnostics::new(lab_conn)` watched the host (#497).
     pub async fn watch(&self) -> Result<IssueStream> {
-        let conn = Connection::<Route>::new()?;
+        let conn = self.conn.route_sibling()?;
         conn.subscribe_all()?;
         Ok(IssueStream {
             events: conn.into_events().await,
             config: self.config.clone(),
+            names: HashMap::new(),
         })
     }
 
@@ -1300,6 +1305,9 @@ impl Diagnostics {
 /// Stream of issues from real-time monitoring.
 pub struct IssueStream {
     events: OwnedEventStream<Route>,
+    /// Interface names by ifindex, from the stream's own link events: the
+    /// host's `/sys/class/net` is the wrong namespace to ask (#497).
+    names: HashMap<u32, String>,
     /// Configuration for issue thresholds (reserved for future filtering).
     #[allow(dead_code)]
     config: DiagnosticsConfig,
@@ -1314,6 +1322,17 @@ impl Stream for IssueStream {
 
             match events.poll_next(cx) {
                 Poll::Ready(Some(Ok(event))) => {
+                    match &event {
+                        NetworkEvent::NewLink(link) => {
+                            if let Some(name) = link.name() {
+                                self.names.insert(link.ifindex(), name.to_string());
+                            }
+                        }
+                        NetworkEvent::DelLink(link) => {
+                            self.names.remove(&link.ifindex());
+                        }
+                        _ => {}
+                    }
                     if let Some(issue) = self.event_to_issue(&event) {
                         return Poll::Ready(Some(Ok(issue)));
                     }
@@ -1381,8 +1400,11 @@ impl IssueStream {
                 None
             }
             NetworkEvent::DelAddress(addr) => {
-                let name = crate::util::ifname::index_to_name(addr.ifindex())
-                    .unwrap_or_else(|_| format!("if{}", addr.ifindex()));
+                let name = self
+                    .names
+                    .get(&addr.ifindex())
+                    .cloned()
+                    .unwrap_or_else(|| format!("if{}", addr.ifindex()));
                 Some(Issue {
                     severity: Severity::Info,
                     category: IssueCategory::NoAddress,

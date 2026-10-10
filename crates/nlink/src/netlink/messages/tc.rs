@@ -420,6 +420,12 @@ impl TcMessage {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// **Host only.** The name comes from `/sys/class/net` in the calling
+    /// process's mount namespace, so for a message from another network
+    /// namespace it is that of whatever has the same ifindex on the host, or
+    /// nothing (#497). There, ask the message's own connection:
+    /// `conn.get_link_by_index(msg.ifindex())`.
     pub fn resolve_name(mut self) -> Self {
         if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
             self.name = Some(name);
@@ -427,7 +433,8 @@ impl TcMessage {
         self
     }
 
-    /// Resolve and set the interface name, mutating in place.
+    /// Resolve and set the interface name, mutating in place. Host only,
+    /// as [`resolve_name`](Self::resolve_name).
     pub fn resolve_name_mut(&mut self) {
         if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
             self.name = Some(name);

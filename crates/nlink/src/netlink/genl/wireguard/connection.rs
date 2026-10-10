@@ -19,7 +19,7 @@ use crate::{
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
         message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN},
-        protocol::{AsyncProtocolInit, Route, Wireguard},
+        protocol::{AsyncProtocolInit, Wireguard},
         socket::NetlinkSocket,
     },
 };
@@ -48,7 +48,8 @@ impl Connection<Wireguard> {
         match iface {
             InterfaceRef::Name(name) => Ok(name.clone()),
             InterfaceRef::Index(idx) => {
-                let route_conn = Connection::<Route>::new()?;
+                // In this connection's namespace, not the process's (#497).
+                let route_conn = self.route_sibling()?;
                 route_conn
                     .get_link_by_index(*idx)
                     .await?
