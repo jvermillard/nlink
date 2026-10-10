@@ -2494,17 +2494,50 @@ impl Rule {
     /// its TCP timeout. For a black hole (no ICMP, no RST), use
     /// [`drop`](Self::drop) instead.
     ///
-    /// Uses `ICMPX` (family-independent) so the same rule is valid in an
-    /// `inet` or `bridge` chain, where the family is not known at rule-load
-    /// time. For a TCP RST, or a specific ICMP code, use
+    /// The type follows the table's family when the rule is sent: `ICMPX`
+    /// (family-independent) in `inet`, `bridge` and `netdev`; ICMP port
+    /// unreachable in `ip`; ICMPv6 port unreachable in `ip6`. The `ip` and
+    /// `ip6` reject expressions do not handle ICMPX, and turned it into a
+    /// silent drop (#480). For a TCP RST, or a specific code, use
+    /// [`reject_tcp_reset`](Self::reject_tcp_reset),
+    /// [`reject_icmp`](Self::reject_icmp) /
+    /// [`reject_icmpv6`](Self::reject_icmpv6), or
     /// [`reject_with`](Self::reject_with).
     ///
     /// Until 0.25 this pushed a bare `NF_DROP` verdict — the doc promised
     /// reject semantics and the code delivered a silent drop, so clients hung
     /// until timeout (#205).
     pub fn reject(self) -> Self {
-        // NFT_REJECT_ICMPX_PORT_UNREACH = 1.
-        self.reject_with(super::NFT_REJECT_ICMPX_UNREACH, 1)
+        self.reject_with(
+            super::NFT_REJECT_ICMPX_UNREACH,
+            super::NFT_REJECT_ICMPX_PORT_UNREACH,
+        )
+    }
+
+    /// Reject with a TCP reset, behind a `meta l4proto tcp` guard as `nft`
+    /// writes it: without one, every non-TCP packet the rule matched would be
+    /// dropped silently, since there is nothing to reset (#480).
+    pub fn reject_tcp_reset(self) -> Self {
+        self.reject_with(super::NFT_REJECT_TCP_RST, 0)
+    }
+
+    /// Reject with an ICMP (IPv4) unreachable of `code` (3 is port
+    /// unreachable), behind a `meta nfproto ipv4` guard — `nft`'s `reject
+    /// with icmp type …`. Without the guard an `inet` chain would also send
+    /// the code to IPv6 packets, as an ICMPv6 code it does not mean (#480).
+    /// For `inet`, `ip` and `ip6` tables; in `bridge` and `netdev` the
+    /// nfproto is the hook's, and the guard never matches.
+    pub fn reject_icmp(mut self, code: u8) -> Self {
+        self.push_nfproto_ipv4();
+        self.reject_with(super::NFT_REJECT_ICMP_UNREACH, code)
+    }
+
+    /// Reject with an ICMPv6 unreachable of `code` (4 is port
+    /// unreachable), behind a `meta nfproto ipv6` guard — `nft`'s `reject
+    /// with icmpv6 type …`. See [`reject_icmp`](Self::reject_icmp).
+    pub fn reject_icmpv6(mut self, code: u8) -> Self {
+        self.push_nfproto_ipv6();
+        self.reject_with(super::NFT_REJECT_ICMP_UNREACH, code)
     }
 
     /// Reject the packet with an explicit reject type and ICMP code.
@@ -2516,7 +2549,32 @@ impl Rule {
     /// [`NFT_REJECT_ICMP_UNREACH`]: super::NFT_REJECT_ICMP_UNREACH
     /// [`NFT_REJECT_TCP_RST`]: super::NFT_REJECT_TCP_RST
     /// [`NFT_REJECT_ICMPX_UNREACH`]: super::NFT_REJECT_ICMPX_UNREACH
+    ///
+    /// A TCP reset gets a `meta l4proto tcp` guard unless the rule already
+    /// has one (#480). `NFT_REJECT_ICMP_UNREACH` gets no guard here: in an
+    /// `inet` chain it sends the code to IPv4 and IPv6 packets alike, so
+    /// prefer [`reject_icmp`](Self::reject_icmp) /
+    /// [`reject_icmpv6`](Self::reject_icmpv6) there.
     pub fn reject_with(mut self, reject_type: u32, icmp_code: u8) -> Self {
+        let tcp_guarded = self.exprs.windows(2).any(|w| {
+            matches!(
+                w,
+                [
+                    super::expr::Expr::Meta {
+                        key: MetaKey::L4Proto,
+                        ..
+                    },
+                    super::expr::Expr::Cmp {
+                        op: CmpOp::Eq,
+                        data,
+                        ..
+                    },
+                ] if data.as_slice() == [IPPROTO_TCP]
+            )
+        });
+        if reject_type == super::NFT_REJECT_TCP_RST && !tcp_guarded {
+            self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
+        }
         self.exprs.push(super::expr::Expr::Reject {
             reject_type,
             icmp_code,

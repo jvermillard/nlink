@@ -185,6 +185,51 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
     .await
 }
 
+/// #480: every reject form, in `ip`, `ip6` and `inet` tables. In `ip` and
+/// `ip6` nlink sends `reject()` as the family's ICMP code, not ICMPX; the
+/// diff renders it the same way, or a declared reject would never converge.
+#[tokio::test]
+async fn reject_rules_reconcile_in_every_family() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "nf_tables",
+        "nft_reject_ipv4",
+        "nft_reject_ipv6",
+        "nft_reject_inet"
+    );
+
+    let ns = TestNamespace::new("nft-echo-reject")?;
+    let conn = ns.connection_for::<Nftables>()?;
+
+    with_timeout(async {
+        let mut cfg = NftablesConfig::new();
+        for (name, family) in [
+            ("r4", Family::Ip),
+            ("r6", Family::Ip6),
+            ("rx", Family::Inet),
+        ] {
+            cfg = cfg.table(name, family, |t| {
+                let t = t
+                    .chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter))
+                    .rule_keyed("input", "reject", |r| r.match_tcp_dport(85).reject())
+                    .rule_keyed("input", "rst", |r| r.reject_tcp_reset())
+                    .rule_keyed("input", "rst-after-dport", |r| {
+                        r.match_tcp_dport(86).reject_tcp_reset()
+                    });
+                match family {
+                    Family::Ip => t.rule_keyed("input", "icmp", |r| r.reject_icmp(13)),
+                    Family::Ip6 => t.rule_keyed("input", "icmpv6", |r| r.reject_icmpv6(1)),
+                    _ => t
+                        .rule_keyed("input", "icmp", |r| r.reject_icmp(13))
+                        .rule_keyed("input", "icmpv6", |r| r.reject_icmpv6(1)),
+                }
+            });
+        }
+        assert_reconciles(&conn, &cfg).await
+    })
+    .await
+}
+
 /// NAT statements, which need `nat`-type chains.
 #[tokio::test]
 async fn every_nat_rule_shape_reconciles() -> nlink::Result<()> {

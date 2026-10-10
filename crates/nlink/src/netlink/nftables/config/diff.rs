@@ -158,7 +158,7 @@ pub(crate) fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec
     let mut b = MessageBuilder::new(0, 0);
     super::super::expr::write_expressions_as(
         &mut b,
-        &rule.exprs,
+        &super::super::expr::exprs_for_family(&rule.exprs, rule.family),
         super::super::expr::WireForm::Echo,
     );
     let raw = b.finish();

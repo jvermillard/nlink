@@ -507,7 +507,10 @@ impl Connection<Nftables> {
         }
 
         if !rule.exprs.is_empty() {
-            write_expressions(&mut builder, &rule.exprs);
+            write_expressions(
+                &mut builder,
+                &super::expr::exprs_for_family(&rule.exprs, rule.family),
+            );
         }
 
         // Key and comment → NFTA_RULE_USERDATA TLV.
@@ -1925,7 +1928,10 @@ impl Transaction {
         }
 
         if !rule.exprs.is_empty() {
-            write_expressions(&mut builder, &rule.exprs);
+            write_expressions(
+                &mut builder,
+                &super::expr::exprs_for_family(&rule.exprs, rule.family),
+            );
         }
 
         // Comment → NFTA_RULE_USERDATA TLV (Plan 157b v2).
@@ -1962,7 +1968,10 @@ impl Transaction {
         builder.append_attr_u64_be(NFTA_RULE_HANDLE, handle);
 
         if !rule.exprs.is_empty() {
-            write_expressions(&mut builder, &rule.exprs);
+            write_expressions(
+                &mut builder,
+                &super::expr::exprs_for_family(&rule.exprs, rule.family),
+            );
         }
 
         match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref()) {

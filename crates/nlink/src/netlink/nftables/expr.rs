@@ -552,6 +552,47 @@ pub(crate) enum WireForm {
     Echo,
 }
 
+/// `exprs` as they must be sent in a `family` table (#480).
+///
+/// `nft_reject_ipv4_eval` / `nft_reject_ipv6_eval` handle only
+/// `NFT_REJECT_ICMP_UNREACH` and `NFT_REJECT_TCP_RST`; an ICMPX reject falls
+/// to their `default:` and becomes a plain drop — a client waiting out its
+/// timeout instead of "connection refused", the bug #205 set out to fix. In
+/// `ip` and `ip6` an ICMPX reject is therefore sent as `ICMP_UNREACH` with
+/// the code the kernel's own `nft_reject_icmp_code` /
+/// `nft_reject_icmpv6_code` map it to, which is what the kernel echoes and
+/// what `nft` writes. Every other expression, and every other family, is
+/// passed through.
+pub(crate) fn exprs_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+    // [no route, port, host, admin prohibited]
+    const V4: [u8; 4] = [0, 3, 1, 13];
+    const V6: [u8; 4] = [0, 4, 3, 1];
+    let table = match family {
+        Family::Ip => &V4,
+        Family::Ip6 => &V6,
+        _ => return std::borrow::Cow::Borrowed(exprs),
+    };
+    let icmpx = |e: &Expr| {
+        matches!(e, Expr::Reject { reject_type, icmp_code }
+            if *reject_type == NFT_REJECT_ICMPX_UNREACH && usize::from(*icmp_code) < table.len())
+    };
+    if !exprs.iter().any(icmpx) {
+        return std::borrow::Cow::Borrowed(exprs);
+    }
+    std::borrow::Cow::Owned(
+        exprs
+            .iter()
+            .map(|e| match e {
+                Expr::Reject { icmp_code, .. } if icmpx(e) => Expr::Reject {
+                    reject_type: NFT_REJECT_ICMP_UNREACH,
+                    icmp_code: table[usize::from(*icmp_code)],
+                },
+                other => other.clone(),
+            })
+            .collect(),
+    )
+}
+
 /// [`write_expressions`], in the given [`WireForm`].
 pub(crate) fn write_expressions_as(builder: &mut MessageBuilder, exprs: &[Expr], form: WireForm) {
     let list = builder.nest_start(NFTA_RULE_EXPRESSIONS | 0x8000); // NLA_F_NESTED
@@ -2988,5 +3029,82 @@ mod decode_tests {
         let (_, elem) = AttrIter::new(&notrack).next().unwrap();
         let attrs: Vec<u16> = AttrIter::new(elem).map(|(t, _)| t).collect();
         assert_eq!(attrs, [NFTA_EXPR_NAME]);
+    }
+
+    /// #480: the `ip`/`ip6` reject expressions do not handle ICMPX, so a
+    /// `reject()` there is sent as the family's port unreachable — the
+    /// code the kernel's own icmpx mapping gives.
+    #[test]
+    fn an_icmpx_reject_is_sent_as_the_familys_icmp() {
+        let reject = |t, c| Expr::Reject {
+            reject_type: t,
+            icmp_code: c,
+        };
+        let sent = |exprs: &[Expr], family| match exprs_for_family(exprs, family).as_ref() {
+            [
+                Expr::Reject {
+                    reject_type,
+                    icmp_code,
+                },
+            ] => (*reject_type, *icmp_code),
+            other => panic!("{other:?}"),
+        };
+        let port = [reject(
+            NFT_REJECT_ICMPX_UNREACH,
+            NFT_REJECT_ICMPX_PORT_UNREACH,
+        )];
+        assert_eq!(sent(&port, Family::Ip), (NFT_REJECT_ICMP_UNREACH, 3));
+        assert_eq!(sent(&port, Family::Ip6), (NFT_REJECT_ICMP_UNREACH, 4));
+        for family in [Family::Inet, Family::Bridge, Family::Netdev] {
+            assert_eq!(sent(&port, family), (NFT_REJECT_ICMPX_UNREACH, 1));
+        }
+        let admin = [reject(
+            NFT_REJECT_ICMPX_UNREACH,
+            NFT_REJECT_ICMPX_ADMIN_PROHIBITED,
+        )];
+        assert_eq!(sent(&admin, Family::Ip), (NFT_REJECT_ICMP_UNREACH, 13));
+        assert_eq!(sent(&admin, Family::Ip6), (NFT_REJECT_ICMP_UNREACH, 1));
+        // Not an ICMPX reject: untouched.
+        let rst = [reject(NFT_REJECT_TCP_RST, 0)];
+        assert_eq!(sent(&rst, Family::Ip), (NFT_REJECT_TCP_RST, 0));
+    }
+
+    /// A TCP reset gets one `meta l4proto tcp` guard — not a second one
+    /// behind a port match that already carries it.
+    #[test]
+    fn a_tcp_reset_is_guarded_once() {
+        let l4 = |r: &Rule| {
+            r.exprs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Expr::Meta {
+                            key: MetaKey::L4Proto,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        let bare = Rule::new("t", "c").reject_tcp_reset();
+        assert_eq!(l4(&bare), 1);
+        assert!(
+            matches!(bare.exprs.last(), Some(Expr::Reject { reject_type, .. }) if *reject_type == NFT_REJECT_TCP_RST)
+        );
+        let after_port = Rule::new("t", "c").match_tcp_dport(22).reject_tcp_reset();
+        assert_eq!(l4(&after_port), 1);
+        let icmp = Rule::new("t", "c").reject_icmp(3);
+        assert!(matches!(
+            icmp.exprs.as_slice(),
+            [
+                Expr::Meta {
+                    key: MetaKey::NfProto,
+                    ..
+                },
+                Expr::Cmp { .. },
+                Expr::Reject { .. }
+            ]
+        ));
     }
 }

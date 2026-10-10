@@ -32,6 +32,31 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables `reject()` in an `ip` or `ip6` table dropped silently, and a TCP
+  reset had no protocol guard (#480).** `reject()` always sent
+  `NFT_REJECT_ICMPX_UNREACH`. The `ip` and `ip6` reject expressions handle
+  only ICMP and TCP-reset, so ICMPX fell to their `default:`, a plain
+  drop, and clients hung until their timeout: the bug #205 set out to
+  fix. An ICMPX reject in an `ip`/`ip6` rule is now sent as the
+  family's ICMP code, with the mapping the kernel itself uses (port
+  unreachable is 3 / 4). The diff renders it the same way, so a declared
+  `reject()` converges.
+  - `reject_with(NFT_REJECT_TCP_RST, _)` and the new `reject_tcp_reset()`
+    prepend `meta l4proto tcp` unless the rule has it, as `nft` does.
+    Without it, every non-TCP packet the rule matched was dropped.
+  - The new `reject_icmp(code)` / `reject_icmpv6(code)` carry a `meta
+    nfproto` guard, so an `inet` rule's ICMP code is not sent to IPv6
+    packets.
+  - The ICMPX codes are named (`NFT_REJECT_ICMPX_*`).
+
+  Root traffic tests send UDP into `ip`, `ip6` and `inet` tables with a
+  `reject()` rule and get "connection refused". On master the `ip` case
+  timed out. They also check that a reset refuses a TCP connect across a
+  veth while UDP to the same host still gets its port unreachable; on
+  master the UDP was dropped. An echo test applies every reject form in
+  the three families and asserts the diff is empty. `nft_reject_ipv4`,
+  `_ipv6` and `_inet` join CI's strict module list.
+
 - **A namespaced spawn could not run as another user (#502).** Every
   spawn path enters the namespace (and makes the `/etc/netns` mounts) in a
   `pre_exec` closure. std applies `CommandExt::uid`/`gid`/`groups` before
@@ -686,6 +711,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Rule::{reject_tcp_reset, reject_icmp, reject_icmpv6}`** and
+  `NFT_REJECT_ICMPX_{NO_ROUTE, PORT_UNREACH, HOST_UNREACH,
+  ADMIN_PROHIBITED}` (#480).
 
 - **`namespace::{spawn_as, spawn_with_etc_as, SpawnUser}`** (#502).
 
