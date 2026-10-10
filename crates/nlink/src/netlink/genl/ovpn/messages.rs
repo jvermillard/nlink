@@ -41,7 +41,7 @@ use crate::macros::{GenlMessage, NetlinkAttrs};
 /// **Security note**: this struct holds raw cipher key material.
 /// Callers are responsible for zeroing the bytes when no longer
 /// needed — nlink does not enforce zero-on-drop.
-#[derive(NetlinkAttrs, Debug, Default, Clone, PartialEq, Eq)]
+#[derive(NetlinkAttrs, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OvpnKeydir {
     /// Cipher key bytes. See doc on the struct for the per-cipher
@@ -51,6 +51,22 @@ pub struct OvpnKeydir {
     /// 8-byte nonce tail.
     #[genl_attr(OvpnKeydirAttr::NonceTail)]
     pub nonce_tail: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for OvpnKeydir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("OvpnKeydir")
+            .field(
+                "cipher_key",
+                &self
+                    .cipher_key
+                    .as_ref()
+                    .map(|k| crate::util::SecretBytes(k.as_ref())),
+            )
+            .field("nonce_tail", &self.nonce_tail)
+            .finish()
+    }
 }
 
 impl OvpnKeydir {

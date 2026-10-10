@@ -402,7 +402,7 @@ pub struct XfrmUserpolicyInfo {
 }
 
 /// XFRM algorithm.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XfrmAlgorithm {
     /// Algorithm name.
     pub name: String,
@@ -412,8 +412,19 @@ pub struct XfrmAlgorithm {
     pub key: Vec<u8>,
 }
 
+impl std::fmt::Debug for XfrmAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("XfrmAlgorithm")
+            .field("name", &self.name)
+            .field("key_len", &self.key_len)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .finish()
+    }
+}
+
 /// XFRM AEAD algorithm.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XfrmAlgorithmAead {
     /// Algorithm name.
     pub name: String,
@@ -425,8 +436,20 @@ pub struct XfrmAlgorithmAead {
     pub key: Vec<u8>,
 }
 
+impl std::fmt::Debug for XfrmAlgorithmAead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("XfrmAlgorithmAead")
+            .field("name", &self.name)
+            .field("key_len", &self.key_len)
+            .field("icv_len", &self.icv_len)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .finish()
+    }
+}
+
 /// XFRM authentication algorithm with truncation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XfrmAlgorithmAuthTrunc {
     /// Algorithm name.
     pub name: String,
@@ -436,6 +459,18 @@ pub struct XfrmAlgorithmAuthTrunc {
     pub trunc_len: u32,
     /// Key data.
     pub key: Vec<u8>,
+}
+
+impl std::fmt::Debug for XfrmAlgorithmAuthTrunc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("XfrmAlgorithmAuthTrunc")
+            .field("name", &self.name)
+            .field("key_len", &self.key_len)
+            .field("trunc_len", &self.trunc_len)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .finish()
+    }
 }
 
 /// XFRM encapsulation template.
@@ -800,28 +835,59 @@ pub struct SecurityPolicy {
 /// kernel's crypto subsystem decides which combinations are valid.
 /// `key` is the raw key bytes; `key_len_bits` is set automatically
 /// from `key.len() * 8` by the helper constructors.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XfrmAlgoAuth {
     pub name: String,
     pub key: Vec<u8>,
 }
 
+impl std::fmt::Debug for XfrmAlgoAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("XfrmAlgoAuth")
+            .field("name", &self.name)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .finish()
+    }
+}
+
 /// Encryption algorithm spec.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XfrmAlgoEncr {
     pub name: String,
     pub key: Vec<u8>,
+}
+
+impl std::fmt::Debug for XfrmAlgoEncr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("XfrmAlgoEncr")
+            .field("name", &self.name)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .finish()
+    }
 }
 
 /// AEAD algorithm spec (combined auth + encrypt with ICV).
 ///
 /// `icv_truncbits` is the ICV length in bits (e.g. 128 for
 /// AES-GCM-128).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XfrmAlgoAead {
     pub name: String,
     pub key: Vec<u8>,
     pub icv_truncbits: u32,
+}
+
+impl std::fmt::Debug for XfrmAlgoAead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("XfrmAlgoAead")
+            .field("name", &self.name)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .field("icv_truncbits", &self.icv_truncbits)
+            .finish()
+    }
 }
 
 /// Builder for a Security Association write request.

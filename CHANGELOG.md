@@ -32,6 +32,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`Debug` printed private, preshared, cipher, SA and MACsec keys (#499,
+  #567).** The WireGuard types (`WgDevice`, `WgPeer`, their builders,
+  `DeclaredWgDevice`/`DeclaredWgPeer` and theirs, so `WireguardConfig` too),
+  `OvpnKeydir` (and with it `OvpnKeyConfig`, `OvpnConfig` and the key
+  messages), the XFRM algorithm specs and dumps (`XfrmAlgoAuth/Encr/Aead`,
+  `XfrmAlgorithm*`) and `MacsecSaBuilder` all derived `Debug`. Any
+  `?config` in a `tracing` field, any `dbg!`, or a panic message holding
+  one printed every key byte. nlink-lab formats WireGuard plans with
+  `{:?}` on every apply. Their `Debug` is now written by hand and shows
+  each key as `<N bytes redacted>`. A unit test formats one of each with
+  a marker byte and checks it never appears. On master `WgDevice` printed
+  `private_key: Some([167, 167, …`. Zeroize-on-drop and key newtypes are
+  left for #529's key type.
+
 - **`get_link_by_name`/`get_link_by_index` dumped every link to find one,
   and never found an alternative name (#495).** Both called `get_links()`
   and searched the result. They sit behind `resolve_interface`, which
