@@ -32,6 +32,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **stats: a counter that went backwards read as a 64-bit wrap, about
+  1.8e19 bytes/s (#506).** `StatsSnapshot::rates` took any decrease for a
+  wrap. A 64-bit wrap never happens in practice; a reset happens all the
+  time in labs: a recreated link, a qdisc replaced by another kind, or a
+  reused ifindex. Rates are now computed by the new stateless
+  `LinkRates::between` and `TcRates::between`. They return `None`, and
+  `rates()` leaves the object out for that interval, when a 64-bit counter
+  went backwards, or when the link's name or the qdisc's/class's kind
+  changed under the same key. The kernel's 32-bit drops, overlimits and
+  requeues still count one wrap when bytes and packets moved forward.
+  Unit tests cover a reset link and qdisc, a renamed link, a changed
+  kind, and a 32-bit drop wrap. On master the reset link reported
+  1.8446744073709548e19 B/s.
+
 - **nl80211: 2484 MHz read as channel 15, and nothing turned a channel back
   into a frequency (#508).** `Interface::channel()` and
   `Frequency::channel()` computed `(f - 2407) / 5` across the 2.4 GHz band,
@@ -630,6 +644,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`LinkRates::between`, `TcRates::between`**: rates from two samples the
+  caller keeps (#506).
 
 - **`nl80211::{WifiBand, freq_to_channel, channel_to_freq,
   channel_to_freq_khz}`** (#508).
