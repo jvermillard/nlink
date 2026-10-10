@@ -145,11 +145,32 @@ impl Stack {
     /// mutation that precedes pre-flight validation; it is idempotent
     /// and creates nothing the stack does not declare. Keys and peers
     /// go on last, as before.
+    ///
+    /// **Dry run.** With `opts.dry_run` nothing is touched — no
+    /// WireGuard link, no firewall commit, no keys — and the report
+    /// carries the [`StackDiff`] in [`StackApplyReport::dry_run`]. It
+    /// used to bootstrap the WireGuard links, commit the nftables layer
+    /// and configure the tunnels anyway, honouring `dry_run` for the
+    /// network layer alone (#501). A link the WireGuard layer would
+    /// create does not exist yet then, so the network diff shows what
+    /// it can.
     pub async fn apply_in_with(
         &self,
         ns: NamespaceSpec<'_>,
         opts: ApplyOptions,
     ) -> Result<StackApplyReport> {
+        // The pre-flight diff sees the same options the network layer
+        // will apply with — `purge_tables` was dropped (#501).
+        let diff_opts = DiffOptions::default()
+            .purge(opts.purge)
+            .purge_tables(opts.purge_tables.iter().copied());
+        if opts.dry_run {
+            return Ok(StackApplyReport {
+                dry_run: Some(self.diff_in_with(ns, diff_opts).await?),
+                ..StackApplyReport::default()
+            });
+        }
+
         // Step 0: the links the network layer is about to address.
         if let Some(cfg) = &self.wireguard {
             apply::wireguard_devices_in(ns.clone(), cfg).await?;
@@ -157,9 +178,7 @@ impl Stack {
 
         // Pre-flight: validate every layer's diff succeeds
         // before any further kernel mutation.
-        let _validation = self
-            .diff_in_with(ns.clone(), DiffOptions::default().purge(opts.purge))
-            .await?;
+        let _validation = self.diff_in_with(ns.clone(), diff_opts).await?;
 
         let mut report = StackApplyReport::default();
         if let Some(cfg) = &self.network {
@@ -169,7 +188,8 @@ impl Stack {
             report.nftables_change_count = Some(apply::nftables_in(ns.clone(), cfg).await?);
         }
         if let Some(cfg) = &self.wireguard {
-            report.wireguard = Some(apply::wireguard_in(ns, cfg).await?);
+            // The links are up since step 0; this is the keys and peers.
+            report.wireguard = Some(apply::wireguard_keys_in(ns, cfg).await?);
         }
         Ok(report)
     }
@@ -222,19 +242,26 @@ pub struct StackApplyReport {
     pub network: Option<NetworkApplyResult>,
     pub nftables_change_count: Option<usize>,
     pub wireguard: Option<WireguardApplyResult>,
+    /// With `ApplyOptions::dry_run`: what an apply would do, and nothing
+    /// was changed. The per-layer fields are then `None` (#501).
+    pub dry_run: Option<StackDiff>,
 }
 
 impl StackApplyReport {
-    /// `true` if every set layer reported zero changes.
+    /// `true` if every set layer reported zero changes — for a dry run,
+    /// if the diff is empty.
     pub fn is_noop(&self) -> bool {
-        self.network.as_ref().is_none_or(|r| r.changes_made == 0)
+        self.dry_run.as_ref().is_none_or(|d| d.is_empty())
+            && self.network.as_ref().is_none_or(|r| r.changes_made == 0)
             && self.nftables_change_count.is_none_or(|c| c == 0)
             && self.wireguard.as_ref().is_none_or(|r| r.total_writes() == 0)
     }
 
-    /// Total number of kernel mutations across every layer (#169).
+    /// Total number of kernel mutations across every layer (#169) — for a
+    /// dry run, the number the diff would make.
     pub fn change_count(&self) -> usize {
-        self.network.as_ref().map_or(0, |r| r.changes_made)
+        self.dry_run.as_ref().map_or(0, |d| d.change_count())
+            + self.network.as_ref().map_or(0, |r| r.changes_made)
             + self.nftables_change_count.unwrap_or(0)
             + self.wireguard.as_ref().map_or(0, |r| r.total_writes())
     }
