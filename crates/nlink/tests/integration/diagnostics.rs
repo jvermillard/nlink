@@ -428,3 +428,62 @@ async fn test_diagnostics_skip_loopback() -> nlink::Result<()> {
     assert!(!report.interfaces.iter().any(|i| i.name == "lo"));
     Ok(())
 }
+
+// ============================================================================
+// #497 — lookups in the connection's namespace, not the process's
+// ============================================================================
+
+/// A GENL family that names devices (ethtool here; WireGuard does the
+/// same) resolved an ifindex with a new `Connection::<Route>` in the
+/// *process's* namespace: in a lab, the host's ifindex 2 named the host's
+/// `eth0`, which the lab does not have.
+#[tokio::test]
+async fn a_genl_lookup_by_index_resolves_in_its_own_namespace() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::DummyLink, namespace};
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("ns-ethtool")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+
+    let ethtool: Connection<Ethtool> = namespace::connection_for_async(ns.name()).await?;
+    ethtool.get_link_state(d0).await?;
+    Ok(())
+}
+
+/// `Diagnostics::watch()` subscribed on a new connection in the process's
+/// namespace, so `Diagnostics::new(lab_conn).watch()` watched the host. And
+/// it named a removed address's interface through the host's sysfs.
+#[tokio::test]
+async fn watch_follows_its_connections_namespace() -> nlink::Result<()> {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use nlink::netlink::{addr::Ipv4Address, link::DummyLink};
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("diag-watch")?;
+    let diag = Diagnostics::new(ns.connection()?);
+    let mut issues = diag.watch().await?;
+
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("w0")).await?;
+    let ip = Ipv4Addr::new(10, 97, 0, 1);
+    conn.add_address(Ipv4Address::new("w0", ip, 24)).await?;
+    conn.del_address("w0", ip.into(), 24).await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let Ok(Some(issue)) = tokio::time::timeout_at(deadline, issues.next()).await else {
+            panic!("no NoAddress issue from the lab namespace within 5 s");
+        };
+        let issue = issue?;
+        if issue.category == IssueCategory::NoAddress {
+            assert_eq!(issue.interface.as_deref(), Some("w0"), "{issue:?}");
+            return Ok(());
+        }
+    }
+}

@@ -17,7 +17,7 @@ use crate::{
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
         message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN},
-        protocol::{AsyncProtocolInit, Macsec, Route},
+        protocol::{AsyncProtocolInit, Macsec},
         socket::NetlinkSocket,
     },
 };
@@ -49,7 +49,8 @@ impl Connection<Macsec> {
         match iface {
             InterfaceRef::Index(idx) => Ok(*idx),
             InterfaceRef::Name(name) => {
-                let route_conn = Connection::<Route>::new()?;
+                // In this connection's namespace, not the process's (#497).
+                let route_conn = self.route_sibling()?;
                 route_conn
                     .get_link_by_name(name)
                     .await?
