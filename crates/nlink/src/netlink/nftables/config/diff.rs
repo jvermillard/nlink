@@ -448,6 +448,11 @@ pub struct NftablesDiff {
     /// [`change_count`](Self::change_count) ignore it, and nothing in it is
     /// sent to the kernel.
     pub kept_in_use: Vec<KeptInUse>,
+    /// The ruleset generation the diff was taken at, if it was taken from
+    /// the kernel: [`apply`](Self::apply) commits only if the ruleset is
+    /// still there, and is otherwise refused with `ERESTART`
+    /// ([`Error::is_restart`](crate::Error::is_restart)) (#482).
+    pub generation: Option<u32>,
 }
 
 impl NftablesDiff {
@@ -1150,12 +1155,43 @@ impl NftablesConfig {
     /// See [`NftDiffOptions::purge_tables`] — it deletes every kernel table
     /// this config does not declare, across every family, cascading to their
     /// chains, rules and sets.
+    ///
+    /// The dumps are taken between two reads of the ruleset generation and
+    /// taken again if a commit landed in between; the diff records the
+    /// generation, and [`NftablesDiff::apply`] commits only if the ruleset
+    /// is still at it (#482).
     pub async fn diff_with_options(
         &self,
         conn: &Connection<Nftables>,
         options: &NftDiffOptions,
     ) -> Result<NftablesDiff> {
         self.validate()?;
+        // A diff is 3 + 2N dumps. One that a commit lands in the middle of
+        // can mix two rulesets; a few tries is plenty unless something is
+        // committing in a loop, and then the last diff's apply is refused
+        // (its generation is stale) rather than applied against a torn view.
+        const ATTEMPTS: usize = 3;
+        let mut attempt = 0;
+        loop {
+            let before = conn.generation().await?;
+            let mut diff = self.diff_once(conn, options).await?;
+            diff.generation = Some(before);
+            attempt += 1;
+            if attempt == ATTEMPTS || conn.generation().await? == before {
+                return Ok(diff);
+            }
+            tracing::debug!(
+                attempt,
+                "nftables diff: the ruleset changed under it; again"
+            );
+        }
+    }
+
+    async fn diff_once(
+        &self,
+        conn: &Connection<Nftables>,
+        options: &NftDiffOptions,
+    ) -> Result<NftablesDiff> {
         let mut diff = NftablesDiff::default();
         // Order in which rule inserts (new and moved) are sent; see
         // `RuleAdd::seq`.

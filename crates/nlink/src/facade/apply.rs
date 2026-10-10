@@ -86,8 +86,9 @@ pub async fn nftables_in_namespace(ns: &str, cfg: &NftablesConfig) -> Result<usi
 /// (named, path, or PID — container support, #169).
 pub async fn nftables_in(ns: NamespaceSpec<'_>, cfg: &NftablesConfig) -> Result<usize> {
     let conn: Connection<Nftables> = ns.connection()?;
-    let diff = cfg.diff(&conn).await?;
-    diff.apply(&conn).await
+    // Re-diffs if another writer changes the ruleset under it (#482).
+    let opts = crate::netlink::nftables::config::ReconcileOptions::default();
+    Ok(cfg.apply_reconcile(&conn, opts).await?.change_count)
 }
 
 // =============================================================================

@@ -66,6 +66,12 @@ pub const NFNL_SUBSYS_NFTABLES: u16 = 10;
 /// This is a raw nlmsg_type, NOT shifted by subsystem. The kernel defines
 /// `NFNL_MSG_BATCH_BEGIN` as `NLMSG_MIN_TYPE` (16) in nfnetlink.h.
 pub const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
+
+/// `NFNL_BATCH_GENID` (`enum nfnl_batch_attributes`): the ruleset
+/// generation a batch was computed against, a big-endian u32 on
+/// `NFNL_MSG_BATCH_BEGIN`. The kernel refuses the batch with `ERESTART`
+/// if the ruleset has moved on since.
+pub const NFNL_BATCH_GENID: u16 = 1;
 /// Batch end message type (NLMSG_MIN_TYPE + 1 = 0x11).
 pub const NFNL_MSG_BATCH_END: u16 = 0x11;
 

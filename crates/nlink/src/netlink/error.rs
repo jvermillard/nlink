@@ -965,6 +965,15 @@ impl Error {
         self.errno() == Some(libc::EAGAIN)
     }
 
+    /// Check if this is `ERESTART`. From nftables it means a batch was sent
+    /// with a ruleset generation that is no longer current
+    /// ([`Transaction::expect_generation`](crate::netlink::nftables::Transaction::expect_generation)):
+    /// something changed the ruleset after the diff was taken. Diff again
+    /// and apply that (#482).
+    pub fn is_restart(&self) -> bool {
+        self.errno() == Some(libc::ERESTART)
+    }
+
     /// Check if this is a "no buffer space available" error (ENOBUFS).
     ///
     /// This typically occurs when the kernel cannot allocate memory

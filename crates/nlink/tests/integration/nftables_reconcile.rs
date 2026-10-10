@@ -1524,3 +1524,82 @@ async fn the_nftables_snapshot_holds_objects_and_elements() -> nlink::Result<()>
     assert_eq!(elements, 2, "the set's elements are in the snapshot");
     Ok(())
 }
+
+/// #482: a diff took 3 + 2N dumps with no generation check, and its apply
+/// committed whatever the ruleset had become. A diff now records the
+/// generation it was taken at, and its apply is refused with ERESTART once
+/// another writer has committed; `NftablesConfig::apply_reconcile` then
+/// diffs again.
+#[tokio::test]
+async fn a_stale_diff_is_refused_and_reconcile_diffs_again() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-genid")?;
+        let nft = ns.connection_for::<Nftables>()?;
+        let cfg = cfg_with_n_rules(2);
+        let diff = cfg.diff(&nft).await?;
+        let taken_at = diff
+            .generation
+            .expect("a diff of the kernel carries its generation");
+
+        // Another writer commits between the diff and the apply.
+        ns.exec("nft", &["add", "table", "ip", "someone-else"])?;
+        assert_ne!(nft.generation().await?, taken_at);
+
+        let err = diff.apply(&nft).await.expect_err("the ruleset moved on");
+        assert!(err.is_restart(), "{err}");
+        let tables = nft.list_tables().await?;
+        assert!(
+            tables.iter().all(|t| t.name != "filter_rec"),
+            "nothing of the refused batch may land"
+        );
+
+        let report = cfg
+            .apply_reconcile(&nft, ReconcileOptions::default())
+            .await?;
+        assert_eq!(report.attempts, 1, "{report:?}");
+        assert!(cfg.diff(&nft).await?.is_empty());
+        Ok(())
+    })
+    .await
+}
+
+/// A commit moves the generation by exactly one. `apply` relies on it when
+/// a diff grows a set — committed in a batch of its own first — and sends
+/// the rest expecting the next generation.
+#[tokio::test]
+async fn one_commit_moves_the_generation_by_one() -> nlink::Result<()> {
+    use nlink::netlink::nftables::types::Set;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-genstep")?;
+        let nft = ns.connection_for::<Nftables>()?;
+        let before = nft.generation().await?;
+        nft.add_table("t", Family::Ip).await?;
+        assert_eq!(nft.generation().await?, before.wrapping_add(1));
+
+        nft.add_set(
+            Set::new("t", "s")
+                .family(Family::Ip)
+                .key_type(SetKeyType::Ipv4Addr)
+                .size(10),
+        )
+        .await?;
+        let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
+            t.set("s", |s| s.key_type(SetKeyType::Ipv4Addr).size(20))
+                .chain("c", |c| c)
+                .rule_keyed("c", "k", |r| r.accept())
+        });
+        let diff = cfg.diff(&nft).await?;
+        assert_eq!(diff.sets_to_update.len(), 1, "{diff}");
+        assert!(diff.change_count() > 1, "a set update and more: {diff}");
+        diff.apply(&nft).await?;
+        assert!(cfg.diff(&nft).await?.is_empty());
+        Ok(())
+    })
+    .await
+}
