@@ -362,7 +362,22 @@ pub const NFT_REJECT_ICMP_UNREACH: u32 = 0;
 pub const NFT_REJECT_TCP_RST: u32 = 1;
 /// `NFT_REJECT_ICMPX_UNREACH` — family-independent ICMP unreachable, usable in
 /// an `inet` / `bridge` chain where the family isn't known at rule-load time.
+///
+/// The `ip` and `ip6` reject expressions do not handle it: their eval falls
+/// through to a plain drop. nlink therefore sends an ICMPX reject in those
+/// families as the ICMP/ICMPv6 code the kernel itself would map it to
+/// (#480).
 pub const NFT_REJECT_ICMPX_UNREACH: u32 = 2;
+
+/// `enum nft_reject_icmpx_code`: the family-independent unreachable codes an
+/// [`NFT_REJECT_ICMPX_UNREACH`] reject sends — "no route".
+pub const NFT_REJECT_ICMPX_NO_ROUTE: u8 = 0;
+/// ICMPX "port unreachable", what [`Rule::reject`] sends.
+pub const NFT_REJECT_ICMPX_PORT_UNREACH: u8 = 1;
+/// ICMPX "host unreachable".
+pub const NFT_REJECT_ICMPX_HOST_UNREACH: u8 = 2;
+/// ICMPX "administratively prohibited".
+pub const NFT_REJECT_ICMPX_ADMIN_PROHIBITED: u8 = 3;
 
 // Log
 pub const NFTA_LOG_PREFIX: u16 = 2;

@@ -190,6 +190,10 @@ mod nftables_lookups;
 #[path = "integration/nftables_intervals.rs"]
 mod nftables_intervals;
 
+// `reject` on traffic: refused, not left to time out, in every family (#480).
+#[path = "integration/nftables_reject.rs"]
+mod nftables_reject;
+
 // Sets of concatenated keys (ipset hash:ip,port / hash:net,port) on traffic.
 #[path = "integration/nftables_concat.rs"]
 mod nftables_concat;
