@@ -36,6 +36,33 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables: diffs and applies were not generation-checked, and
+  `apply_reconcile` retried deterministic failures (#482).** A diff took
+  3 + 2N dumps with no generation check across them. An apply then
+  committed against whatever the ruleset had become, so another `nft` run
+  in between left the kernel not as declared, or failed with ENOENT. And
+  `NftablesDiff::apply_reconcile` retried the same diff on EBUSY and
+  EAGAIN, which in nf_tables are not transient: EBUSY is "object in use",
+  module loads are replayed in the kernel, and writers serialize on the
+  nfnl mutex.
+  - A diff is now taken between two reads of the ruleset generation, and
+    taken again if a commit landed in between. It records the generation
+    in the new `NftablesDiff::generation`.
+  - `apply` sends it as `NFNL_BATCH_GENID`, so the kernel refuses a stale
+    batch with ERESTART (the new `Error::is_restart()`). After a set
+    update commits in its own batch, the rest expects the next generation.
+  - The new `NftablesConfig::apply_reconcile` diffs again on ERESTART.
+    `facade::apply::nftables_in` uses it. The diff-level `apply_reconcile`
+    no longer retries EBUSY or EAGAIN.
+  - `Transaction::expect_generation` exposes the check.
+
+  Root tests:
+  - A diff overtaken by an `nft add table` is refused, and nothing of it
+    lands; the config-level reconcile then converges. On master the stale
+    diff applied.
+  - One commit moves the generation by exactly one, and a set-growing
+    two-batch apply lands.
+
 - **A `Stack` dry run created the WireGuard links, committed the firewall
   and configured the tunnels (#501).** `apply_in_with` passed `ApplyOptions`
   to the network layer only. It always bootstrapped the WireGuard links
@@ -746,6 +773,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`NftablesConfig::apply_reconcile`, `NftablesDiff::generation`,
+  `Transaction::expect_generation`, `Error::is_restart()`,
+  `NFNL_BATCH_GENID`** (#482).
 
 - **`TcHandle::is_reserved_major()`** (#485).
 

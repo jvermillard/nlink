@@ -118,11 +118,22 @@ impl NftablesDiff {
         //    in the same batch as its new elements would refuse them
         //    (ENFILE) and fail the apply, every time. Changing a limit is
         //    the one change that is safe to make ahead of the rest.
+        //
+        //    Each batch carries the generation it expects (#482): the diff's
+        //    for the first, and for the main batch after a set update, the
+        //    one that update's own commit moved the ruleset to. Anything
+        //    else committing in between makes the kernel refuse the batch
+        //    with ERESTART, rather than apply a diff of a ruleset that is gone.
+        let mut genid = self.generation;
         if !self.sets_to_update.is_empty() {
-            self.update_sets(conn).await?;
+            self.update_sets(conn, genid).await?;
+            genid = genid.map(next_generation);
         }
 
         let mut tx: Transaction = conn.transaction();
+        if let Some(genid) = genid {
+            tx = tx.expect_generation(genid);
+        }
 
         // The batch runs in four phases, because the kernel releases what a
         // rule uses — sets, objects, jump targets — only when the message
@@ -339,8 +350,11 @@ impl NftablesDiff {
     /// Commit [`Self::sets_to_update`] as one batch, then read the sets back:
     /// a kernel older than 6.5 accepts the update and keeps the old size,
     /// and saying so beats a diff that reports the same update forever.
-    async fn update_sets(&self, conn: &Connection<Nftables>) -> Result<()> {
+    async fn update_sets(&self, conn: &Connection<Nftables>, genid: Option<u32>) -> Result<()> {
         let mut tx = conn.transaction();
+        if let Some(genid) = genid {
+            tx = tx.expect_generation(genid);
+        }
         for (table, family, declared) in &self.sets_to_update {
             tx = tx.update_set(declared.to_set(table, *family));
         }
@@ -387,18 +401,21 @@ impl NftablesDiff {
         Ok(())
     }
 
-    /// Apply with bounded retry on transient kernel-busy errors
-    /// (EBUSY / EAGAIN). Useful when another process may be
-    /// mutating the same ruleset concurrently — e.g. systemd-resolved
-    /// + a node firewall tool both calling nft simultaneously.
+    /// Apply, retrying a dump the kernel interrupted.
     ///
-    /// On EBUSY / EAGAIN, sleeps `opts.backoff` × 2^attempt and
-    /// retries up to `opts.max_retries` times. Non-transient errors
-    /// surface immediately (caller's responsibility to handle).
+    /// It used to retry `EBUSY` and `EAGAIN` as "transient conflicts". In
+    /// nf_tables `EBUSY` is "object in use", which is deterministic; module
+    /// loads are replayed inside the kernel; and concurrent writers
+    /// serialize on the nfnl mutex — so the retry only repeated a failure
+    /// (#482). What another writer *can* do is change the ruleset between
+    /// the diff and the apply. Then the apply is refused with `ERESTART`
+    /// ([`Error::is_restart`](crate::Error::is_restart)), and this diff is
+    /// stale for good: use
+    /// [`NftablesConfig::apply_reconcile`](super::NftablesConfig::apply_reconcile),
+    /// which diffs again.
     ///
-    /// Returns a [`ReconcileReport`] with the attempt count + the
-    /// diff that was finally applied. Total wall time is bounded
-    /// by Σ(opts.backoff × 2^i) for i in 0..max_retries.
+    /// Returns a [`ReconcileReport`] with the attempt count and the diff's
+    /// change count.
     ///
     /// # Example
     ///
@@ -433,10 +450,7 @@ impl NftablesDiff {
                         change_count: self.change_count(),
                     });
                 }
-                Err(e)
-                    if (e.is_busy() || e.is_try_again() || e.is_dump_interrupted())
-                        && attempt < opts.max_retries =>
-                {
+                Err(e) if e.is_dump_interrupted() && attempt < opts.max_retries => {
                     let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
                     tokio::time::sleep(backoff).await;
                     attempt += 1;
@@ -548,5 +562,74 @@ mod reconcile_tests {
         // the empty-diff fast path is exercised in apply()'s own
         // tests at the integration level.
         let _ = d;
+    }
+}
+
+/// The generation a successful commit at `genid` leaves the ruleset at:
+/// `nf_tables_commit` increments it, skipping 0.
+fn next_generation(genid: u32) -> u32 {
+    match genid.wrapping_add(1) {
+        0 => 1,
+        next => next,
+    }
+}
+
+impl super::NftablesConfig {
+    /// Diff and apply, and on `ERESTART` — the ruleset changed between the
+    /// diff and the commit, which the kernel refused (#482) — diff again
+    /// and apply that, up to `opts.max_retries` times. This is the reconcile
+    /// for a ruleset other processes write too; a diff alone cannot do it,
+    /// because a stale diff stays stale.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
+    /// use nlink::netlink::nftables::config::{NftablesConfig, ReconcileOptions};
+    ///
+    /// let cfg = NftablesConfig::new() /* ... */;
+    /// let report = cfg.apply_reconcile(&conn, ReconcileOptions::default()).await?;
+    /// if report.attempts > 1 {
+    ///     tracing::info!(attempts = report.attempts, "the ruleset moved under the diff");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn apply_reconcile(
+        &self,
+        conn: &Connection<Nftables>,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        let mut attempt: usize = 0;
+        loop {
+            let diff = self.diff(conn).await?;
+            match diff.apply(conn).await {
+                Ok(_) => {
+                    return Ok(ReconcileReport {
+                        attempts: attempt + 1,
+                        change_count: diff.change_count(),
+                    });
+                }
+                Err(e)
+                    if (e.is_restart() || e.is_dump_interrupted())
+                        && attempt < opts.max_retries =>
+                {
+                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::next_generation;
+
+    #[test]
+    fn the_generation_after_a_commit_skips_zero() {
+        assert_eq!(next_generation(7), 8);
+        assert_eq!(next_generation(u32::MAX), 1);
     }
 }

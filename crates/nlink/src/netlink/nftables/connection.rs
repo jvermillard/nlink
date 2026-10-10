@@ -946,7 +946,13 @@ impl Connection<Nftables> {
     ///    skips the end-seq ACK (unexpected on Linux ≥ 4.6 per
     ///    `net/netfilter/nfnetlink.c`) the call fails fast with
     ///    `Error::Timeout` instead of hanging.
-    async fn send_batch(&self, mut messages: Vec<Vec<u8>>) -> Result<()> {
+    async fn send_batch(&self, messages: Vec<Vec<u8>>) -> Result<()> {
+        self.send_batch_at(messages, None).await
+    }
+
+    /// [`send_batch`](Self::send_batch), refused by the kernel with
+    /// `ERESTART` unless the ruleset is still at `genid` (#482).
+    async fn send_batch_at(&self, mut messages: Vec<Vec<u8>>, genid: Option<u32>) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
@@ -961,6 +967,9 @@ impl Connection<Nftables> {
             res_id: 10u16.to_be(), // NFNL_SUBSYS_NFTABLES
         };
         begin.append(&nfgenmsg);
+        if let Some(genid) = genid {
+            begin.append_attr_u32_be(NFNL_BATCH_GENID, genid);
+        }
         let begin_seq = self.socket().next_seq();
         begin.set_seq(begin_seq);
         begin.set_pid(self.socket().pid());
@@ -1796,6 +1805,9 @@ pub struct Transaction {
     /// `Self`): an element that does not fit its set, say. `commit` reports
     /// it instead of sending the batch, so nothing is dropped silently.
     error: Option<Error>,
+    /// The ruleset generation the batch must apply at; see
+    /// [`expect_generation`](Self::expect_generation).
+    genid: Option<u32>,
 }
 
 impl Transaction {
@@ -1804,7 +1816,18 @@ impl Transaction {
             messages: Vec::new(),
             set_id_counter: 1,
             error: None,
+            genid: None,
         }
+    }
+
+    /// Commit only if the ruleset is still at generation `genid`
+    /// ([`Connection::generation`]): the kernel refuses the whole batch
+    /// with `ERESTART` ([`Error::is_restart`]) if anything changed it in
+    /// between — what `nft` does to make its check-then-commit atomic
+    /// (#482).
+    pub fn expect_generation(mut self, genid: u32) -> Self {
+        self.genid = Some(genid);
+        self
     }
 
     /// An empty transaction, for unit tests that inspect the bytes.
@@ -2230,7 +2253,7 @@ impl Transaction {
         if let Some(error) = self.error {
             return Err(error);
         }
-        conn.send_batch(self.messages).await
+        conn.send_batch_at(self.messages, self.genid).await
     }
 }
 
