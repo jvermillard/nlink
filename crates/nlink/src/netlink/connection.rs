@@ -1727,14 +1727,8 @@ impl Connection<Route> {
         &self,
         name: impl Into<InterfaceRef>,
     ) -> Result<Option<LinkMessage>> {
-        let iface = name.into();
-        match iface {
-            InterfaceRef::Name(ref name_str) => {
-                let links = self.get_links().await?;
-                Ok(links
-                    .into_iter()
-                    .find(|l| l.name.as_deref() == Some(name_str)))
-            }
+        match name.into() {
+            InterfaceRef::Name(name) => self.get_one_link(0, Some(&name)).await,
             InterfaceRef::Index(idx) => self.get_link_by_index(idx).await,
         }
     }
@@ -1744,8 +1738,52 @@ impl Connection<Route> {
     /// Returns `None` if the interface doesn't exist.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_by_index"))]
     pub async fn get_link_by_index(&self, index: u32) -> Result<Option<LinkMessage>> {
-        let links = self.get_links().await?;
-        Ok(links.into_iter().find(|l| l.ifindex() == index))
+        self.get_one_link(index, None).await
+    }
+
+    /// One `RTM_GETLINK` for one link, by index or name (#495).
+    ///
+    /// Both lookups used to dump every link and search the result: O(links)
+    /// per call behind every name-taking method, each dump open to
+    /// `DumpInterrupted` from an unrelated change. A name also matches the
+    /// link's alternative names (`ip link property add … altname`): the
+    /// kernel looks names up in one table. One longer than `IFNAMSIZ - 1`
+    /// can only be an altname, and goes as `IFLA_ALT_IFNAME`, which
+    /// `IFLA_IFNAME`'s policy would refuse.
+    async fn get_one_link(&self, index: u32, name: Option<&str>) -> Result<Option<LinkMessage>> {
+        const IFNAMSIZ: usize = 16;
+        const ALTIFNAMSIZ: usize = 128;
+
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETLINK, NLM_F_REQUEST);
+        let Ok(index) = i32::try_from(index) else {
+            return Ok(None);
+        };
+        builder.append(&IfInfoMsg::new().with_index(index));
+        let by_altname = match name {
+            None if index == 0 => return Ok(None),
+            None => false,
+            Some(name) if name.len() >= ALTIFNAMSIZ => return Ok(None),
+            Some(name) if name.len() >= IFNAMSIZ => {
+                builder.append_attr_str(super::types::link::IflaAttr::AltIfname as u16, name);
+                true
+            }
+            Some(name) => {
+                builder.append_attr_str(super::types::link::IflaAttr::Ifname as u16, name);
+                false
+            }
+        };
+        // Boxed for the reason `send_dump` is: every name-taking helper
+        // resolves through here before it sends anything, so this sits on
+        // nlink's deepest await chains. Unboxed, the facade's
+        // `apply::network` overflowed rustc's query depth (#310, #315).
+        match Box::pin(self.send_request(builder)).await {
+            Ok(response) => self.parse_response(&response).map(Some),
+            Err(e) if e.is_no_device() => Ok(None),
+            // A kernel without altnames (< 5.5) ignores IFLA_ALT_IFNAME and
+            // finds no name at all; no link of that name can exist there.
+            Err(e) if by_altname && e.is_invalid_argument() => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Wait for an interface to reach the `IFF_UP` state.
@@ -4113,6 +4151,36 @@ mod send_sync_tests {
                 .unwrap_or_else(|_| panic!("lookup {lookup} lost its reply to the driver"))
                 .expect("found");
             assert_eq!(info.id, GENL_ID_CTRL);
+        }
+    }
+
+    /// #495: a link by index or name is one `RTM_GETLINK`, and a name the
+    /// kernel does not know — or cannot hold — is `None`, not an error.
+    #[tokio::test]
+    async fn a_link_is_fetched_by_index_or_name() {
+        let conn = Connection::<Route>::new().expect("socket open");
+        let lo = conn.get_link_by_name("lo").await.unwrap().expect("lo");
+        assert_eq!(lo.ifindex(), 1, "lo is the first device in every netns");
+        let again = conn
+            .get_link_by_index(1)
+            .await
+            .unwrap()
+            .expect("lo by index");
+        assert_eq!(again.name(), Some("lo"));
+        assert!(again.stats.is_some(), "the reply carries what a dump does");
+        for missing in ["nosuch0", "nlink-no-such-iface", &"x".repeat(200)] {
+            let got = conn.get_link_by_name(missing).await;
+            assert!(
+                got.as_ref().is_ok_and(Option::is_none),
+                "{missing}: {got:?}"
+            );
+        }
+        for missing in [0, 0x7fff_fff0, u32::MAX] {
+            let got = conn.get_link_by_index(missing).await;
+            assert!(
+                got.as_ref().is_ok_and(Option::is_none),
+                "{missing}: {got:?}"
+            );
         }
     }
 }

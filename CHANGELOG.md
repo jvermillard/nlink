@@ -32,6 +32,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`get_link_by_name`/`get_link_by_index` dumped every link to find one,
+  and never found an alternative name (#495).** Both called `get_links()`
+  and searched the result. They sit behind `resolve_interface`, which
+  about 116 name-taking methods use (`set_link_up(name)`,
+  `add_address(name, …)`, `replace_qdisc(name, …)`, `wait_link_up`'s
+  poll). So nlink-lab's deploys did thousands of full dumps, and each
+  could fail with `DumpInterrupted` because of an unrelated link change.
+  Each lookup is now one `RTM_GETLINK`, by `ifi_index` or by name.
+  ENODEV means `None`. A name is sent as `IFLA_IFNAME`, which the kernel
+  also matches against alternative names, or as `IFLA_ALT_IFNAME` when it
+  is longer than 15 bytes. A unit test fetches `lo` both ways and gets
+  `None` for absent names and indexes. A root test finds a dummy by a
+  short and a 34-byte altname and brings it up by the long one; on master
+  `alt0` was `None`.
+
 - **stats: a counter that went backwards read as a 64-bit wrap, about
   1.8e19 bytes/s (#506).** `StatsSnapshot::rates` took any decrease for a
   wrap. A 64-bit wrap never happens in practice; a reset happens all the

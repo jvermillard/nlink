@@ -787,3 +787,39 @@ async fn a_bridge_created_with_an_mtu_keeps_it() -> Result<()> {
 async fn link_mtu(conn: &nlink::Connection<nlink::Route>, name: &str) -> Result<Option<u32>> {
     Ok(conn.get_link_by_name(name).await?.and_then(|l| l.mtu()))
 }
+
+/// #495: a name lookup is one `RTM_GETLINK`, and so finds a link by its
+/// alternative names too — a short one through `IFLA_IFNAME`, which the
+/// kernel looks up in the same table, and one longer than 15 bytes
+/// through `IFLA_ALT_IFNAME`. Searching a full dump by primary name, as
+/// it used to, found neither.
+#[tokio::test]
+async fn a_link_is_found_by_its_alternative_names() -> Result<()> {
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("altname")?;
+    let conn = ns.connection()?;
+    conn.add_link(nlink::netlink::link::DummyLink::new("d0"))
+        .await?;
+    let long = "dummy-with-a-long-alternative-name";
+    ns.exec(
+        "ip",
+        &["link", "property", "add", "dev", "d0", "altname", "alt0"],
+    )?;
+    ns.exec(
+        "ip",
+        &["link", "property", "add", "dev", "d0", "altname", long],
+    )?;
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+
+    for name in ["alt0", long] {
+        let found = conn.get_link_by_name(name).await?;
+        assert_eq!(found.map(|l| l.ifindex()), Some(d0), "{name}");
+    }
+    // Every name-taking method resolves through it.
+    conn.set_link_up(long).await?;
+    let up = conn.get_link_by_index(d0).await?.expect("d0");
+    assert!(up.is_up(), "set_link_up by a long altname");
+    Ok(())
+}
