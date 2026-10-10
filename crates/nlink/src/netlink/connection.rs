@@ -861,6 +861,7 @@ impl<P: ProtocolState> Connection<P> {
     /// Respects the configured timeout. This is a low-level method.
     /// Prefer using typed methods like `get_links()`, `add_route()`, etc.
     pub(crate) async fn send_request(&self, builder: MessageBuilder) -> Result<Vec<u8>> {
+        builder.check_size()?;
         self.with_timeout(self.send_request_inner(builder)).await
     }
 
@@ -869,6 +870,7 @@ impl<P: ProtocolState> Connection<P> {
     /// Respects the configured timeout. This is a low-level method.
     /// Prefer using typed methods like `add_link()`, `del_route()`, etc.
     pub(crate) async fn send_ack(&self, builder: MessageBuilder) -> Result<()> {
+        builder.check_size()?;
         self.with_timeout(self.send_ack_inner(builder)).await
     }
 
@@ -887,6 +889,7 @@ impl<P: ProtocolState> Connection<P> {
     /// This is a low-level method. Prefer typed methods like
     /// `get_links()`, `get_routes()`, etc.
     pub(crate) async fn send_dump(&self, builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+        builder.check_size()?;
         // `Box::pin` ends the future-layout recursion here, and this is the
         // one place it has to happen. Every `async fn` that awaits another
         // embeds the callee's future in its own, so rustc computes a
@@ -3658,6 +3661,7 @@ impl Connection<Generic> {
     /// that read one left the ACK queued, and the next request on the
     /// socket took it for its own response.
     async fn genl_request(&self, mut builder: MessageBuilder) -> Result<(u32, Vec<Vec<u8>>)> {
+        builder.check_size()?;
         // Session before the timeout, so the lock (mutex mode) or the seq
         // registration (dispatcher mode) spans the whole window.
         let seq = self.socket.next_seq();

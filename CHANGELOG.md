@@ -36,6 +36,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **WireGuard `SET_DEVICE` put every peer in one nest, which overflowed the
+  u16 `nla_len` (#500).** Around 400 peers, or about 1,600 IPv6
+  allowed-ips on one peer, hit `nest_end`'s `debug_assert!` in debug
+  builds; release builds clamped the length and sent a malformed message.
+  The set is now split the way `wg(8)` splits it, into messages of at most
+  32 KiB. The device's own settings and `WGDEVICE_F_REPLACE_PEERS` go in
+  the first message. A peer continued into the next message repeats only
+  its public key and the rest of its allowed-ips, without
+  `WGPEER_F_REPLACE_ALLOWEDIPS`. `MessageBuilder::nest_end` no longer
+  panics; it records the oversize (`oversized_nest()`), and the send
+  paths and nftables transactions refuse such a message in every build.
+  A root test sets 500 peers and one with 2,000 IPv6 allowed-ips, and
+  reads all of them back; on master it panicked at 80,004 bytes. Unit
+  tests cover the plan, and the refusal of an 80 KB nest.
+
 - **GENL interface lookups and `Diagnostics::watch()` used the process's
   namespace, not the connection's (#497).** The WireGuard, ethtool and
   MACsec connections resolved an ifindex, or a name, with a new
@@ -794,6 +809,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`MessageBuilder::oversized_nest()`** (#500).
 
 - **`NftablesConfig::apply_reconcile`, `NftablesDiff::generation`,
   `Transaction::expect_generation`, `Error::is_restart()`,
