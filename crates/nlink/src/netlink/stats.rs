@@ -143,6 +143,34 @@ pub struct LinkRates {
 }
 
 impl LinkRates {
+    /// The rates between two samples of one link, `elapsed` apart — what
+    /// [`StatsSnapshot::rates`] computes per link, for a caller that keeps
+    /// the previous sample itself.
+    ///
+    /// `None` when the samples cannot be compared: a different name at
+    /// the ifindex (another link), a counter that went backwards (the link
+    /// was recreated, or its counters reset), or no time between them. A
+    /// decrease used to be taken for a 64-bit wrap, which never happens in
+    /// practice, and reported about 1.8e19 bytes/s (#506).
+    pub fn between(prev: &LinkStats, now: &LinkStats, elapsed: Duration) -> Option<Self> {
+        let secs = elapsed.as_secs_f64();
+        if secs <= 0.0 || prev.name != now.name {
+            return None;
+        }
+        let rate = |now: u64, prev: u64| Some(now.checked_sub(prev)? as f64 / secs);
+        Some(Self {
+            name: now.name.clone(),
+            rx_bytes_per_sec: rate(now.rx_bytes, prev.rx_bytes)?,
+            tx_bytes_per_sec: rate(now.tx_bytes, prev.tx_bytes)?,
+            rx_packets_per_sec: rate(now.rx_packets, prev.rx_packets)?,
+            tx_packets_per_sec: rate(now.tx_packets, prev.tx_packets)?,
+            rx_errors_per_sec: rate(now.rx_errors, prev.rx_errors)?,
+            tx_errors_per_sec: rate(now.tx_errors, prev.tx_errors)?,
+            rx_dropped_per_sec: rate(now.rx_dropped, prev.rx_dropped)?,
+            tx_dropped_per_sec: rate(now.tx_dropped, prev.tx_dropped)?,
+        })
+    }
+
     /// Total bytes per second (RX + TX).
     pub fn total_bytes_per_sec(&self) -> f64 {
         self.rx_bytes_per_sec + self.tx_bytes_per_sec
@@ -224,6 +252,31 @@ pub struct TcRates {
 }
 
 impl TcRates {
+    /// The rates between two samples of one qdisc or class, `elapsed`
+    /// apart; see [`LinkRates::between`].
+    ///
+    /// `None` when the kind changed (a qdisc replaced by another kind at
+    /// the same handle) or bytes or packets went backwards (a recreate)
+    /// (#506). Drops, overlimits and requeues are 32-bit in the kernel and
+    /// do wrap, so with bytes and packets moving forward a decrease there
+    /// is taken as one wrap.
+    pub fn between(prev: &TcStats, now: &TcStats, elapsed: Duration) -> Option<Self> {
+        let secs = elapsed.as_secs_f64();
+        if secs <= 0.0 || prev.kind != now.kind {
+            return None;
+        }
+        let rate64 = |now: u64, prev: u64| Some(now.checked_sub(prev)? as f64 / secs);
+        let rate32 = |now: u32, prev: u32| f64::from(now.wrapping_sub(prev)) / secs;
+        Some(Self {
+            kind: now.kind.clone(),
+            bytes_per_sec: rate64(now.bytes, prev.bytes)?,
+            packets_per_sec: rate64(now.packets, prev.packets)?,
+            drops_per_sec: rate32(now.drops, prev.drops),
+            overlimits_per_sec: rate32(now.overlimits, prev.overlimits),
+            requeues_per_sec: rate32(now.requeues, prev.requeues),
+        })
+    }
+
     /// Bandwidth in bits per second.
     pub fn bps(&self) -> f64 {
         self.bytes_per_sec * 8.0
@@ -306,70 +359,40 @@ impl StatsSnapshot {
 
     /// Compute rates between this snapshot and a previous one.
     ///
-    /// Returns rate statistics for all interfaces and TC objects that exist
-    /// in both snapshots.
+    /// Returns rate statistics for every interface and TC object that is
+    /// in both snapshots and can be compared — see [`LinkRates::between`]
+    /// and [`TcRates::between`]. One that was recreated, renamed or reset
+    /// in between has no entry for this interval rather than a rate of
+    /// about 1.8e19 (#506).
     pub fn rates(&self, previous: &StatsSnapshot, duration: Duration) -> RatesSnapshot {
-        let secs = duration.as_secs_f64();
-        if secs <= 0.0 {
-            return RatesSnapshot::default();
-        }
-
         let mut rates = RatesSnapshot::new();
-
-        // Compute link rates
         for (ifindex, current) in &self.links {
-            if let Some(prev) = previous.links.get(ifindex) {
-                rates.links.insert(
-                    *ifindex,
-                    LinkRates {
-                        name: current.name.clone(),
-                        rx_bytes_per_sec: delta_u64(current.rx_bytes, prev.rx_bytes) / secs,
-                        tx_bytes_per_sec: delta_u64(current.tx_bytes, prev.tx_bytes) / secs,
-                        rx_packets_per_sec: delta_u64(current.rx_packets, prev.rx_packets) / secs,
-                        tx_packets_per_sec: delta_u64(current.tx_packets, prev.tx_packets) / secs,
-                        rx_errors_per_sec: delta_u64(current.rx_errors, prev.rx_errors) / secs,
-                        tx_errors_per_sec: delta_u64(current.tx_errors, prev.tx_errors) / secs,
-                        rx_dropped_per_sec: delta_u64(current.rx_dropped, prev.rx_dropped) / secs,
-                        tx_dropped_per_sec: delta_u64(current.tx_dropped, prev.tx_dropped) / secs,
-                    },
-                );
+            if let Some(rate) = previous
+                .links
+                .get(ifindex)
+                .and_then(|prev| LinkRates::between(prev, current, duration))
+            {
+                rates.links.insert(*ifindex, rate);
             }
         }
-
-        // Compute qdisc rates
         for (key, current) in &self.qdiscs {
-            if let Some(prev) = previous.qdiscs.get(key) {
-                rates.qdiscs.insert(
-                    *key,
-                    TcRates {
-                        kind: current.kind.clone(),
-                        bytes_per_sec: delta_u64(current.bytes, prev.bytes) / secs,
-                        packets_per_sec: delta_u64(current.packets, prev.packets) / secs,
-                        drops_per_sec: delta_u32(current.drops, prev.drops) / secs,
-                        overlimits_per_sec: delta_u32(current.overlimits, prev.overlimits) / secs,
-                        requeues_per_sec: delta_u32(current.requeues, prev.requeues) / secs,
-                    },
-                );
+            if let Some(rate) = previous
+                .qdiscs
+                .get(key)
+                .and_then(|prev| TcRates::between(prev, current, duration))
+            {
+                rates.qdiscs.insert(*key, rate);
             }
         }
-
-        // Compute class rates
         for (key, current) in &self.classes {
-            if let Some(prev) = previous.classes.get(key) {
-                rates.classes.insert(
-                    *key,
-                    TcRates {
-                        kind: current.kind.clone(),
-                        bytes_per_sec: delta_u64(current.bytes, prev.bytes) / secs,
-                        packets_per_sec: delta_u64(current.packets, prev.packets) / secs,
-                        drops_per_sec: delta_u32(current.drops, prev.drops) / secs,
-                        overlimits_per_sec: delta_u32(current.overlimits, prev.overlimits) / secs,
-                        requeues_per_sec: delta_u32(current.requeues, prev.requeues) / secs,
-                    },
-                );
+            if let Some(rate) = previous
+                .classes
+                .get(key)
+                .and_then(|prev| TcRates::between(prev, current, duration))
+            {
+                rates.classes.insert(*key, rate);
             }
         }
-
         rates
     }
 }
@@ -404,28 +427,6 @@ impl RatesSnapshot {
     /// Get total bytes per second across all interfaces.
     pub fn total_bytes_per_sec(&self) -> f64 {
         self.total_rx_bytes_per_sec() + self.total_tx_bytes_per_sec()
-    }
-}
-
-/// Compute delta between two u64 values, handling counter wrap.
-#[inline]
-fn delta_u64(current: u64, previous: u64) -> f64 {
-    if current >= previous {
-        (current - previous) as f64
-    } else {
-        // Counter wrapped - assume 64-bit wrap
-        (u64::MAX - previous + current + 1) as f64
-    }
-}
-
-/// Compute delta between two u32 values, handling counter wrap.
-#[inline]
-fn delta_u32(current: u32, previous: u32) -> f64 {
-    if current >= previous {
-        (current - previous) as f64
-    } else {
-        // Counter wrapped - assume 32-bit wrap
-        (u32::MAX - previous + current + 1) as f64
     }
 }
 
@@ -582,20 +583,67 @@ impl StatsTracker {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_delta_u64() {
-        assert_eq!(delta_u64(100, 50), 50.0);
-        assert_eq!(delta_u64(50, 50), 0.0);
-        // Counter wrap
-        assert_eq!(delta_u64(10, u64::MAX - 10), 21.0);
+    fn link(name: &str, rx_bytes: u64) -> LinkStats {
+        LinkStats {
+            name: Some(name.to_string()),
+            rx_bytes,
+            ..Default::default()
+        }
     }
 
+    fn tc(kind: &str, bytes: u64, drops: u32) -> TcStats {
+        TcStats {
+            kind: Some(kind.to_string()),
+            bytes,
+            packets: bytes / 100,
+            drops,
+            ..Default::default()
+        }
+    }
+
+    /// #506: a counter that goes backwards is a reset — a recreated link,
+    /// a replaced qdisc — not a 64-bit wrap. Taken for a wrap it reported
+    /// about 1.8e19 bytes/s.
     #[test]
-    fn test_delta_u32() {
-        assert_eq!(delta_u32(100, 50), 50.0);
-        assert_eq!(delta_u32(50, 50), 0.0);
-        // Counter wrap
-        assert_eq!(delta_u32(10, u32::MAX - 10), 21.0);
+    fn a_counter_that_goes_backwards_is_a_reset_not_a_wrap() {
+        let second = Duration::from_secs(1);
+        let rates = LinkRates::between(&link("eth0", 1000), &link("eth0", 3000), second).unwrap();
+        assert_eq!(rates.rx_bytes_per_sec, 2000.0);
+        assert!(LinkRates::between(&link("eth0", 5000), &link("eth0", 10), second).is_none());
+
+        let mut prev = StatsSnapshot::new();
+        prev.links.insert(2, link("eth0", 5000));
+        prev.qdiscs.insert((2, 0x10000), tc("htb", 9000, 0));
+        let mut now = StatsSnapshot::new();
+        now.links.insert(2, link("eth0", 10));
+        now.qdiscs.insert((2, 0x10000), tc("htb", 100, 0));
+        let rates = now.rates(&prev, second);
+        assert!(rates.links.is_empty(), "{:?}", rates.links);
+        assert!(rates.qdiscs.is_empty(), "{:?}", rates.qdiscs);
+    }
+
+    /// Another link at the ifindex, or another kind of qdisc at the
+    /// handle, is not the object the previous sample was of.
+    #[test]
+    fn another_object_under_the_same_key_has_no_rate() {
+        let second = Duration::from_secs(1);
+        assert!(LinkRates::between(&link("eth0", 10), &link("eth1", 20), second).is_none());
+        assert!(TcRates::between(&tc("htb", 10, 0), &tc("prio", 20, 0), second).is_none());
+        assert!(LinkRates::between(&link("eth0", 10), &link("eth0", 20), Duration::ZERO).is_none());
+    }
+
+    /// The 32-bit queue counters do wrap; with bytes and packets moving
+    /// forward, a smaller drop count is one wrap.
+    #[test]
+    fn a_32_bit_drop_counter_wraps() {
+        let rates = TcRates::between(
+            &tc("htb", 1000, u32::MAX - 9),
+            &tc("htb", 2000, 10),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(rates.drops_per_sec, 20.0);
+        assert_eq!(rates.bytes_per_sec, 1000.0);
     }
 
     #[test]
