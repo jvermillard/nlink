@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **`StackApplyReport` gains `dry_run: Option<StackDiff>` (#501).** A
+  struct literal must add the field, or build the report with
+  `..Default::default()`.
+
 - **`TcStatsRateEst` is 64-bit, and `TcMessage::{bps, pps}` return `u64`
   (#489).** `TCA_STATS_RATE_EST` caps the byte rate at `u32::MAX` (about
   34 Gbit/s), and the kernel sends the real value in
@@ -31,6 +35,19 @@ All notable changes to this project will be documented in this file.
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **A `Stack` dry run created the WireGuard links, committed the firewall
+  and configured the tunnels (#501).** `apply_in_with` passed `ApplyOptions`
+  to the network layer only. It always bootstrapped the WireGuard links
+  first, and always applied the nftables and WireGuard layers. With
+  `dry_run` it now touches nothing and returns the `StackDiff` in the
+  report's new `dry_run` field; `is_noop()` and `change_count()` read it.
+  The pre-flight diff also gets `purge_tables` now, which it dropped. And
+  the WireGuard links are no longer bootstrapped twice. A root test dry
+  runs a stack with a dummy link, an nftables table and a WireGuard
+  device, then finds none of them; on master `wgd0` existed afterwards.
+  Reusing the pre-flight diff for the apply, rather than diffing each
+  layer again, is #519.
 
 - **The rate and impairment recipes could not share a device with an
   ingress or clsact qdisc (#485).** `PerHostLimiter` always, and

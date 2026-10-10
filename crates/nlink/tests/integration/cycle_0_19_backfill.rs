@@ -244,6 +244,55 @@ async fn plan_200_stack_apply_network_only_layer() -> Result<()> {
     .await
 }
 
+/// #501 — `dry_run` reached the network layer only. A "dry run" created
+/// the WireGuard links and brought them up, committed the nftables layer
+/// and configured the tunnels. Now nothing is touched, and the report
+/// carries the diff.
+#[tokio::test]
+async fn a_stack_dry_run_touches_nothing() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("wireguard", "nf_tables", "dummy");
+    with_timeout(async {
+        use nlink::netlink::Nftables;
+        use nlink::netlink::config::ApplyOptions;
+        use nlink::netlink::genl::wireguard::WireguardConfig;
+        use nlink::netlink::namespace::NamespaceSpec;
+        use nlink::netlink::nftables::{Family, config::NftablesConfig};
+
+        let ns = TestNamespace::new("p501-dry")?;
+        let stack = nlink::facade::Stack::new()
+            .network(NetworkConfig::new().link("d0", |b| b.dummy()))
+            .nftables(NftablesConfig::new().table("dry", Family::Inet, |t| t))
+            .wireguard(WireguardConfig::new().device("wgd0", |d| d.listen_port(51997)));
+
+        let report = stack
+            .apply_in_with(
+                NamespaceSpec::Named(ns.name()),
+                ApplyOptions::default().with_dry_run(true),
+            )
+            .await?;
+        let diff = report.dry_run.as_ref().expect("a dry run carries the diff");
+        assert!(diff.change_count() >= 3, "link, table, device: {diff:?}");
+        assert!(report.network.is_none() && report.wireguard.is_none());
+        assert!(!report.is_noop());
+
+        let conn = ns.connection()?;
+        for name in ["d0", "wgd0"] {
+            assert!(
+                conn.get_link_by_name(name).await?.is_none(),
+                "a dry run created {name}"
+            );
+        }
+        let nft = ns.connection_for::<Nftables>()?;
+        assert!(
+            nft.list_tables().await?.is_empty(),
+            "a dry run committed the nftables layer"
+        );
+        Ok(())
+    })
+    .await
+}
+
 /// #330 — a stack whose network layer addresses the tunnel and routes
 /// via a peer's tunnel address. Before the fix the WireGuard links were
 /// created *after* the network layer (and left down), so this failed

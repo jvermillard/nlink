@@ -127,6 +127,16 @@ pub async fn wireguard_in(
     cfg: &WireguardConfig,
 ) -> Result<crate::netlink::genl::wireguard::WireguardApplyResult> {
     wireguard_devices_in(ns.clone(), cfg).await?;
+    wireguard_keys_in(ns, cfg).await
+}
+
+/// The GENL half of [`wireguard_in`]: keys, listen ports and peers on
+/// links that already exist. [`Stack`](super::Stack) creates the links
+/// first and calls this, rather than bootstrapping them twice (#501).
+pub(crate) async fn wireguard_keys_in(
+    ns: NamespaceSpec<'_>,
+    cfg: &WireguardConfig,
+) -> Result<crate::netlink::genl::wireguard::WireguardApplyResult> {
     let conn: Connection<Wireguard> = ns.connection_async().await?;
     cfg.apply(&conn).await
 }
