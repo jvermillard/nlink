@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **`DiagnosticsConfig` gains `warn_no_default_route` (#509).** Struct
+  literals need it, or `..Default::default()`.
+
 - **`StackApplyReport` gains `dry_run: Option<StackDiff>` (#501).** A
   struct literal must add the field, or build the report with
   `..Default::default()`.
@@ -35,6 +38,32 @@ All notable changes to this project will be documented in this file.
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **Diagnostics: `check_connectivity` picked the first route that contained
+  the destination, and four heuristics misreported (#509).**
+  - `check_connectivity` searched a dump of every table with `find` and
+    called that "longest prefix match". The default route won for every
+    destination, policy rules were ignored, and a blackhole counted as
+    reachable. It now asks the kernel, as `ip route get` does, through the
+    new `Connection::lookup_route(dest)`. A lookup that ends in an
+    unreachable, prohibit or blackhole route, or in none, is a `NoRoute`
+    issue that says which.
+  - Loss and error rates used lifetime counters even with a previous
+    sample, so one old burst flagged an interface forever. They are the
+    interval's now; a counter that went backwards falls back to lifetime.
+  - The qdisc drop rate was `drops / packets`; it is out of
+    `packets + drops`.
+  - netem's drops, which are its configured loss, were a "dropping X%"
+    warning. They are an Info issue that says so, and `find_bottleneck`
+    skips netem.
+  - A failed route dump was swallowed into an empty list, which then
+    raised a spurious "no default route". It is an error now, and the
+    warning can be turned off (`warn_no_default_route`).
+
+  A root test checks that a /16 beats the default route and that a
+  blackhole is reported as one; on master the default route won. Another
+  turns the warning off. Unit tests cover the drop maths, netem, and
+  rates since the previous sample.
 
 - **WireGuard `SET_DEVICE` put every peer in one nest, which overflowed the
   u16 `nla_len` (#500).** Around 400 peers, or about 1,600 IPv6
@@ -809,6 +838,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Connection::lookup_route(dest)`**: the kernel's route for a
+  destination, `ip route get` semantics (#509).
 
 - **`MessageBuilder::oversized_nest()`** (#500).
 

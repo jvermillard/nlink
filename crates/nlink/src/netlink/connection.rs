@@ -2231,6 +2231,38 @@ impl Connection<Route> {
             .collect())
     }
 
+    /// The route the kernel would use to reach `dest`: a FIB lookup, what
+    /// `ip route get` does — policy rules, the longest prefix, the route's
+    /// type — rather than a search of the dump.
+    ///
+    /// The kernel answers a lookup that ends in a route it will not use
+    /// with an error, and nlink passes it on: `ENETUNREACH` when nothing
+    /// matches ([`Error::is_network_unreachable`]), `EHOSTUNREACH` for an
+    /// `unreachable` route, `EACCES` for `prohibit`
+    /// ([`Error::is_permission_denied`]), `EINVAL` for `blackhole`.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// let route = conn.lookup_route("192.0.2.1".parse()?).await?;
+    /// println!("via {:?} dev {:?}", route.gateway(), route.oif());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_route"))]
+    pub async fn lookup_route(&self, dest: std::net::IpAddr) -> Result<RouteMessage> {
+        use crate::netlink::types::route::{RtMsg, RtaAttr};
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETROUTE, NLM_F_REQUEST);
+        let (family, len, addr) = match dest {
+            std::net::IpAddr::V4(a) => (libc::AF_INET, 32, a.octets().to_vec()),
+            std::net::IpAddr::V6(a) => (libc::AF_INET6, 128, a.octets().to_vec()),
+        };
+        builder.append(&RtMsg::new().with_family(family as u8).with_dst_len(len));
+        builder.append_attr(RtaAttr::Dst as u16, &addr);
+        let response = self.send_request(builder).await?;
+        self.parse_response(&response)
+    }
+
     /// Get a specific IPv4 route by destination and prefix length.
     ///
     /// Uses RTM_GETROUTE without NLM_F_DUMP to query the kernel directly,
