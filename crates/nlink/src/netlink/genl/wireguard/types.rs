@@ -9,7 +9,7 @@ use std::{
 pub const WG_KEY_LEN: usize = 32;
 
 /// WireGuard device information.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WgDevice {
     /// Interface index.
     pub ifindex: Option<u32>,
@@ -31,6 +31,27 @@ pub struct WgDevice {
     pub peers: Vec<WgPeer>,
 }
 
+impl std::fmt::Debug for WgDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("WgDevice")
+            .field("ifindex", &self.ifindex)
+            .field("ifname", &self.ifname)
+            .field(
+                "private_key",
+                &self
+                    .private_key
+                    .as_ref()
+                    .map(|k| crate::util::SecretBytes(k.as_ref())),
+            )
+            .field("public_key", &self.public_key)
+            .field("listen_port", &self.listen_port)
+            .field("fwmark", &self.fwmark)
+            .field("peers", &self.peers)
+            .finish()
+    }
+}
+
 impl WgDevice {
     /// Create a new empty device.
     pub fn new() -> Self {
@@ -44,7 +65,7 @@ impl WgDevice {
 }
 
 /// Builder for WgDevice configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 #[must_use = "builders do nothing unless used"]
 pub struct WgDeviceBuilder {
     private_key: Option<[u8; WG_KEY_LEN]>,
@@ -52,6 +73,25 @@ pub struct WgDeviceBuilder {
     fwmark: Option<u32>,
     replace_peers: bool,
     peers: Vec<WgPeerBuilder>,
+}
+
+impl std::fmt::Debug for WgDeviceBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("WgDeviceBuilder")
+            .field(
+                "private_key",
+                &self
+                    .private_key
+                    .as_ref()
+                    .map(|k| crate::util::SecretBytes(k.as_ref())),
+            )
+            .field("listen_port", &self.listen_port)
+            .field("fwmark", &self.fwmark)
+            .field("replace_peers", &self.replace_peers)
+            .field("peers", &self.peers)
+            .finish()
+    }
 }
 
 impl WgDeviceBuilder {
@@ -117,7 +157,7 @@ impl WgDeviceBuilder {
 }
 
 /// WireGuard peer information.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WgPeer {
     /// Peer's public key (identifies the peer).
     pub public_key: [u8; WG_KEY_LEN],
@@ -137,6 +177,29 @@ pub struct WgPeer {
     pub allowed_ips: Vec<AllowedIp>,
     /// Protocol version (typically 1).
     pub protocol_version: Option<u32>,
+}
+
+impl std::fmt::Debug for WgPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("WgPeer")
+            .field("public_key", &self.public_key)
+            .field(
+                "preshared_key",
+                &self
+                    .preshared_key
+                    .as_ref()
+                    .map(|k| crate::util::SecretBytes(k.as_ref())),
+            )
+            .field("endpoint", &self.endpoint)
+            .field("persistent_keepalive", &self.persistent_keepalive)
+            .field("last_handshake", &self.last_handshake)
+            .field("rx_bytes", &self.rx_bytes)
+            .field("tx_bytes", &self.tx_bytes)
+            .field("allowed_ips", &self.allowed_ips)
+            .field("protocol_version", &self.protocol_version)
+            .finish()
+    }
 }
 
 impl WgPeer {
@@ -207,7 +270,7 @@ pub enum WgPeerFlags {
 }
 
 /// Builder for configuring a WireGuard peer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[must_use = "builders do nothing unless used"]
 pub struct WgPeerBuilder {
     public_key: [u8; WG_KEY_LEN],
@@ -216,6 +279,26 @@ pub struct WgPeerBuilder {
     persistent_keepalive: Option<u16>,
     allowed_ips: Vec<AllowedIp>,
     flags: u32,
+}
+
+impl std::fmt::Debug for WgPeerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("WgPeerBuilder")
+            .field("public_key", &self.public_key)
+            .field(
+                "preshared_key",
+                &self
+                    .preshared_key
+                    .as_ref()
+                    .map(|k| crate::util::SecretBytes(k.as_ref())),
+            )
+            .field("endpoint", &self.endpoint)
+            .field("persistent_keepalive", &self.persistent_keepalive)
+            .field("allowed_ips", &self.allowed_ips)
+            .field("flags", &self.flags)
+            .finish()
+    }
 }
 
 impl WgPeerBuilder {

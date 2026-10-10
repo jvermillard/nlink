@@ -241,7 +241,7 @@ pub struct MacsecRxSa {
 ///     .packet_number(1)
 ///     .active(true);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[must_use = "builders do nothing unless used"]
 pub struct MacsecSaBuilder {
     /// Association Number (0-3).
@@ -254,6 +254,19 @@ pub struct MacsecSaBuilder {
     active: bool,
     /// Key ID.
     key_id: Option<[u8; 16]>,
+}
+
+impl std::fmt::Debug for MacsecSaBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material prints as its length, never its bytes (#499).
+        f.debug_struct("MacsecSaBuilder")
+            .field("an", &self.an)
+            .field("key", &crate::util::SecretBytes(&self.key))
+            .field("pn", &self.pn)
+            .field("active", &self.active)
+            .field("key_id", &self.key_id)
+            .finish()
+    }
 }
 
 impl MacsecSaBuilder {
