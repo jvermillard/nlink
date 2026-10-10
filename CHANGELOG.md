@@ -32,6 +32,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A namespaced spawn could not run as another user (#502).** Every
+  spawn path enters the namespace (and makes the `/etc/netns` mounts) in a
+  `pre_exec` closure. std applies `CommandExt::uid`/`gid`/`groups` before
+  any closure, so `spawn(ns, cmd.uid(1000))` ran `setns` unprivileged and
+  failed with `EPERM`. The new `namespace::spawn_as` and
+  `spawn_with_etc_as` take a `SpawnUser { uid, gid, groups }` and drop to
+  it in nlink's own closure, after `setns` and the mounts, in std's order
+  (`setgroups`, `setgid`, `setuid`). The other spawn functions now warn
+  against `CommandExt::uid`. Root tests check uid, gid, groups and the
+  netns inode of a child run as 1:1, check that the `uid()` route still
+  fails with `EPERM`, and check that the `/etc` overlay applies before the
+  drop. The full spawn builder is #521.
+
 - **`Debug` printed private, preshared, cipher, SA and MACsec keys (#499,
   #567).** The WireGuard types (`WgDevice`, `WgPeer`, their builders,
   `DeclaredWgDevice`/`DeclaredWgPeer` and theirs, so `WireguardConfig` too),
@@ -673,6 +686,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`namespace::{spawn_as, spawn_with_etc_as, SpawnUser}`** (#502).
 
 - **`LinkRates::between`, `TcRates::between`**: rates from two samples the
   caller keeps (#506).

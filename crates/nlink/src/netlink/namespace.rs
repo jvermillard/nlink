@@ -1504,6 +1504,12 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 /// Uses `pre_exec` + `setns()` to switch the child process into the target
 /// namespace between `fork()` and `exec()`. The parent process is unaffected.
 ///
+/// **Not with `CommandExt::uid`/`gid`/`groups`.** std applies those in the
+/// child *before* any `pre_exec` closure, so the `setns` this does would
+/// run unprivileged and fail with `EPERM` (#502). To run the process as
+/// another user, use [`spawn_as`] / [`spawn_with_etc_as`], which drop
+/// privileges after entering the namespace.
+///
 /// # Errors
 ///
 /// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
@@ -1574,7 +1580,94 @@ pub fn spawn_output(ns_name: &str, mut cmd: std::process::Command) -> Result<std
 /// ```
 pub fn spawn_path<P: AsRef<Path>>(
     path: P,
+    cmd: std::process::Command,
+) -> Result<std::process::Child> {
+    spawn_path_inner(path.as_ref(), cmd, None)
+}
+
+/// Who a namespaced child runs as: [`spawn_as`], [`spawn_with_etc_as`].
+///
+/// Applied in the child after it has entered the namespace (and, with
+/// `/etc` overlays, after the mounts), where `CommandExt::uid` would run
+/// before them and leave `setns` without the privilege it needs (#502).
+/// The order is `setgroups`, `setgid`, `setuid`, as std's own is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpawnUser {
+    /// User id to run as.
+    pub uid: u32,
+    /// Group id to run as.
+    pub gid: u32,
+    /// Supplementary groups; empty drops them all.
+    pub groups: Vec<u32>,
+}
+
+impl SpawnUser {
+    /// Run as `uid`:`gid`, with no supplementary groups.
+    pub fn new(uid: u32, gid: u32) -> Self {
+        Self {
+            uid,
+            gid,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Set the supplementary groups.
+    pub fn groups(mut self, groups: impl IntoIterator<Item = u32>) -> Self {
+        self.groups = groups.into_iter().collect();
+        self
+    }
+
+    /// Register the privilege drop on `cmd`. `pre_exec` closures run in
+    /// the order they were added, so this goes after nlink's own.
+    fn install(&self, cmd: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        let (uid, gid) = (self.uid, self.gid);
+        let groups: Vec<libc::gid_t> = self.groups.clone();
+        // SAFETY: setgroups/setgid/setuid are raw syscalls; `groups` was
+        // allocated before the fork and is only read here.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setgroups(groups.len(), groups.as_ptr()) != 0
+                    || libc::setgid(gid) != 0
+                    || libc::setuid(uid) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+/// [`spawn`], running the process as `user` (#502).
+///
+/// The child enters the namespace first and then drops to `user`.
+/// `CommandExt::uid` on `cmd` cannot do this: std applies it before any
+/// `pre_exec` closure, so `setns` would fail with `EPERM`.
+///
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nlink::netlink::namespace::{self, SpawnUser};
+/// use std::process::Command;
+///
+/// let child = namespace::spawn_as("myns", Command::new("id"), &SpawnUser::new(1000, 1000))?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn spawn_as(
+    ns_name: &str,
+    cmd: std::process::Command,
+    user: &SpawnUser,
+) -> Result<std::process::Child> {
+    let path = live_named_path(ns_name)?;
+    spawn_path_inner(&path, cmd, Some(user))
+}
+
+fn spawn_path_inner(
+    path: &Path,
     mut cmd: std::process::Command,
+    user: Option<&SpawnUser>,
 ) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
@@ -1592,6 +1685,9 @@ pub fn spawn_path<P: AsRef<Path>>(
             }
             Ok(())
         });
+    }
+    if let Some(user) = user {
+        user.install(&mut cmd);
     }
 
     let child = cmd.spawn().map_err(Error::Io)?;
@@ -1697,6 +1793,9 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 /// The netlink-driven parts of nlink never read `/sys`; the remount is
 /// for the child's own benefit (`ip link` and friends).
 ///
+/// **Not with `CommandExt::uid`/`gid`/`groups`**, for the reason given at
+/// [`spawn`]: use [`spawn_with_etc_as`] (#502).
+///
 /// # Errors
 ///
 /// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
@@ -1721,6 +1820,18 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 pub fn spawn_with_etc(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
     let path = live_named_path(ns_name)?;
     spawn_path_with_etc(&path, ns_name, cmd)
+}
+
+/// [`spawn_with_etc`], running the process as `user`: it drops to `user`
+/// after entering the namespace and making the `/etc` mounts (#502). See
+/// [`spawn_as`].
+pub fn spawn_with_etc_as(
+    ns_name: &str,
+    cmd: std::process::Command,
+    user: &SpawnUser,
+) -> Result<std::process::Child> {
+    let path = live_named_path(ns_name)?;
+    spawn_path_with_etc_inner(&path, ns_name, cmd, Some(user))
 }
 
 /// Spawn a process and collect its output with `/etc/netns/` file overlays.
@@ -1774,7 +1885,16 @@ fn sysfs_mount_flags(st_flags: libc::c_ulong) -> libc::c_ulong {
 pub fn spawn_path_with_etc<P: AsRef<Path>>(
     path: P,
     ns_name: &str,
+    cmd: std::process::Command,
+) -> Result<std::process::Child> {
+    spawn_path_with_etc_inner(path.as_ref(), ns_name, cmd, None)
+}
+
+fn spawn_path_with_etc_inner(
+    path: &Path,
+    ns_name: &str,
     mut cmd: std::process::Command,
+    user: Option<&SpawnUser>,
 ) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
@@ -1897,6 +2017,9 @@ pub fn spawn_path_with_etc<P: AsRef<Path>>(
 
             Ok(())
         });
+    }
+    if let Some(user) = user {
+        user.install(&mut cmd);
     }
 
     let child = cmd.spawn().map_err(Error::Io)?;

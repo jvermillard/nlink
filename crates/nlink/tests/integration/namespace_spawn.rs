@@ -371,3 +371,70 @@ async fn test_spawn_with_etc_sys_remount() -> Result<()> {
 
     Ok(())
 }
+
+/// #502: std applies `CommandExt::uid` before any `pre_exec` closure, so
+/// a namespaced spawn with it ran `setns` unprivileged and failed with
+/// `EPERM` — there was no way to run a process in a lab namespace as an
+/// unprivileged user. `spawn_as` drops to the user after `setns`.
+#[tokio::test]
+async fn spawn_as_runs_as_the_user_inside_the_namespace() -> Result<()> {
+    use std::os::unix::{fs::MetadataExt, process::CommandExt};
+
+    use namespace::{NETNS_RUN_DIR, SpawnUser};
+    require_root!();
+    // Becoming uid 1 needs uid 1 mapped: the rootless CI lane maps only 0
+    // (`0 1000 1`), where setuid(1) is EINVAL whatever the order.
+    nlink::require_host_root!();
+
+    let ns = TestNamespace::new("spawn-as")?;
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "id -u; id -g; id -G; stat -L -c %i /proc/self/ns/net"]);
+    cmd.stdout(std::process::Stdio::piped());
+    let out = namespace::spawn_as(ns.name(), cmd, &SpawnUser::new(1, 1))?.wait_with_output()?;
+    assert!(out.status.success(), "{out:?}");
+    let ns_inode = fs::metadata(PathBuf::from(NETNS_RUN_DIR).join(ns.name()))?
+        .ino()
+        .to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        ["1", "1", "1", ns_inode.as_str()],
+        "uid, gid, groups, netns"
+    );
+
+    // What it replaces: the uid drop happens first, then setns is refused.
+    let mut trap = Command::new("true");
+    trap.uid(1).gid(1);
+    let err = namespace::spawn(ns.name(), trap).expect_err("setns after the uid drop");
+    assert_eq!(
+        err.errno(),
+        Some(libc::EPERM),
+        "the trap spawn_as exists for: {err}"
+    );
+    Ok(())
+}
+
+/// #502, with the `/etc/netns` overlay: the drop comes after the mounts,
+/// which need the privilege too.
+#[tokio::test]
+async fn spawn_with_etc_as_mounts_then_drops() -> Result<()> {
+    use namespace::SpawnUser;
+    require_root!();
+    // Mounting the /etc overlay is checked against init_user_ns (#357).
+    nlink::require_host_root!();
+
+    let ns = TestNamespace::new("spawn-etc-as")?;
+    setup_etc_netns(ns.name(), &[("hosts", "127.0.0.1 as-user.lab\n")]);
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "id -u; cat /etc/hosts"]);
+    cmd.stdout(std::process::Stdio::piped());
+    let out = namespace::spawn_with_etc_as(ns.name(), cmd, &SpawnUser::new(1, 1))
+        .and_then(|c| c.wait_with_output().map_err(nlink::Error::Io));
+    cleanup_etc_netns(ns.name());
+    let out = out?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("1\n"), "{stdout}");
+    assert!(stdout.contains("as-user.lab"), "{stdout}");
+    Ok(())
+}

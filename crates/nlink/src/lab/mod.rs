@@ -564,8 +564,9 @@ macro_rules! require_host_root {
         if !$crate::lab::is_host_root() {
             let msg = "requires root in the initial user namespace; \
                        a rootless container's root cannot mount over /etc, \
-                       remount /sys, install a TC police rate table, or \
-                       create a WireGuard device (#357)";
+                       remount /sys, install a TC police rate table, \
+                       create a WireGuard device (#357), or become a user \
+                       its namespace does not map (#502)";
             assert!(!$crate::lab::strict_host_root(), "{msg}");
             eprintln!("Skipping test: {msg}");
             return Ok(());
@@ -581,8 +582,9 @@ macro_rules! require_host_root_void {
         if !$crate::lab::is_host_root() {
             let msg = "requires root in the initial user namespace; \
                        a rootless container's root cannot mount over /etc, \
-                       remount /sys, install a TC police rate table, or \
-                       create a WireGuard device (#357)";
+                       remount /sys, install a TC police rate table, \
+                       create a WireGuard device (#357), or become a user \
+                       its namespace does not map (#502)";
             assert!(!$crate::lab::strict_host_root(), "{msg}");
             eprintln!("Skipping test: {msg}");
             return;
