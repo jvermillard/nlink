@@ -1495,6 +1495,33 @@ impl PerHostLimiter {
                 report.changes_made += 1;
                 report.default_modified = true;
             }
+            // A leaf at the pre-0.31 `ffff:` (#485): delete it, then add one
+            // at the new handle.
+            Some(q) if q.handle() != default_leaf_handle => {
+                if !opts.dry_run {
+                    conn.del_qdisc_by_index_full(ifindex, default_classid, Some(q.handle()))
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerHostLimiter::reconcile: remove legacy default leaf")
+                        })?;
+                    let mut leaf = FqCodelConfig::new();
+                    if let Some(latency) = self.latency {
+                        leaf = leaf.target(latency);
+                    }
+                    conn.add_qdisc_by_index_full(
+                        ifindex,
+                        default_classid,
+                        Some(default_leaf_handle),
+                        leaf.build(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        e.with_context("PerHostLimiter::reconcile: re-add default fq_codel leaf")
+                    })?;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+            }
             Some(q) => {
                 if !fq_codel_target_matches(target_us, q) {
                     if !opts.dry_run {

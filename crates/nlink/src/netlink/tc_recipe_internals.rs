@@ -53,8 +53,19 @@ use super::{
 /// unless someone configures 65533 rules.
 pub(crate) const DEFAULT_CLASS_MINOR: u16 = 0xFFFF;
 
-/// Major of the default class's leaf qdisc, on the same principle.
-pub(crate) const DEFAULT_LEAF_MAJOR: u16 = 0xFFFF;
+/// Major of the default class's leaf qdisc: `8000:`.
+///
+/// Out of the rules' leaves (`10 + i`), like the class minor, and out of the
+/// two ranges the kernel guards. It was `ffff:`, which is the ingress and
+/// clsact qdisc's handle (`TC_H_INGRESS`'s major), so a recipe could not be
+/// applied next to either — "Cannot move an existing qdisc to a different
+/// parent" — including nlink's own `RateLimiter` ingress half (#485). And
+/// `qdisc_alloc_handle` hands out `8001:`–`fffe:` to qdiscs added without a
+/// handle; `8000:` is the one major below that range it never reaches.
+///
+/// `reconcile()` replaces a default leaf at any other handle — the
+/// `ffff:` of a recipe applied before 0.31 — with one here.
+pub(crate) const DEFAULT_LEAF_MAJOR: u16 = 0x8000;
 
 /// Snapshot of one device's TC tree at the moment `reconcile()` ran.
 ///

@@ -725,3 +725,104 @@ async fn per_peer_impairer_shapes_converge() -> nlink::Result<()> {
     }
     assert_converges("rce-pp", cases).await
 }
+
+/// #485: the recipes put their default leaf at `ffff:`, the ingress and
+/// clsact qdisc's handle, so neither could be applied next to one —
+/// "Cannot move an existing qdisc to a different parent" — and the
+/// ingress half of a `RateLimiter`, or a BPF program on clsact, could not
+/// be added after them. The leaf is at `8000:` now.
+#[tokio::test]
+async fn recipes_coexist_with_ingress_and_clsact() -> nlink::Result<()> {
+    use nlink::netlink::{
+        link::DummyLink,
+        tc::{ClsactConfig, IngressConfig},
+    };
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem", "sch_ingress", "dummy");
+
+    let ns = TestNamespace::new("recipe-ingress")?;
+    let conn = ns.connection()?;
+    for dev in ["host0", "peer0", "late0"] {
+        conn.add_link(DummyLink::new(dev)).await?;
+        conn.set_link_up(dev).await?;
+    }
+    conn.add_qdisc("host0", IngressConfig::new()).await?;
+    conn.add_qdisc("peer0", ClsactConfig::new()).await?;
+
+    PerHostLimiter::new("host0", nlink::Rate::mbit(10))
+        .limit_ip("10.0.0.1".parse().unwrap(), nlink::Rate::mbit(5))
+        .apply(&conn)
+        .await?;
+    let impairer = PerPeerImpairer::new("peer0")
+        .impair_dst_ip("10.0.0.1".parse().unwrap(), NetemConfig::new().build())
+        .default_impairment(NetemConfig::new().build());
+    impairer.apply(&conn).await?;
+    // The other order: the recipe first, then the ingress qdisc.
+    PerHostLimiter::new("late0", nlink::Rate::mbit(10))
+        .apply(&conn)
+        .await?;
+    conn.add_qdisc("late0", IngressConfig::new()).await?;
+
+    for dev in ["host0", "peer0", "late0"] {
+        let qdiscs = conn.get_qdiscs_by_name(dev).await?;
+        let at_ingress: Vec<_> = qdiscs
+            .iter()
+            .filter(|q| q.handle().major() == 0xffff)
+            .collect();
+        assert_eq!(
+            at_ingress.len(),
+            1,
+            "{dev}: only the ingress/clsact qdisc at ffff:"
+        );
+        assert!(
+            qdiscs
+                .iter()
+                .any(|q| q.handle() == nlink::TcHandle::major_only(0x8000)),
+            "{dev}: the default leaf at 8000:"
+        );
+    }
+    assert!(impairer.reconcile_dry_run(&conn).await?.is_noop());
+    Ok(())
+}
+
+/// #485: a recipe applied by an earlier nlink has its default leaf at
+/// `ffff:`; `reconcile()` moves it to `8000:` and is then a no-op.
+#[tokio::test]
+async fn reconcile_moves_a_legacy_default_leaf() -> nlink::Result<()> {
+    use nlink::netlink::{link::DummyLink, tc::IngressConfig};
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_ingress", "dummy");
+
+    let ns = TestNamespace::new("recipe-legacy")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("old0")).await?;
+    conn.set_link_up("old0").await?;
+    let limiter = PerHostLimiter::new("old0", nlink::Rate::mbit(10))
+        .limit_ip("10.0.0.1".parse().unwrap(), nlink::Rate::mbit(5));
+    limiter.apply(&conn).await?;
+    // What 0.30 left: the default class's leaf at ffff:. nlink refuses to
+    // write that handle now, so put it there as tc would.
+    ns.exec("tc", &["qdisc", "del", "dev", "old0", "parent", "1:ffff"])?;
+    ns.exec(
+        "tc",
+        &[
+            "qdisc", "add", "dev", "old0", "parent", "1:ffff", "handle", "ffff:", "fq_codel",
+        ],
+    )?;
+
+    let report = limiter.reconcile(&conn).await?;
+    assert!(report.default_modified, "{report:?}");
+    let qdiscs = conn.get_qdiscs_by_name("old0").await?;
+    assert!(
+        qdiscs
+            .iter()
+            .any(|q| q.handle() == nlink::TcHandle::major_only(0x8000))
+    );
+    assert!(!qdiscs.iter().any(|q| q.handle().major() == 0xffff));
+    assert!(
+        limiter.reconcile(&conn).await?.is_noop(),
+        "a second reconcile"
+    );
+    conn.add_qdisc("old0", IngressConfig::new()).await?;
+    Ok(())
+}

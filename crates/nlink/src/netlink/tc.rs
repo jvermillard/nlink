@@ -8373,6 +8373,15 @@ impl Connection<Route> {
         config: &impl QdiscConfig,
         change: bool,
     ) -> Result<()> {
+        // `ffff:` is the ingress/clsact qdisc's. The kernel takes it for a
+        // classful qdisc's leaf while no ingress exists, and then refuses
+        // the ingress — or, the other way round, the leaf (#485).
+        if TcHandle::from_raw(handle).is_reserved_major() && !parent.is_ingress() {
+            return Err(Error::InvalidMessage(format!(
+                "tc: qdisc handle {} is reserved for the ingress/clsact qdisc",
+                TcHandle::from_raw(handle)
+            )));
+        }
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(parent.as_raw())
@@ -11110,5 +11119,26 @@ mod tests {
         cfg.write_options(&mut builder).unwrap();
         // Non-empty payload — at minimum NBANDS + NSTRICT + 2 nests.
         assert!(!builder.as_bytes().is_empty());
+    }
+
+    /// #485: `ffff:` is the ingress/clsact qdisc's handle. Refused anywhere
+    /// else, before the kernel is asked — which would accept it until an
+    /// ingress qdisc came along, and refuse one of them then.
+    #[tokio::test]
+    async fn a_qdisc_handle_with_the_ingress_major_is_refused_off_ingress() {
+        let conn = Connection::<Route>::new().expect("socket open");
+        let err = conn
+            .add_qdisc_by_index_full(
+                1,
+                TcHandle::new(1, 2),
+                Some(TcHandle::major_only(0xffff)),
+                FqCodelConfig::new().build(),
+            )
+            .await
+            .expect_err("reserved");
+        assert!(err.to_string().contains("reserved"), "{err}");
+        assert!(TcHandle::major_only(0xffff).is_reserved_major());
+        assert!(TcHandle::INGRESS.is_reserved_major());
+        assert!(!TcHandle::major_only(0x8000).is_reserved_major());
     }
 }

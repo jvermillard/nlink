@@ -109,6 +109,16 @@ impl TcHandle {
         raw::minor(self.0)
     }
 
+    /// Whether this handle's major is `ffff`, which belongs to the
+    /// `ingress`/`clsact` qdisc (`TC_H_INGRESS`); the kernel never
+    /// allocates it to another qdisc. A qdisc given it anywhere else
+    /// cannot coexist with an ingress or clsact qdisc on the device (#485),
+    /// and nlink refuses to add one there.
+    #[inline]
+    pub const fn is_reserved_major(self) -> bool {
+        self.major() == 0xFFFF
+    }
+
     #[inline]
     pub const fn is_root(self) -> bool {
         self.0 == raw::ROOT
