@@ -2608,7 +2608,8 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_rule"))
     }
 
-    /// Delete a rule by priority.
+    /// Delete a rule by priority: the first at it, whatever it does. Until
+    /// 0.32 only a rule looking the main table up was found (#667).
     ///
     /// (Renamed from `del_rule_by_priority_typed` in 0.21 — the raw-`u8`
     /// sibling was removed in the same release.)
@@ -2633,7 +2634,12 @@ impl Connection<Route> {
             if rule.is_default() {
                 continue;
             }
-            let _ = self.del_rule_by_priority(family, rule.priority()).await;
+            // Gone already is what a flush wants; anything else is an
+            // error, which this used to swallow (#667).
+            match self.del_rule_by_priority(family, rule.priority()).await {
+                Err(e) if !e.is_not_found() => return Err(e),
+                _ => {}
+            }
         }
 
         Ok(())
