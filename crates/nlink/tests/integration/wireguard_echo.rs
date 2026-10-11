@@ -301,19 +301,21 @@ async fn a_large_peer_set_reaches_the_kernel_whole() -> nlink::Result<()> {
 }
 
 /// A sub-second keepalive is 1 s in the kernel, as `wg` reads it back. It
-/// was truncated to 0, which turns keepalive off, without a word (#529).
+/// was truncated to 0, which turns keepalive off, without a word: on a new
+/// peer until #529, and on a peer whose keepalive changes until #602.
 #[tokio::test]
 async fn a_sub_second_keepalive_is_one_second() -> nlink::Result<()> {
     require_root!();
     nlink::require_host_root!();
     nlink::require_modules!("wireguard");
 
-    let cfg = WireguardConfig::new().device("wg0", |d| {
-        d.listen_port(51824).peer(peer_key(0xc1), |p| {
-            p.persistent_keepalive(Duration::from_millis(500))
+    fn at(keepalive: Duration) -> WireguardConfig {
+        WireguardConfig::new().device("wg0", |d| {
+            d.listen_port(51824)
+                .peer(peer_key(0xc1), |p| p.persistent_keepalive(keepalive))
         })
-    });
-    let cases = vec![case("keepalive-500ms", vec![cfg]).check(|ns| {
+    }
+    fn shows_one_second(ns: &TestNamespace) -> Result<(), String> {
         let shown = ns
             .exec("wg", &["show", "wg0", "persistent-keepalive"])
             .map_err(|e| e.to_string())?;
@@ -322,6 +324,15 @@ async fn a_sub_second_keepalive_is_one_second() -> nlink::Result<()> {
             Some("1") => Ok(()),
             other => Err(format!("wg shows keepalive {other:?}: {shown:?}")),
         }
-    })];
+    }
+    let cases = vec![
+        case("keepalive-500ms", vec![at(Duration::from_millis(500))]).check(shows_one_second),
+        // A live peer's change goes through the update path.
+        case(
+            "keepalive-25s-to-500ms",
+            vec![at(Duration::from_secs(25)), at(Duration::from_millis(500))],
+        )
+        .check(shows_one_second),
+    ];
     assert_converges("wge", cases).await
 }
