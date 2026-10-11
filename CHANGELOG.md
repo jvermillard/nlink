@@ -63,6 +63,22 @@ All notable changes to this project will be documented in this file.
   value too, under a name that said per-mille, and `ecn_prob()` divided
   it by 10.
 
+- **One `LinkStats` and one `LinkRates` (#525).**
+  - `stats::LinkStats` is the message-level `LinkStats`, with accessors
+    in place of public fields. A snapshot keeps link names in
+    `StatsSnapshot::names`.
+  - `stats::LinkRates` has no `name`.
+  - `diagnostics::LinkRates`, which `nlink::LinkRates` re-exported, is
+    now the stats one: `f64` bytes and packets per second, with
+    `rx_packets_per_sec` in place of `rx_pps` and no
+    `sample_duration_ms`.
+  - `StatsSnapshot` is `#[non_exhaustive]` and gains `taken_at`, `netns`
+    and `names`.
+  - `StatsSnapshot::rates(&previous)` takes no duration. It measures the
+    time between the two snapshots' `taken_at`, and so does
+    `StatsTracker::update`. The tracker used to time its own calls, so a
+    snapshot handed over late gave a rate over the wrong interval.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -344,6 +360,21 @@ All notable changes to this project will be documented in this file.
     into a config that installs it again. It keeps the seed. It can't
     keep a delay distribution, because the kernel never reports one.
   - `nlink-tc qdisc show` now prints the options.
+
+- **Bulk, namespace-aware statistics (#525).**
+  - `Connection::get_stats64_all()` reads every link's counters in one
+    `RTM_GETSTATS` dump (Linux 4.7+), as a map from ifindex to counters.
+    It replaces a link dump, or the four dumps of a diagnostics scan, for
+    a collector that only wants counters.
+  - `StatsSnapshot::capture(&conn)` takes that dump and records when the
+    counters were read and in which namespace.
+  - `RateSampler` gives link rates across many namespaces. It keys each
+    link by namespace and ifindex, so `lo` in one namespace isn't `lo` in
+    another. A link renamed at its ifindex, or whose counters went
+    backwards, gets no rate for that interval.
+  - `Diagnostics::scan_since(&previous)` takes its rates against a report
+    the caller kept. A fresh `Diagnostics` used to have no previous sample,
+    so its rates were always 0.
 
 ## [0.31.0] - 2026-10-11
 

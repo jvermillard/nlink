@@ -212,9 +212,12 @@ pub use netlink::bridge_vlan::{
 // Diagnostics types
 pub use netlink::diagnostics::{
     Bottleneck, BottleneckType, ConnectivityReport, DiagnosticReport, Diagnostics,
-    DiagnosticsConfig, InterfaceDiag, Issue, IssueCategory, IssueStream, LinkRates, RouteDiag,
-    RouteInfo, Severity, TcDiag,
+    DiagnosticsConfig, InterfaceDiag, Issue, IssueCategory, IssueStream, RouteDiag, RouteInfo,
+    Severity, TcDiag,
 };
+// Statistics: one `LinkRates` for the crate since 0.32 (#525); the root
+// re-exported diagnostics' before.
+pub use netlink::stats::{LinkRates, RateSampler, StatsSnapshot};
 // FDB types
 pub use netlink::fdb::{FdbEntry, FdbEntryBuilder};
 // Per-peer impairment helper

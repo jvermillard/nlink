@@ -56,9 +56,8 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
                 "rates": {
                     "rx_bps": iface.rates.rx_bps(),
                     "tx_bps": iface.rates.tx_bps(),
-                    "rx_pps": iface.rates.rx_pps,
-                    "tx_pps": iface.rates.tx_pps,
-                    "sample_duration_ms": iface.rates.sample_duration_ms,
+                    "rx_pps": iface.rates.rx_packets_per_sec,
+                    "tx_pps": iface.rates.tx_packets_per_sec,
                 },
                 "tc": iface.tc.as_ref().map(|tc| {
                     serde_json::json!({
@@ -125,17 +124,18 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
             );
             println!();
 
-            if iface.rates.sample_duration_ms > 0 {
-                println!("Rates ({}ms sample):", iface.rates.sample_duration_ms);
+            // Zero without a previous sample of the link.
+            if iface.rates != Default::default() {
+                println!("Rates:");
                 println!(
-                    "  RX: {} ({} pps)",
-                    format_rate_bps(iface.rates.rx_bps()),
-                    iface.rates.rx_pps
+                    "  RX: {} ({:.0} pps)",
+                    format_rate_bps(iface.rates.rx_bps() as u64),
+                    iface.rates.rx_packets_per_sec
                 );
                 println!(
-                    "  TX: {} ({} pps)",
-                    format_rate_bps(iface.rates.tx_bps()),
-                    iface.rates.tx_pps
+                    "  TX: {} ({:.0} pps)",
+                    format_rate_bps(iface.rates.tx_bps() as u64),
+                    iface.rates.tx_packets_per_sec
                 );
                 println!();
             }

@@ -48,6 +48,12 @@ pub struct NetnsId {
 }
 
 impl NetnsId {
+    /// An id from its parts, for tests that need two.
+    #[cfg(test)]
+    pub(crate) fn from_parts(dev: u64, ino: u64) -> Self {
+        Self { dev, ino }
+    }
+
     /// The id of the namespace `fd` names.
     pub fn of(fd: impl AsFd) -> Result<Self> {
         let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();

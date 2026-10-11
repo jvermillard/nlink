@@ -199,6 +199,11 @@ impl NlMsgType {
     pub const RTM_DELNSID: u16 = 89;
     pub const RTM_GETNSID: u16 = 90;
 
+    // Link statistics (Linux 4.7+): `struct if_stats_msg`, then the
+    // `IFLA_STATS_*` attributes the filter mask asks for.
+    pub const RTM_NEWSTATS: u16 = 92;
+    pub const RTM_GETSTATS: u16 = 94;
+
     // Chain messages (Linux 4.1+)
     pub const RTM_NEWCHAIN: u16 = 100;
     pub const RTM_DELCHAIN: u16 = 101;
