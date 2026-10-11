@@ -63,8 +63,15 @@ impl Percent {
 
     /// Convert to the kernel's 32-bit probability representation
     /// (used in netem qopt fields). `Percent::HUNDRED -> u32::MAX`.
+    ///
+    /// Rounded to nearest, as tc(8) does (`rint`), so nlink and `tc` put
+    /// the same value in the kernel, and a probability read back converts
+    /// to the raw value it came from. This truncated before 0.32: 1 %
+    /// became 42949672 where tc writes 42949673, and about 8 % of values
+    /// read back one unit short, so a netem of 1.2 % loss never matched its
+    /// own echo (#633).
     pub fn as_kernel_probability(self) -> u32 {
-        ((self.0 / 100.0) * (u32::MAX as f64)) as u32
+        ((self.0 / 100.0) * (u32::MAX as f64)).round() as u32
     }
 
     /// Returns true if exactly zero.
@@ -139,6 +146,39 @@ mod tests {
 
     /// NaN is not in `0..=100`; `clamp` keeps it NaN, which wrote as 0 %
     /// while comparing unequal to itself. It is 0 % now, said so (#598).
+    /// #633: the values `tc qdisc … netem loss X` put in the kernel, read
+    /// from the qopt on Linux 6.12 with iproute2 6.15. tc rounds to
+    /// nearest; this truncated.
+    #[test]
+    fn kernel_probability_rounds_as_tc_does() {
+        for (pct, tc) in [
+            (1.0, 42_949_673),
+            (1.2, 51_539_608),
+            (0.3, 12_884_902),
+            (33.333333, 1_431_655_751),
+            (50.0, 2_147_483_648),
+            (0.0, 0),
+            (100.0, u32::MAX),
+        ] {
+            assert_eq!(Percent::new(pct).as_kernel_probability(), tc, "{pct} %");
+        }
+    }
+
+    /// A probability read back is `raw / u32::MAX * 100`; converting that
+    /// back must give `raw` again, or a value never matches its echo.
+    #[test]
+    fn kernel_probability_survives_a_read_back() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let raw = (x >> 32) as u32;
+            let read = f64::from(raw) / f64::from(u32::MAX) * 100.0;
+            assert_eq!(Percent::new(read).as_kernel_probability(), raw);
+        }
+    }
+
     #[test]
     fn nan_is_zero() {
         let p = Percent::new(f64::NAN);

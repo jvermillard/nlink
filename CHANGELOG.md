@@ -115,6 +115,18 @@ All notable changes to this project will be documented in this file.
   back as 1 %. A fractional percentage, which the kernel can't hold, is
   now refused by `write_options` and `parse_params`.
 
+- **Netem percentages are rounded the way tc rounds them (#633).**
+  `Percent::as_kernel_probability` truncated where tc(8) rounds to
+  nearest. For `loss 1%`, nlink put 42949672 in the kernel and tc
+  42949673. The bigger problem was the read-back comparison, which
+  truncated as well. For about 8 % of probabilities the read back came
+  out one unit short, and those include everyday values such as 0.3,
+  1.2, 2.4, 5.2, 9.9 and 20.1 %. A `PerPeerImpairer` or `NetworkConfig`
+  netem with one of them never matched its own echo, so it was replaced
+  on every reconcile. Both conversions now round, and so does
+  `percent_to_prob`. A root test installs the same netem through `tc`
+  and through nlink and compares the kernel's dumps byte for byte.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

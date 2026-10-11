@@ -824,9 +824,10 @@ pub mod qdisc {
             }
         }
 
-        /// Convert percentage (0.0-100.0) to netem probability (0 to u32::MAX).
+        /// Convert percentage (0.0-100.0) to netem probability (0 to u32::MAX),
+        /// rounded to nearest as tc(8) does (#633).
         pub fn percent_to_prob(percent: f64) -> u32 {
-            ((percent / 100.0) * (u32::MAX as f64)) as u32
+            ((percent / 100.0) * (u32::MAX as f64)).round() as u32
         }
 
         /// Convert netem probability to percentage.
