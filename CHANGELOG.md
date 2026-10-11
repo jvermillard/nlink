@@ -46,6 +46,22 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A chain's hook, priority or type could not be changed, and a base
+  chain declared as a regular one stayed a base chain (#478).** The diff
+  sent these as an update. `nf_tables_updchain` refuses those on a live
+  chain (`EOPNOTSUPP` on 6.12, `EEXIST` on older kernels), so the apply
+  failed every time. A chain declared without a hook was "no claim", so a
+  base chain of that name kept filtering behind an empty diff.
+  - **The fix is a recreate.** The chain goes in the new
+    `NftablesDiff::chains_to_recreate` as a `ChainRecreate`
+    (`-/+ chain … (recreate: priority 0 -> -10)`). The apply deletes its
+    rules and the chain, creates it again, and puts the declared rules
+    back in declared order (`MoveReason::ChainRecreated`).
+  - **Rules nlink did not write** refuse the recreate, because it could
+    not put them back. An `exclusive` chain deletes them instead.
+  - A policy change alone is still an update in place, and the
+    `~ chain` line now shows the type and device too.
+
 - **A link recreate destroyed TC trees silently (#472).** The recreate
   check matched a declared root or ingress qdisc against the qdisc slot
   alone. It never read classes, leaf qdiscs or filters. A declared `htb`
