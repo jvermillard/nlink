@@ -1052,6 +1052,58 @@ All notable changes to this project will be documented in this file.
       and keeps one that nothing declared. It also checks that a MAC
       change puts the declared entry back, and fails without that.
 
+- **Declared FDB entries (#516, row 8, second half).**
+  - **Builder.** `NetworkConfig::fdb(dev, mac, |e| …)` declares an
+    entry:
+    - by default, a static entry in the bridge `dev` is a port of
+      (`bridge fdb replace … master static`);
+    - with `.local()`, the bridge's own MAC (`permanent`);
+    - with `.dst(ip)`, a VXLAN remote in the device's own table;
+    - with `.vlan(id)`, the entry for that VLAN.
+  - **Diff and plan.** The diff sets an entry that is missing, learned,
+    or in the other state.
+    - `ConfigDiff::fdb_to_set` and `fdb_to_remove` hold the entries, and
+      the JSON schema gains both keys.
+    - The plan holds them as `Step::SetFdb { before, after }` and
+      `Step::DeleteFdb`, which invert for `undo`.
+    - An all-zeros or multicast MAC takes any number of remotes, added
+      with `NLM_F_APPEND`; a replace there is `EOPNOTSUPP`. A unicast MAC
+      has one remote, replaced.
+  - **Flushes.** A port that leaves or changes its bridge loses its
+    entries, and a recreated device loses all of them. The apply puts
+    the declared ones back, and a recreate no longer counts them among
+    what it would destroy.
+  - **Removal.** An entry leaves through `PlanOptions::previous`.
+    - Only that remote goes, not the flood entry.
+    - A bridge entry declared on another port of the same bridge is
+      moved, not removed.
+    - `purge` never removes an FDB entry.
+  - **Validation errors:**
+    - a VLAN outside 1–4094;
+    - a remote with a VLAN, or a local remote;
+    - a non-unicast bridge MAC (`fdb_add_entry` refuses it);
+    - an entry declared twice;
+    - two remotes for a unicast MAC;
+    - one MAC and VLAN on two ports of one declared bridge.
+  - **Imperative.** `Connection::append_fdb` (`bridge fdb append`).
+    `Connection::del_fdb_entry` deletes exactly the entry it is given:
+    the bridge's or the device's own, with its VLAN, and with `dst` only
+    that remote, where `del_fdb` deletes them all.
+  - **Tests.**
+    - A transition test runs these steps, checked through
+      `bridge -j fdb` at each one:
+      - moves a static entry to another port, makes another local, and
+        replaces a unicast remote;
+      - recreates the VXLAN device;
+      - moves a port to another bridge.
+    - It passes on iproute2 6.15 and 6.1. It fails with declared entries
+      counted as blockers (the recreate is refused), with a moved port's
+      entries taken as present, and with flood remotes replaced rather
+      than appended.
+    - A root test removes the previous config's entries under a purge.
+      It keeps a stranger's entry and a flood entry's other remote, and
+      fails if the delete drops the remote's `dst`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

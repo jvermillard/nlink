@@ -19,7 +19,7 @@
 use std::fmt;
 
 use super::{
-    DeclaredAddress, DeclaredLink, DeclaredNeighbour, DeclaredQdisc, DeclaredRoute, LinkChanges, LinkRecreate,
+    DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredNeighbour, DeclaredQdisc, DeclaredRoute, LinkChanges, LinkRecreate,
     LinkRemoval, RouteConflict,
     diff::route_text,
     tc_tree::DeclaredTc,
@@ -126,6 +126,16 @@ pub enum Step {
     },
     /// Delete a neighbour the previous config declared (#516).
     DeleteNeighbour(DeclaredNeighbour),
+    /// Install an FDB entry (#516): a bridge entry with `NLM_F_REPLACE`, a
+    /// VXLAN remote of an all-zeros or multicast MAC with `NLM_F_APPEND`.
+    SetFdb {
+        /// The entry it overwrites, if one is there.
+        before: Option<DeclaredFdb>,
+        /// The entry installed.
+        after: DeclaredFdb,
+    },
+    /// Delete an FDB entry the previous config declared (#516).
+    DeleteFdb(DeclaredFdb),
     /// Delete a qdisc the previous config declared; the kernel's default
     /// comes back (#512).
     DeleteQdisc(DeclaredQdisc),
@@ -206,6 +216,17 @@ impl Step {
             Self::DeleteNeighbour(n) => Self::SetNeighbour {
                 before: None,
                 after: n.clone(),
+            },
+            Self::SetFdb { before, after } => match before {
+                Some(before) => Self::SetFdb {
+                    before: Some(after.clone()),
+                    after: before.clone(),
+                },
+                None => Self::DeleteFdb(after.clone()),
+            },
+            Self::DeleteFdb(e) => Self::SetFdb {
+                before: None,
+                after: e.clone(),
             },
             _ => return None,
         })
@@ -352,6 +373,12 @@ impl fmt::Display for Step {
                 f.write_str(&super::diff::neighbour_line(after, &replaced))
             }
             Self::DeleteNeighbour(n) => write!(f, "- {n}"),
+            Self::SetFdb { before, after } => {
+                let replaced: Vec<(DeclaredFdb, DeclaredFdb)> =
+                    before.iter().map(|b| (after.clone(), b.clone())).collect();
+                f.write_str(&super::diff::fdb_line(after, &replaced))
+            }
+            Self::DeleteFdb(e) => write!(f, "- {e}"),
             Self::DeleteQdisc(q) => write!(
                 f,
                 "- qdisc {} on {} ({:?})",
@@ -537,6 +564,12 @@ impl super::ConfigDiff {
                 after: n.clone(),
             });
         }
+        for e in &self.fdb_to_set {
+            steps.push(Step::SetFdb {
+                before: self.fdb_replaced.iter().find(|(d, _)| d == e).map(|(_, b)| b.clone()),
+                after: e.clone(),
+            });
+        }
         for route in &self.routes_to_add {
             let before = self
                 .routes_replaced
@@ -576,6 +609,7 @@ impl super::ConfigDiff {
                 }),
         );
         steps.extend(self.neighbours_to_remove.iter().cloned().map(Step::DeleteNeighbour));
+        steps.extend(self.fdb_to_remove.iter().cloned().map(Step::DeleteFdb));
         Plan {
             steps,
             routes_protocol: self.routes_protocol,
@@ -634,6 +668,34 @@ mod tests {
         assert!(matches!(
             Step::DeleteNeighbour(n(1)).inverse(),
             Some(Step::SetNeighbour { before: None, after }) if after == n(1)
+        ));
+    }
+
+    /// An FDB entry's steps invert as a neighbour's do (#516).
+    #[test]
+    fn fdb_steps_invert_and_print() {
+        let e = |local: bool| DeclaredFdb {
+            dev: "p0".into(),
+            mac: [2, 0, 0, 0, 0, 1],
+            vlan: None,
+            dst: None,
+            local,
+        };
+        let change = Step::SetFdb {
+            before: Some(e(false)),
+            after: e(true),
+        };
+        assert_eq!(change.to_string(), "~ fdb 02:00:00:00:00:01 dev p0 local (was static)");
+        assert!(matches!(
+            change.inverse(),
+            Some(Step::SetFdb { before: Some(b), after: a }) if b == e(true) && a == e(false)
+        ));
+        let add = Step::SetFdb { before: None, after: e(false) };
+        assert_eq!(add.to_string(), "+ fdb 02:00:00:00:00:01 dev p0 static");
+        assert!(matches!(add.inverse(), Some(Step::DeleteFdb(d)) if d == e(false)));
+        assert!(matches!(
+            Step::DeleteFdb(e(false)).inverse(),
+            Some(Step::SetFdb { before: None, after }) if after == e(false)
         ));
     }
 

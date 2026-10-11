@@ -413,6 +413,8 @@ fn step_operation(step: &Step) -> String {
         Step::DeleteRoute(r) => format!("remove route {}/{}", r.destination, r.prefix_len),
         Step::SetNeighbour { after, .. } => format!("set {after}"),
         Step::DeleteNeighbour(n) => format!("remove {n}"),
+        Step::SetFdb { after, .. } => format!("set {after}"),
+        Step::DeleteFdb(e) => format!("remove {e}"),
         Step::DeleteQdisc(q) => format!("delete qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::ReplaceQdisc(q) => format!("replace qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::AddQdisc(q) => format!("add qdisc {} on {}", q.qdisc_type.kind(), q.dev),
@@ -500,6 +502,19 @@ fn neighbour_config(n: &super::DeclaredNeighbour) -> crate::netlink::neigh::Neig
         _ if n.proxy => c.proxy(),
         Some(mac) => c.permanent().lladdr(mac),
         None => c.permanent(),
+    }
+}
+
+/// The kernel entry a declared FDB entry is (#516).
+fn fdb_entry(e: &super::DeclaredFdb) -> crate::netlink::fdb::FdbEntryBuilder {
+    let mut b = crate::netlink::fdb::FdbEntryBuilder::new(e.mac).dev(e.dev.as_str());
+    if let Some(vlan) = e.vlan {
+        b = b.vlan(vlan);
+    }
+    match e.dst {
+        Some(dst) => b.dst(dst).self_().permanent(),
+        None if e.local => b.permanent(),
+        None => b.static_(),
     }
 }
 
@@ -638,6 +653,22 @@ async fn run_step(
                 Outcome::Unchanged(Some(format!("{n} already absent")))
             }
             Err(e) => return Err(e),
+        },
+        Step::SetFdb { after: e, .. } => {
+            let entry = fdb_entry(e);
+            if e.dst.is_some() && e.floods() {
+                conn.append_fdb(entry).await?;
+            } else {
+                conn.replace_fdb(entry).await?;
+            }
+            Outcome::Changed(format!("Set {e}"), 1)
+        }
+        Step::DeleteFdb(e) => match conn.del_fdb_entry(fdb_entry(e)).await {
+            Ok(()) => Outcome::Changed(format!("Removed {e}"), 1),
+            // Gone before we got to it: its port left the bridge, or the
+            // entry moved to another port.
+            Err(e2) if e2.is_not_found() => Outcome::Unchanged(Some(format!("{e} already absent"))),
+            Err(e2) => return Err(e2),
         },
         Step::ChangeAddress(addr) => {
             change_address(conn, addr).await?;

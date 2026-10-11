@@ -50,7 +50,7 @@ use super::{
     connection::Connection,
     error::{Error, Result},
     interface_ref::InterfaceRef,
-    message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType},
+    message::{NLM_F_ACK, NLM_F_APPEND, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType},
     messages::NeighborMessage,
     protocol::Route,
     types::neigh::{NdMsg, NdaAttr, NeighborState},
@@ -522,6 +522,30 @@ impl FdbEntryBuilder {
         }
     }
 
+    /// Write a delete of exactly this entry: in the device's own table
+    /// with [`self_`](Self::self_), and only its remote with
+    /// [`dst`](Self::dst).
+    pub(crate) fn write_delete_exact(&self, builder: &mut MessageBuilder, ifindex: u32) {
+        let flags = if self.self_flag { ntf::SELF } else { 0 };
+        let ndmsg = NdMsg::new()
+            .with_family(AF_BRIDGE)
+            .with_ifindex(ifindex as i32)
+            .with_flags(flags);
+        builder.append(&ndmsg);
+        builder.append_attr(NdaAttr::Lladdr as u16, &self.mac);
+        if let Some(vlan) = self.vlan {
+            builder.append_attr_u16(NdaAttr::Vlan as u16, vlan);
+        }
+        match self.dst {
+            Some(IpAddr::V4(v4)) => builder.append_attr(NdaAttr::Dst as u16, &v4.octets()),
+            Some(IpAddr::V6(v6)) => builder.append_attr(NdaAttr::Dst as u16, &v6.octets()),
+            None => {}
+        }
+        if let Some(vni) = self.vni {
+            builder.append_attr_u32(NdaAttr::Vni as u16, vni);
+        }
+    }
+
     /// Write the delete message to the builder with resolved interface index.
     pub(crate) fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) {
         let ndmsg = NdMsg::new()
@@ -713,6 +737,37 @@ impl Connection<Route> {
         self.send_ack(builder)
             .await
             .map_err(|e| e.with_context("replace_fdb"))
+    }
+
+    /// Add an FDB entry, or one more remote to it (`bridge fdb append`,
+    /// `NLM_F_APPEND`): a VXLAN device's all-zeros or multicast entry
+    /// holds a list of remotes, which [`replace_fdb`](Self::replace_fdb)
+    /// would overwrite the first of. One already listed is left as it is.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "append_fdb"))]
+    pub async fn append_fdb(&self, entry: FdbEntryBuilder) -> Result<()> {
+        let (ifindex, master_idx) = self.resolve_fdb_interfaces(&entry).await?;
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+        );
+        entry.write_add(&mut builder, ifindex, master_idx);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("append_fdb"))
+    }
+
+    /// Delete exactly the entry `entry` describes: in the bridge's table,
+    /// or the device's own with [`self_`](FdbEntryBuilder::self_); with
+    /// its VLAN; and with [`dst`](FdbEntryBuilder::dst), only that remote
+    /// of a VXLAN entry, where [`del_fdb`](Self::del_fdb) deletes them all.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_fdb_entry"))]
+    pub async fn del_fdb_entry(&self, entry: FdbEntryBuilder) -> Result<()> {
+        let (ifindex, _) = self.resolve_fdb_interfaces(&entry).await?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
+        entry.write_delete_exact(&mut builder, ifindex);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_fdb_entry"))
     }
 
     /// Delete an FDB entry by device name, MAC address, and optional VLAN.

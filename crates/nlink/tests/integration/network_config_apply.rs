@@ -1065,6 +1065,71 @@ async fn the_previous_config_removes_its_neighbours() -> Result<()> {
     .await
 }
 
+/// FDB entries the previous config declared and this one does not are
+/// removed — one remote of a VXLAN flood entry, not the entry — and one
+/// nothing declared stays, even under a purge (#516). An entry moved to
+/// another port of the bridge is moved, not removed.
+#[tokio::test]
+async fn the_previous_config_removes_its_fdb_entries() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "bridge", "vxlan");
+
+    with_timeout(async {
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::Arc;
+
+        let ns = TestNamespace::new("prevfdb")?;
+        let conn = conn_in_ns(&ns)?;
+        let ip = |h: u8| IpAddr::V4(Ipv4Addr::new(10, 86, 0, h));
+        let mac = |n: u8| [0x02, 0, 0, 0, 0x86, n];
+        let links = || {
+            NetworkConfig::new()
+                .link("br0", |l| l.bridge().up())
+                .link("p0", |l| l.dummy().master("br0").up())
+                .link("p1", |l| l.dummy().master("br0").up())
+                .link("vx0", move |l| l.vxlan(7).vxlan_local(ip(1)).vxlan_port(4789))
+        };
+        let a = Arc::new(
+            links()
+                .fdb("p0", mac(1), |e| e)
+                .fdb("p0", mac(2), |e| e)
+                .fdb("vx0", [0; 6], |e| e.dst(ip(2)))
+                .fdb("vx0", [0; 6], |e| e.dst(ip(3))),
+        );
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("bridge", &["fdb", "add", "02:00:00:00:86:07", "dev", "p0", "master", "static"])?;
+
+        let b = links().fdb("p1", mac(1), |e| e).fdb("vx0", [0; 6], |e| e.dst(ip(2)));
+        let opts = || PlanOptions::default().purge(true).previous(a.clone());
+        let diff = b.diff_with_options(&conn, opts()).await?;
+        let shown = diff.to_string();
+        assert_eq!(diff.fdb_to_remove.len(), 2, "{shown}");
+        assert!(shown.contains("- fdb 02:00:00:00:86:02 dev p0 static"), "{shown}");
+        assert!(shown.contains("- fdb 00:00:00:00:00:00 dev vx0 dst 10.86.0.3"), "{shown}");
+        assert!(shown.contains("+ fdb 02:00:00:00:86:01 dev p1 static"), "{shown}");
+        assert!(!shown.contains("- fdb 02:00:00:00:86:01"), "a moved entry is not removed: {shown}");
+
+        let applied = b
+            .apply_with_options(&conn, ApplyOptions::default().with_purge(true).with_previous(a.clone()))
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(b.diff_with_options(&conn, opts()).await?.is_empty());
+        let fdb = ns.exec("bridge", &["fdb", "show"])?;
+        for (want, line) in [
+            (true, "02:00:00:00:86:01 dev p1 master br0 static"),
+            (true, "02:00:00:00:86:07 dev p0 master br0 static"),
+            (false, "02:00:00:00:86:02"),
+            (true, "00:00:00:00:00:00 dev vx0 dst 10.86.0.2"),
+            (false, "dst 10.86.0.3"),
+        ] {
+            assert_eq!(fdb.contains(line), want, "{line}: {fdb}");
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// With the previous config, the links it created and this one does not
 /// are deleted, with what is stacked on them. A kindless link it only
 /// configured stays, and so does a link of the same name another actor
