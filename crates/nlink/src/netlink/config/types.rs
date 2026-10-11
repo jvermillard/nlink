@@ -203,6 +203,20 @@ impl NetworkConfig {
                     _ => {}
                 }
             }
+            if let Some(vlans) = l.port.as_ref().and_then(|p| p.vlans.as_ref()) {
+                let mut seen = std::collections::HashSet::new();
+                for v in vlans {
+                    if !(1..=4094).contains(&v.vid) || !seen.insert(v.vid) {
+                        errors.push(ValidationErrorInfo::new(
+                            at(),
+                            format!("port vlan {}: 1 to 4094, once each", v.vid),
+                        ));
+                    }
+                }
+                if vlans.iter().filter(|v| v.pvid).count() > 1 {
+                    errors.push(ValidationErrorInfo::new(at(), "a port has one PVID"));
+                }
+            }
             if l.bridge.is_some() && !matches!(l.link_type, DeclaredLinkType::Bridge) {
                 errors.push(ValidationErrorInfo::new(at(), "bridge options on a link that is not a bridge"));
             }
@@ -911,6 +925,49 @@ pub struct PortOptions {
     pub(crate) cost: Option<u32>,
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) priority: Option<u16>,
+    /// The port's VLANs: exactly these, when declared (#516). One the port
+    /// has and this does not name is removed, the default PVID a port gets
+    /// when it joins a VLAN-filtering bridge included.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) vlans: Option<Vec<PortVlan>>,
+}
+
+/// One VLAN of a bridge port (#516): `bridge vlan add vid V [pvid]
+/// [untagged]`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PortVlan {
+    /// The VLAN id, 1 to 4094.
+    pub vid: u16,
+    /// Untagged traffic arriving on the port belongs to it.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub pvid: bool,
+    /// It leaves the port untagged.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub untagged: bool,
+}
+
+impl PortVlan {
+    /// VLAN `vid`, with these flags.
+    pub fn new(vid: u16, pvid: bool, untagged: bool) -> Self {
+        Self { vid, pvid, untagged }
+    }
+}
+
+impl std::fmt::Display for PortVlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "vlan {}", self.vid)?;
+        if self.pvid {
+            f.write_str(" pvid")?;
+        }
+        if self.untagged {
+            f.write_str(" untagged")?;
+        }
+        Ok(())
+    }
 }
 
 macro_rules! port_bool {
@@ -956,6 +1013,27 @@ impl PortOptions {
     /// The STP port priority.
     pub fn priority(mut self, priority: u16) -> Self {
         self.priority = Some(priority);
+        self
+    }
+
+    /// A tagged VLAN on the port (a trunk member).
+    pub fn vlan(self, vid: u16) -> Self {
+        self.vlan_with(PortVlan::new(vid, false, false))
+    }
+
+    /// A VLAN that leaves the port untagged.
+    pub fn untagged(self, vid: u16) -> Self {
+        self.vlan_with(PortVlan::new(vid, false, true))
+    }
+
+    /// The port's access VLAN: its PVID, leaving untagged.
+    pub fn pvid(self, vid: u16) -> Self {
+        self.vlan_with(PortVlan::new(vid, true, true))
+    }
+
+    /// A VLAN with the flags given.
+    pub fn vlan_with(mut self, vlan: PortVlan) -> Self {
+        self.vlans.get_or_insert_with(Vec::new).push(vlan);
         self
     }
 
@@ -4540,7 +4618,7 @@ mod serde_roundtrip_tests {
             .link("d0", |l| {
                 l.dummy()
                     .master("br0")
-                    .port_options(|p| p.learning(false).isolated(true).cost(50))
+                    .port_options(|p| p.learning(false).isolated(true).cost(50).pvid(10).vlan(20))
             });
         cfg.validate().unwrap();
         assert_roundtrips(&cfg);
@@ -4548,7 +4626,7 @@ mod serde_roundtrip_tests {
         for want in [
             r#""link-type":"bridge""#,
             r#""bridge":{"vlan-filtering":true,"vlan-default-pvid":10,"stp":true,"ageing-time":"100s"}"#,
-            r#""port":{"learning":false,"isolated":true,"cost":50}"#,
+            r#""port":{"learning":false,"isolated":true,"cost":50,"vlans":[{"vid":10,"pvid":true,"untagged":true},{"vid":20}]}"#,
         ] {
             assert!(json.contains(want), "{want} missing: {json}");
         }
@@ -4566,6 +4644,18 @@ mod serde_roundtrip_tests {
                     .link("bond0", |l| l.bond())
                     .link("d0", |l| l.dummy().master("bond0").port_options(|p| p.learning(false))),
                 "its master bond0 is not a bridge",
+            ),
+            (
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge())
+                    .link("d0", |l| l.dummy().master("br0").port_options(|p| p.vlan(4095))),
+                "port vlan 4095",
+            ),
+            (
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge())
+                    .link("d0", |l| l.dummy().master("br0").port_options(|p| p.pvid(10).pvid(20))),
+                "a port has one PVID",
             ),
         ] {
             let err = cfg.validate().unwrap_err().to_string();

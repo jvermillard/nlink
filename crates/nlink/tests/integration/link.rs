@@ -1003,3 +1003,36 @@ async fn a_link_is_created_in_another_namespace() -> Result<()> {
     assert_eq!(dt.alias(), Some("moved"));
     Ok(())
 }
+
+/// `get_bridge_vlans_all` returns the VLANs of a bridge's ports, not just
+/// its own: the filter kept only the bridge's entries before matching
+/// ports by master, so every port's were dropped. And `get_bridge_vlans`
+/// returns a port's (#516).
+#[tokio::test]
+async fn bridge_vlans_all_includes_the_ports() -> Result<()> {
+    use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
+    require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    let ns = TestNamespace::new("brvlan-all")?;
+    let conn = ns.connection()?;
+    conn.add_link(BridgeLink::new("br0").vlan_filtering(true)).await?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    conn.set_link_master("d0", "br0").await?;
+    conn.add_bridge_vlan(BridgeVlanBuilder::new(10).dev("d0")).await?;
+
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+    let vids: Vec<u16> = conn
+        .get_bridge_vlans_all("br0")
+        .await?
+        .iter()
+        .filter(|v| v.ifindex() == d0)
+        .map(|v| v.vid())
+        .collect();
+    assert!(vids.contains(&10), "d0's VLANs: {vids:?}");
+
+    // One port's, by name and by index, likewise.
+    let own: Vec<u16> = conn.get_bridge_vlans("d0").await?.iter().map(|v| v.vid()).collect();
+    assert!(own.contains(&10), "get_bridge_vlans(d0): {own:?}");
+    Ok(())
+}

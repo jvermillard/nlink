@@ -1503,3 +1503,55 @@ async fn bridge_and_port_options_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A bridge port's VLANs changed A→B→C (#516): the access VLAN moves, a
+/// tagged one becomes untagged, one goes and another comes. The declared
+/// set is the port's: the default PVID a port gets when it joins goes
+/// too. `bridge -j vlan` shows each step.
+#[tokio::test]
+async fn port_vlans_change_in_place() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    type P = nlink::netlink::config::PortOptions;
+    let step = |vlans: fn(P) -> P| {
+        NetworkConfig::new()
+            .link("br0", |l| l.bridge().up().bridge_options(|b| b.vlan_filtering(true)))
+            .link("d0", move |l| l.dummy().master("br0").up().port_options(vlans))
+    };
+    let steps = [
+        step(|p| p.pvid(10).vlan(20).vlan(30)),
+        step(|p| p.untagged(20).vlan(40)),
+        step(|p| p.pvid(1)),
+    ];
+    let want: [&[(u64, bool, bool)]; 3] = [
+        &[(10, true, true), (20, false, false), (30, false, false)],
+        &[(20, false, true), (40, false, false)],
+        &[(1, true, true)],
+    ];
+    let ns = TestNamespace::new("tr-portvlan")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let out = ns
+            .exec("bridge", &["-j", "vlan", "show", "dev", "d0"])
+            .map_err(|e| e.to_string())?;
+        let shown: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+        let have: Vec<(u64, bool, bool)> = shown[0]["vlans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|v| {
+                let flags: Vec<&str> = v["flags"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
+                (
+                    v["vlan"].as_u64().unwrap_or(0),
+                    flags.contains(&"PVID"),
+                    flags.contains(&"Egress Untagged"),
+                )
+            })
+            .collect();
+        if have != want[i] {
+            return Err(format!("step {}: want {:?}, have {have:?}: {out}", i + 1, want[i]));
+        }
+        Ok(())
+    })
+    .await
+}

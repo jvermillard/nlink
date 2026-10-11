@@ -227,7 +227,7 @@ impl Step {
 /// The inverse of a link change, from what the link had; `None` for a
 /// kind-parameter change, or a link this apply creates.
 fn invert_link_changes(changes: &LinkChanges) -> Option<LinkChanges> {
-    if changes.kind_update.is_some() || changes.port_update.is_some() {
+    if changes.kind_update.is_some() || changes.port_update.is_some() || changes.port_vlans.is_some() {
         return None;
     }
     let was = changes.was.as_ref()?;

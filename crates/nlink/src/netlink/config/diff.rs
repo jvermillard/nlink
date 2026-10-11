@@ -682,6 +682,14 @@ pub struct LinkChanges {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) port_update: Option<crate::netlink::link::BridgePortConfig>,
+    /// Port VLANs to add (`+vlan 10 pvid untagged`) or remove (`-vlan 1`)
+    /// (#516).
+    pub set_port_vlans: Vec<String>,
+    /// The declared VLAN set behind `set_port_vlans`: the apply reads the
+    /// port's and makes them these.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) port_vlans: Option<Vec<super::types::PortVlan>>,
     /// The attributes behind `set_kind_params`.
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
@@ -768,6 +776,7 @@ impl LinkChanges {
             && self.set_addr_gen_mode.is_none()
             && self.set_ipv6_token.is_none()
             && self.port_update.is_none()
+            && self.port_vlans.is_none()
     }
 
     /// Get a summary of the changes.
@@ -829,6 +838,7 @@ impl LinkChanges {
             parts.push(format!("token {token}"));
         }
         parts.extend(self.set_port_options.iter().map(|o| format!("port {o}")));
+        parts.extend(self.set_port_vlans.iter().cloned());
         parts.join(", ")
     }
 }
@@ -898,6 +908,9 @@ pub struct Snapshot {
     /// links its config declares a TC tree on. A link without one has
     /// neither.
     tc: HashMap<u32, super::tc_tree::TcLive>,
+    /// Every bridge port's VLANs (#516): read by [`read`](Self::read), and
+    /// by `read_for` when its config declares port VLANs.
+    bridge_vlans: Vec<crate::netlink::bridge_vlan::BridgeVlanEntry>,
 }
 
 impl Snapshot {
@@ -915,6 +928,7 @@ impl Snapshot {
         tc_links.sort_unstable();
         tc_links.dedup();
         snapshot.read_tc(conn, tc_links).await?;
+        snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
         Ok(snapshot)
     }
 
@@ -957,6 +971,13 @@ impl Snapshot {
             })
             .collect();
         snapshot.read_tc(conn, tree_links).await?;
+        if config
+            .links
+            .iter()
+            .any(|l| l.port.as_ref().is_some_and(|p| p.vlans.is_some()))
+        {
+            snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
+        }
         Ok(snapshot)
     }
 
@@ -968,6 +989,7 @@ impl Snapshot {
             qdiscs: conn.get_qdiscs().await?,
             extras: None,
             tc: HashMap::new(),
+            bridge_vlans: Vec::new(),
         })
     }
 
@@ -1067,6 +1089,7 @@ pub(crate) fn diff_snapshot(
     // can be detected by resolving the kernel's master ifindex
     // back to a name (Plan 207b H2).
     let flushing = diff_links(config, &link_by_name, &ifindex_to_name, &plan, &mut diff);
+    diff_port_vlans(config, &link_by_name, &snapshot.bridge_vlans, &mut diff);
 
     // The links this apply flushes: the ones its link changes take down or
     // move across an L3 master, the ports a recreated bond or VRF releases
@@ -1154,6 +1177,53 @@ pub(crate) fn diff_snapshot(
     }
 
     Ok(diff)
+}
+
+/// A declared port's VLANs against the port's (#516): the change lines,
+/// and the declared set the apply makes the port's. A link the apply
+/// creates gets them at create.
+fn diff_port_vlans(
+    config: &NetworkConfig,
+    link_by_name: &HashMap<&str, &LinkMessage>,
+    live: &[crate::netlink::bridge_vlan::BridgeVlanEntry],
+    diff: &mut ConfigDiff,
+) {
+    for declared in &config.links {
+        let Some(want) = declared.port.as_ref().and_then(|p| p.vlans.as_ref()) else {
+            continue;
+        };
+        let Some(link) = link_by_name.get(declared.name.as_str()) else {
+            continue;
+        };
+        let have: Vec<super::types::PortVlan> = live
+            .iter()
+            .filter(|v| v.ifindex() == link.ifindex())
+            .map(|v| super::types::PortVlan::new(v.vid(), v.is_pvid(), v.is_untagged()))
+            .collect();
+        let mut lines: Vec<String> = want
+            .iter()
+            .filter(|v| !have.contains(v))
+            .map(|v| format!("+{v}"))
+            .collect();
+        lines.extend(
+            have.iter()
+                .filter(|h| !want.iter().any(|w| w.vid == h.vid))
+                .map(|h| format!("-vlan {}", h.vid)),
+        );
+        if lines.is_empty() {
+            continue;
+        }
+        let entry = match diff.links_to_modify.iter_mut().find(|(n, _)| n == &declared.name) {
+            Some((_, changes)) => changes,
+            None => {
+                diff.links_to_modify
+                    .push((declared.name.clone(), LinkChanges::default()));
+                &mut diff.links_to_modify.last_mut().unwrap().1
+            }
+        };
+        entry.set_port_vlans = lines;
+        entry.port_vlans = Some(want.clone());
+    }
 }
 
 /// The links as the plan's recreates leave them: the deleted ones gone,
@@ -1505,7 +1575,12 @@ fn new_peer_changes(declared: &DeclaredLink, bonds: &HashSet<&str>) -> LinkChang
         set_mtu: declared.mtu,
         set_address: declared.address,
         set_master,
-        port_update: declared.port.as_ref().map(|p| p.to_config()),
+        port_update: declared
+            .port
+            .as_ref()
+            .map(|p| p.to_config())
+            .filter(|c| !c.is_empty()),
+        port_vlans: declared.port.as_ref().and_then(|p| p.vlans.clone()),
         ..LinkChanges::declaring(&declared.attrs)
     }
 }
