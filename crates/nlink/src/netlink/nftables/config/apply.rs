@@ -124,6 +124,14 @@ impl NftablesDiff {
         //    one that update's own commit moved the ruleset to. Anything
         //    else committing in between makes the kernel refuse the batch
         //    with ERESTART, rather than apply a diff of a ruleset that is gone.
+        // A table flag change the kernel refuses on a live table fails
+        // here, before anything has changed (#479).
+        if let Some((family, name, why)) = self.tables_refused.first() {
+            return Err(Error::NotSupported(format!(
+                "table {family:?} {name}: {why}. Delete the table and apply again to \
+                 recreate it with the new flags."
+            )));
+        }
         // A refused chain recreate fails here, before anything has changed
         // (#478).
         if let Some(refused) = self.chains_to_recreate.iter().find(|r| r.is_refused()) {
@@ -206,6 +214,11 @@ impl NftablesDiff {
                 tx = tx.del_set(table, name, *family);
             }
         }
+        let recreated_flowtable = |table: &str, family: Family, name: &str| {
+            self.flowtables_to_add
+                .iter()
+                .any(|f| f.table() == table && f.family() == family && f.name() == name)
+        };
         for (table, family, name, object_type) in &self.objects_to_delete {
             if recreated_object(table, *family, name, *object_type) {
                 tx = tx.del_object(table, name, *object_type, *family);
@@ -215,6 +228,13 @@ impl NftablesDiff {
         // their rules went in step 1 (#478).
         for r in &self.chains_to_recreate {
             tx = tx.del_chain(&r.table, r.chain.name(), r.family);
+        }
+        // Flowtables recreated with another priority or offload setting;
+        // the rules that offload to them were moved out in step 1 (#479).
+        for (family, table, name) in &self.flowtables_to_delete {
+            if recreated_flowtable(table, *family, name) {
+                tx = tx.del_flowtable(*family, table, name);
+            }
         }
 
         // Phase 2 — add, in dependency order.
@@ -233,9 +253,11 @@ impl NftablesDiff {
 
         // 4b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,
         //     so a flag change converges without a delete+recreate — which
-        //     would cascade away every chain and rule inside it (#208).
+        //     would cascade away every chain and rule inside it (#208). Sent
+        //     without NLM_F_EXCL, and with the flags even when they are 0
+        //     (#479).
         for (family, name, flags) in &self.tables_to_modify {
-            tx = tx.add_table_with_flags(name, *family, *flags);
+            tx = tx.update_table(name, *family, *flags);
         }
 
         // 5. Chain adds, then chain property updates — before the sets,
@@ -290,6 +312,28 @@ impl NftablesDiff {
                 runtime = runtime.counter(true);
             }
             tx = tx.add_flowtable(&runtime);
+        }
+        // 7b. Flowtable updates: the devices to add and the flags in one
+        //     message — an update only ever adds devices — and the devices
+        //     to remove in another (#479).
+        for update in &self.flowtables_to_update {
+            let ft = &update.flowtable;
+            let mut runtime = super::super::Flowtable::new(ft.family(), ft.table(), ft.name())
+                .priority(ft.priority());
+            for dev in &update.add_devs {
+                runtime = runtime.device(dev.clone());
+            }
+            runtime.flags = ft.flags();
+            tx = tx.update_flowtable(&runtime);
+            if !update.remove_devs.is_empty() {
+                tx = tx.del_flowtable_devices(
+                    ft.family(),
+                    ft.table(),
+                    ft.name(),
+                    ft.priority(),
+                    &update.remove_devs,
+                );
+            }
         }
 
         // 8. Set adds — after the owning table exists, before the
@@ -358,7 +402,9 @@ impl NftablesDiff {
 
         // 15. Flowtable deletes — after the rules that `flow add` to them.
         for (family, table, name) in &self.flowtables_to_delete {
-            tx = tx.del_flowtable(*family, table, name);
+            if !recreated_flowtable(table, *family, name) {
+                tx = tx.del_flowtable(*family, table, name);
+            }
         }
 
         // 16. Table deletes (cascades any leftover children).

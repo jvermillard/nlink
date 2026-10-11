@@ -46,6 +46,31 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A flowtable with a device could not be created, and table-flag and
+  flowtable changes never applied (#479).**
+  - **Flowtable devices:** each device was wrapped in an `NFTA_LIST_ELEM`
+    nest, whose bytes the kernel took for the name, so any flowtable with
+    a device failed with `ENOENT`. The reader expected the same nest and
+    read no devices from a real dump. No test had used a device. Devices
+    are now bare `NFTA_DEVICE_NAME`s, both ways.
+  - **Table flags:** a flag change went out as an add with `NLM_F_EXCL`
+    (`EEXIST`), and without `NFTA_TABLE_FLAGS` when it was 0, which the
+    kernel ignores. The new `Transaction::update_table` sends the update
+    with its flags. A persist or owner change, which the kernel refuses
+    on a live table, is listed in the new `NftablesDiff::tables_refused`,
+    and the apply fails with `NotSupported` before it changes anything.
+  - **Flowtables:** every change went to `flowtables_to_add` (`EEXIST`).
+    Now:
+    - devices and the counter flag change in place, through the new
+      `flowtables_to_update` (`FlowtableUpdate`) and the new
+      `Transaction::update_flowtable` / `del_flowtable_devices`;
+    - devices are compared as a set (the kernel lists added ones first);
+    - a priority or hardware-offload change recreates the flowtable, with
+      the rules that offload to it moved out of the way
+      (`MoveReason::BoundToRecreatedFlowtable`).
+  - CI's module lists gain `nf_flow_table` and `nft_flow_offload`, so the
+    flowtable tests cannot skip there.
+
 - **nftables: hooks per family, multi-device chains, PAD attributes,
   interface names, and `validate()` (#484).**
   - **ARP hooks:** `Hook` encoded inet hook numbers for every family, but
@@ -1029,6 +1054,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Transaction::{update_table, update_flowtable, del_flowtable_devices}`,
+  `NftablesDiff::{tables_refused, flowtables_to_update}` and
+  `FlowtableUpdate`** (#479).
 
 - **`Hook::number(family)`, `ChainInfo::devices`, and
   `Rule::{match_iif_not, match_oif_not, match_iif_prefix,

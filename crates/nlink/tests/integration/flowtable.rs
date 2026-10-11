@@ -89,3 +89,44 @@ async fn flowtable_hw_offload_flag_round_trips() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A flowtable with devices installs, and its devices read back, both
+/// through nlink and through `nft`. Each device was wrapped in an
+/// `NFTA_LIST_ELEM` nest whose bytes the kernel took for the name, so any
+/// flowtable with a device failed with `ENOENT`; the reader expected the
+/// same nest and read no devices from a real dump. Every test here used a
+/// flowtable without devices (#479).
+#[tokio::test]
+async fn a_flowtable_with_devices_roundtrips() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nf_flow_table", "dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("ft-devs")?;
+        for dev in ["d0", "d1"] {
+            ns.exec("ip", &["link", "add", dev, "type", "dummy"])?;
+        }
+        let nft = ns.connection_for::<Nftables>()?;
+        nft.add_table("filter", Family::Inet).await?;
+        let ft = Flowtable::new(Family::Inet, "filter", "ft0")
+            .device("d0")
+            .device("d1");
+        nft.add_flowtable(&ft).await?;
+
+        let dumped = nft.list_flowtables().await?;
+        let ours = dumped
+            .iter()
+            .find(|f| f.name == "ft0")
+            .expect("ft0 is listed");
+        let mut devs = ours.devs.clone();
+        devs.sort();
+        assert_eq!(devs, ["d0", "d1"]);
+        let shown = ns.exec("nft", &["list", "flowtable", "inet", "filter", "ft0"])?;
+        assert!(
+            shown.contains("d0") && shown.contains("d1"),
+            "nft does not show both devices:\n{shown}"
+        );
+        Ok(())
+    })
+    .await
+}
