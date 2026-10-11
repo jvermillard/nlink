@@ -219,6 +219,16 @@ All notable changes to this project will be documented in this file.
   per-kind link builders are now built by one `link_config`, and
   `Box<dyn LinkConfig>` is a `LinkConfig`.
 
+- **An owner tag finds a config's links again (#512, part 4).**
+  `NetworkConfig::owner(tag)` writes `tag` as the alias (`IFLA_IFALIAS`)
+  of every link the apply creates. With `purge`, a link that carries the
+  tag and that the config no longer declares is removed, through the same
+  path as a link the previous config declared. Everything on a tagged link
+  goes with it. What the kernel would destroy with it that cannot be
+  declared refuses the removal: an untagged link stacked on it, FDB
+  entries, neighbours. This is how a caller finds its links again with no
+  record of the config it applied before, after a crash for instance.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

@@ -308,6 +308,10 @@ pub struct ConfigDiff {
     /// Not shown or serialized.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) routes_protocol: Option<crate::netlink::types::route::RouteProtocol>,
+    /// The owner tag the apply writes as each created link's alias (#512).
+    /// Not shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) owner: Option<String>,
 }
 
 impl ConfigDiff {
@@ -799,6 +803,7 @@ pub(crate) fn diff_snapshot(
     diff.links_to_recreate = plan.recreate.clone();
     diff.links_to_remove = plan.remove.clone();
     diff.routes_protocol = Some(config.routes_protocol());
+    diff.owner = config.owner.clone();
     // The rest of the diff compares against the state the apply's
     // recreates leave behind: a recreated link, and everything the kernel
     // deletes with it, absent — so what the config declares on it is
