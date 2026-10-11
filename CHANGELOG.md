@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **The early half of the API cleanup (#532).** The workspace is 0.32.0;
+  see `docs/migration_guide/0.31.0-to-0.32.0.md`.
+  - **Removed:** `Error::SequenceMismatch`, `Error::NamespaceRestoreFailed`
+    and `is_namespace_restore_failed()`. Nothing constructed them.
+  - **`full` no longer includes `lab`.** `lab` is test code: namespace
+    helpers, `require_root!` and a `tracing-subscriber`. Enable it in
+    `[dev-dependencies]`.
+  - **tokio.** nlink no longer turns on tokio's `full`. It asks for `rt`,
+    `net`, `sync`, `time` and `macros`, which is what it uses.
+  - **MSRV 1.88** (it was 1.98), checked by CI's `msrv` job. The project
+    still builds with the fleet's 1.98.
+  - **Deprecated:** `Connection::get_timeout()`, renamed
+    `operation_timeout()`, and `namespace_events`
+    (`NamespaceEventSubscriber`, `NamespaceNetlinkEvent`), which
+    duplicates `NetworkEvent::{NewNsId, DelNsId}`.
+  - **`Display`:** `WireguardConfigDiff`'s no longer ends with a newline,
+    like the other diffs'. The `nlink-config` and `nlink-nft` diff output
+    ends with one again: they printed with `print!`.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
