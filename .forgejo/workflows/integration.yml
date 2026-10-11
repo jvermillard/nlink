@@ -80,7 +80,8 @@ jobs:
           fi
           for m in nf_tables nft_quota nft_limit nft_reject_ipv4 nft_reject_ipv6 nft_reject_inet \
                    sch_htb cls_flower sch_netem \
-                   sch_ingress ifb act_mirred cls_u32 cls_matchall dummy veth vrf wireguard 8021q; do
+                   sch_ingress ifb act_mirred cls_u32 cls_matchall dummy veth vrf wireguard 8021q \
+                   bridge; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
               continue
             fi
@@ -110,7 +111,7 @@ jobs:
           NLINK_TEST_STRICT_MODULES: >-
             nf_tables,nft_quota,nft_limit,nft_reject_ipv4,nft_reject_ipv6,nft_reject_inet,
             sch_htb,cls_flower,sch_netem,
-            sch_ingress,ifb,act_mirred,cls_u32,cls_matchall,dummy,veth,8021q
+            sch_ingress,ifb,act_mirred,cls_u32,cls_matchall,dummy,veth,8021q,bridge
           # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
           # lane's containers are rootless: uid 0 here is the runner's
           # unprivileged user wearing a mapping, and six tests need root

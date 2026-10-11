@@ -42,6 +42,63 @@ fn dummy_up(name: &str) -> NetworkConfig {
 // Links
 // ============================================================================
 
+/// Link modifications go lower device first, and a new link's lower device
+/// gets its MTU before the create. Declaration order decided it, so raising
+/// a parent and a VLAN together was ERANGE, creating a VLAN at an MTU its
+/// parent was about to get was EINVAL, and bringing a VLAN up before its
+/// parent was ENETDOWN (#473).
+#[tokio::test]
+async fn link_changes_go_lower_device_first() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let mtu_of = |ns: &TestNamespace, dev: &str| -> Result<u64, String> {
+        ip_json(ns, &["link", "show", "dev", dev])?[0]["mtu"]
+            .as_u64()
+            .ok_or_else(|| format!("{dev} has no mtu"))
+    };
+    let at = |mtu: u32| {
+        NetworkConfig::new()
+            .link("v10", move |l| l.vlan("p0", 10).mtu(mtu).up())
+            .link("p0", move |l| l.dummy().mtu(mtu).up())
+    };
+    let cases = vec![
+        case(
+            "raise-then-lower-child-first",
+            vec![at(1500), at(9000), at(1400)],
+        )
+        .check(move |ns| match (mtu_of(ns, "p0")?, mtu_of(ns, "v10")?) {
+            (1400, 1400) => Ok(()),
+            held => Err(format!("want p0 and v10 at 1400: {held:?}")),
+        }),
+        case(
+            "new-vlan-on-raised-parent",
+            vec![
+                dummy_up("p0"),
+                NetworkConfig::new()
+                    .link("v11", |l| l.vlan("p0", 11).mtu(9000).up())
+                    .link("p0", |l| l.dummy().mtu(9000).up()),
+            ],
+        )
+        .check(move |ns| match mtu_of(ns, "v11")? {
+            9000 => Ok(()),
+            held => Err(format!("want v11 at 9000: {held}")),
+        }),
+        case(
+            "vlan-up-before-its-parent",
+            vec![
+                NetworkConfig::new()
+                    .link("v10", |l| l.vlan("p0", 10).down())
+                    .link("p0", |l| l.dummy().down()),
+                NetworkConfig::new()
+                    .link("v10", |l| l.vlan("p0", 10).up())
+                    .link("p0", |l| l.dummy().up()),
+            ],
+        ),
+    ];
+    assert_converges("nce-order", cases).await
+}
+
 /// The peer of a veth pair the apply creates, declared on its own, gets its
 /// state, MTU and master in the same apply. They waited for the next one,
 /// so the pair had no carrier after the first (#475).

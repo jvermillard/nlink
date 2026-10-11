@@ -46,6 +46,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Link changes ran in declaration order, so the kernel refused valid
+  configs (#473).** Only creates were sorted.
+  - **Raising a parent's and a VLAN's MTU together** failed with `ERANGE`
+    when the VLAN came first.
+  - **Creating a VLAN or macvlan at an MTU its parent was about to get**
+    failed with `EINVAL`, because creates ran before every modification.
+  - **Bringing a VLAN up before its parent** failed with `ENETDOWN`.
+
+  Modifications now go lower device first. The MTU of a lower device
+  under a new link is set before the creates. Within one link, the MAC is
+  set while the link is down (after a `down`, before an `up`), because
+  most hardware refuses a MAC change while up with `EBUSY`. The CI
+  module lists gain `bridge`.
+
 - **A declared link that did not exist was skipped without a word
   (#475).** A link declared without a kind is not created, and when it
   was missing, its declaration was dropped from the diff.
