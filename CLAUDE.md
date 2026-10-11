@@ -347,6 +347,13 @@ let conn: Connection<Route> = namespace::connection_for("myns")?;
 let wg: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
 ```
 
+`namespace::Netns` (0.32, #520) is the owned handle: it holds an fd, so
+what it names cannot change under it (`NetnsId` is the nsfs dev + inode).
+`netns.connection::<P>()`, `netns.run(|| …)` and `netns.socket(..)` all
+work inside it, and `conn.netns()` / `conn.sibling::<Q>()` recover it
+from a connection. New namespace-aware code should hold a `Netns` rather
+than re-resolve a name: a name can be deleted and reused.
+
 The `nlink::lab` module (feature `lab`) provides `LabNamespace`
 and `with_namespace` for integration tests + local CLI demos.
 Drop deletes the namespace; failures `tracing::warn!`.

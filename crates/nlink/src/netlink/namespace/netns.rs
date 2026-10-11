@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-use super::{NamespaceSpec, live_named_path, namespace_open_error};
+use super::{NamespaceMarker, NamespaceSpec, live_named_path, namespace_open_error};
 use crate::netlink::{
     connection::Connection,
     error::{Error, Result},
@@ -112,7 +112,16 @@ pub struct Netns {
     id: NetnsId,
     name: Option<Arc<str>>,
     label: Arc<str>,
+    /// The marker it was opened through, when that was a name or a path
+    /// outside `/proc`: whether the namespace is still there (#504).
+    marker: Option<NamespaceMarker>,
+    /// The thread that makes this namespace's sockets, started on first
+    /// use and ended when the handle drops (#520).
+    worker: std::sync::Mutex<Option<std::sync::mpsc::Sender<Job>>>,
 }
+
+/// A job for a namespace's worker thread.
+type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl Netns {
     /// Open the namespace `ip netns` knows as `name` (`/var/run/netns/<name>`).
@@ -314,7 +323,7 @@ impl Netns {
     /// # }
     /// ```
     pub fn socket(&self, domain: i32, ty: i32, protocol: i32) -> Result<OwnedFd> {
-        self.run(|| {
+        self.on_worker(move || {
             // SAFETY: socket(2) returns a fresh fd or -1.
             let fd = unsafe { libc::socket(domain, ty | libc::SOCK_CLOEXEC, protocol) };
             if fd < 0 {
@@ -331,10 +340,18 @@ impl Netns {
     /// For the generic-netlink families that resolve their id
     /// asynchronously (WireGuard, ethtool, …), use
     /// [`connection_async`](Self::connection_async).
+    ///
+    /// The socket is made on the handle's worker thread, so a thousand
+    /// connections cost one thread, not a thousand. A stream on it ends
+    /// with [`Error::NamespaceDeleted`] once the namespace's name is
+    /// deleted, as one opened by path does.
     pub fn connection<P: ProtocolState + Default + SyncConstructible>(
         &self,
     ) -> Result<Connection<P>> {
-        Connection::new_in_namespace_fd(&self.fd)
+        Ok(Connection::from_parts(
+            self.netlink_socket(P::PROTOCOL)?,
+            P::default(),
+        ))
     }
 
     /// A new connection to a generic-netlink family in the namespace, its
@@ -342,7 +359,7 @@ impl Netns {
     pub async fn connection_async<P: AsyncProtocolInit + AsyncConstructible>(
         &self,
     ) -> Result<Connection<P>> {
-        let socket = NetlinkSocket::new_in_namespace_fd(P::PROTOCOL, &self.fd)?;
+        let socket = self.netlink_socket(P::PROTOCOL)?;
         let state = P::resolve_async(&socket).await?;
         Ok(Connection::from_parts(socket, state))
     }
@@ -354,12 +371,24 @@ impl Netns {
             id: self.id,
             name: self.name.clone(),
             label: self.label.clone(),
+            marker: self.marker.clone(),
+            worker: std::sync::Mutex::new(None),
         })
+    }
+
+    /// A handle to the namespace an open nsfs fd names: one from
+    /// `/proc/<pid>/ns/net`, `ioctl(SIOCGSKNS)`, a pidfd ioctl, or another
+    /// process. It is refused unless it names a network namespace.
+    pub fn from_fd(fd: OwnedFd) -> Result<Self> {
+        Self::from_owned(fd, "fd".into(), None)
     }
 
     fn open_nsfs(path: &Path, label: &str) -> Result<Self> {
         let file = std::fs::File::open(path).map_err(|e| namespace_open_error(path, e))?;
-        Self::from_owned(OwnedFd::from(file), label.into(), None)
+        let marker = NamespaceMarker::of(path, &file);
+        let mut ns = Self::from_owned(OwnedFd::from(file), label.into(), None)?;
+        ns.marker = marker;
+        Ok(ns)
     }
 
     fn from_owned(fd: OwnedFd, label: Arc<str>, name: Option<Arc<str>>) -> Result<Self> {
@@ -383,7 +412,95 @@ impl Netns {
             id,
             name,
             label,
+            marker: None,
+            worker: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Run `f` on this namespace's worker thread, starting it on first use.
+    ///
+    /// One thread per handle makes all of its sockets, where
+    /// `NetlinkSocket::new_in_namespace` spawns and joins one per socket
+    /// (#520). The thread ends when the handle drops.
+    fn on_worker<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+        let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        if worker.is_none() {
+            *worker = Some(self.start_worker()?);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job: Job = Box::new(move || {
+            let _ = tx.send(f());
+        });
+        if worker.as_ref().is_some_and(|w| w.send(job).is_err()) {
+            *worker = None;
+            return Err(Error::InvalidMessage(format!(
+                "namespace {}: the worker thread has gone",
+                self.label
+            )));
+        }
+        drop(worker);
+        rx.recv().map_err(|_| {
+            Error::InvalidMessage(format!("namespace {}: the job panicked", self.label))
+        })
+    }
+
+    fn start_worker(&self) -> Result<std::sync::mpsc::Sender<Job>> {
+        let fd = self.fd.try_clone().map_err(Error::Io)?;
+        let target = self.id;
+        let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
+        std::thread::Builder::new()
+            .name("nlink-netns".into())
+            .spawn(move || {
+                let here = Netns::current().map(|n| n.id).ok();
+                // SAFETY: setns switches only this thread, which lives as
+                // long as the handle's sender and never leaves.
+                if here != Some(target)
+                    && unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) } < 0
+                {
+                    let _ = ready_tx.send(Err(Error::Io(std::io::Error::last_os_error())));
+                    return;
+                }
+                drop(fd);
+                let _ = ready_tx.send(Ok(()));
+                while let Ok(job) = inbox.recv() {
+                    // A panicking job must not take the thread with it.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                }
+            })
+            .map_err(Error::Io)?;
+        ready_rx.recv().map_err(|_| {
+            Error::InvalidMessage(format!("namespace {}: the worker thread died", self.label))
+        })??;
+        Ok(jobs)
+    }
+
+    /// A netlink socket made in the namespace by its worker, carrying the
+    /// namespace and its marker (#504, #520).
+    fn netlink_socket(&self, protocol: crate::netlink::Protocol) -> Result<NetlinkSocket> {
+        let (raw, pid) = self.on_worker(move || NetlinkSocket::create_raw_socket(protocol))??;
+        let mut socket = NetlinkSocket::from_raw_socket(raw, pid, protocol)?;
+        let fd = self.fd.try_clone().map_err(Error::Io)?;
+        socket.set_namespace(Arc::new(fd), self.marker.clone());
+        Ok(socket)
+    }
+
+    /// Whether the namespace is still where it was opened: its name or
+    /// marker still names it. A handle opened any other way (a pid, a
+    /// pidfd, an fd) has nothing to check and answers `true`; the handle
+    /// keeps the namespace itself alive regardless.
+    pub fn is_live(&self) -> bool {
+        self.marker.as_ref().is_none_or(NamespaceMarker::is_live)
+    }
+
+    /// The error for a namespace whose marker is gone.
+    pub(crate) fn deleted(&self) -> Error {
+        Error::NamespaceDeleted {
+            path: self
+                .marker
+                .as_ref()
+                .map_or_else(|| PathBuf::from(&*self.label), |m| m.path().to_path_buf()),
+        }
     }
 }
 
@@ -557,6 +674,29 @@ mod tests {
         let ns = Netns::from_pidfd(&pidfd).unwrap();
         assert_eq!(ns.id(), Netns::current().unwrap().id());
         assert_eq!(pidfd_pid(pidfd.as_fd()).unwrap(), std::process::id());
+    }
+
+    /// The worker makes sockets in the handle's namespace; in the caller's
+    /// own it needs no privilege (#520).
+    #[test]
+    fn the_worker_makes_sockets_and_survives_a_panic() {
+        let ns = Netns::current().unwrap();
+        for _ in 0..3 {
+            let fd = ns.socket(libc::AF_INET, libc::SOCK_DGRAM, 0).unwrap();
+            assert!(fd.as_raw_fd() >= 0);
+        }
+        let err = ns.on_worker(|| panic!("boom")).unwrap_err();
+        assert!(err.to_string().contains("panicked"), "{err}");
+        assert!(ns.socket(libc::AF_INET, libc::SOCK_DGRAM, 0).is_ok());
+    }
+
+    /// A connection made with `new()` is in the caller's namespace.
+    #[tokio::test]
+    async fn a_plain_connection_knows_its_namespace() {
+        let conn = Connection::<crate::netlink::Route>::new().unwrap();
+        assert_eq!(conn.netns().unwrap().id(), Netns::current().unwrap().id());
+        let nft = conn.sibling::<crate::netlink::Nftables>().unwrap();
+        assert_eq!(nft.netns().unwrap().id(), Netns::current().unwrap().id());
     }
 
     #[test]

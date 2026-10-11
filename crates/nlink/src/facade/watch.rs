@@ -40,14 +40,29 @@ pub async fn route_changes() -> Result<RouteResyncStream> {
 /// Watch RTNETLINK changes inside a named namespace.
 ///
 /// 0.19 Finding B — now `async`.
+///
+/// The namespace is opened once. Every resync reconnects to that one, and
+/// ends the stream with `NamespaceDeleted` once its name is gone, rather
+/// than connect to a namespace created later under the same name (#520).
 pub async fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
-    let conn = namespace::connection_for::<Route>(ns)?;
-    let ns_owned = ns.to_string();
+    let netns = Arc::new(namespace::Netns::open(ns)?);
+    let conn = netns.connection::<Route>()?;
     let factory: ConnectionFactory<Route> = Arc::new(move || {
-        let ns = ns_owned.clone();
-        Box::pin(async move { namespace::connection_for::<Route>(&ns) })
+        let netns = netns.clone();
+        Box::pin(async move { reconnect::<Route>(&netns) })
     });
     conn.into_events_with_resync(factory).await
+}
+
+/// A resync's new connection, in the namespace the stream started in.
+fn reconnect<P>(netns: &namespace::Netns) -> Result<Connection<P>>
+where
+    P: crate::netlink::ProtocolState + Default + crate::netlink::construction::SyncConstructible,
+{
+    if !netns.is_live() {
+        return Err(netns.deleted());
+    }
+    netns.connection::<P>()
 }
 
 // =============================================================================
@@ -68,12 +83,15 @@ pub async fn nftables_changes() -> Result<NftablesResyncStream> {
 /// Watch nftables ruleset mutations inside a named namespace.
 ///
 /// 0.19 Finding B — now `async`.
+///
+/// Resyncs reconnect to the namespace the stream started in, as
+/// [`route_changes_in_namespace`] does (#520).
 pub async fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStream> {
-    let conn = namespace::connection_for::<Nftables>(ns)?;
-    let ns_owned = ns.to_string();
+    let netns = Arc::new(namespace::Netns::open(ns)?);
+    let conn = netns.connection::<Nftables>()?;
     let factory: ConnectionFactory<Nftables> = Arc::new(move || {
-        let ns = ns_owned.clone();
-        Box::pin(async move { namespace::connection_for::<Nftables>(&ns) })
+        let netns = netns.clone();
+        Box::pin(async move { reconnect::<Nftables>(&netns) })
     });
     conn.into_events_with_resync(factory).await
 }
@@ -102,6 +120,8 @@ pub async fn wireguard_changes_in_namespace(
     ns: &str,
     opts: WireguardWatchOptions,
 ) -> Result<WireguardWatcher> {
-    let conn = namespace::connection_for_async::<Wireguard>(ns).await?;
+    let conn = namespace::Netns::open(ns)?
+        .connection_async::<Wireguard>()
+        .await?;
     WireguardWatcher::new(conn, opts)
 }

@@ -98,6 +98,10 @@ pub struct NetlinkSocket {
     /// it was opened through one. Event streams watch it so they can end
     /// when the namespace is deleted instead of keeping it alive, silent.
     namespace_marker: Option<super::namespace::NamespaceMarker>,
+    /// #520 — the namespace this socket was made in, when it was made in
+    /// one by fd, path or `Netns`: `Connection::netns` and `sibling` read
+    /// it. `None` for a socket made in its creating thread's namespace.
+    netns: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
 }
 
 impl NetlinkSocket {
@@ -164,7 +168,20 @@ impl NetlinkSocket {
             .join();
 
         match thread_result {
-            Ok(Ok((socket, pid))) => Self::from_raw_socket(socket, pid, protocol),
+            Ok(Ok((socket, pid))) => {
+                let mut socket = Self::from_raw_socket(socket, pid, protocol)?;
+                // SAFETY: `ns_fd` is open for the caller, and F_DUPFD_CLOEXEC
+                // returns a new fd or -1.
+                let dup = unsafe { libc::fcntl(ns_fd, libc::F_DUPFD_CLOEXEC, 0) };
+                if dup >= 0 {
+                    use std::os::fd::FromRawFd;
+                    // SAFETY: the duplicate is ours alone.
+                    socket.netns = Some(std::sync::Arc::new(unsafe {
+                        std::os::fd::OwnedFd::from_raw_fd(dup)
+                    }));
+                }
+                Ok(socket)
+            }
             Ok(Err(e)) => Err(e),
             Err(_panic) => Err(Error::InvalidMessage(
                 "namespace socket worker thread panicked".to_string(),
@@ -270,7 +287,7 @@ impl NetlinkSocket {
     /// half of construction — `socket(2)` binds the socket to the calling
     /// thread's netns at creation time — and is runtime-independent, so
     /// `new_in_namespace` can run it on a dedicated worker thread (#185).
-    fn create_raw_socket(protocol: Protocol) -> Result<(Socket, u32)> {
+    pub(crate) fn create_raw_socket(protocol: Protocol) -> Result<(Socket, u32)> {
         let mut socket = Socket::new(protocol.as_isize())?;
         socket.set_non_blocking(true)?;
 
@@ -293,7 +310,7 @@ impl NetlinkSocket {
     /// thread with a tokio runtime context (`AsyncFd::new` registers with the
     /// reactor); the socket's netns membership is already fixed, so this half
     /// is namespace-insensitive.
-    fn from_raw_socket(socket: Socket, pid: u32, protocol: Protocol) -> Result<Self> {
+    pub(crate) fn from_raw_socket(socket: Socket, pid: u32, protocol: Protocol) -> Result<Self> {
         // `AsyncFd::new` panics outside a tokio runtime, which `Connection::
         // new()` and `connection_for()` reached while promising a `Result`
         // (#510).
@@ -311,7 +328,25 @@ impl NetlinkSocket {
             protocol,
             dispatcher: std::sync::OnceLock::new(),
             namespace_marker: None,
+            netns: None,
         })
+    }
+
+    /// Record the namespace a socket was made in, and the marker its
+    /// streams watch (#504, #520).
+    pub(crate) fn set_namespace(
+        &mut self,
+        netns: std::sync::Arc<std::os::fd::OwnedFd>,
+        marker: Option<super::namespace::NamespaceMarker>,
+    ) {
+        self.netns = Some(netns);
+        self.namespace_marker = marker;
+    }
+
+    /// The namespace this socket was made in, when it was made in one by
+    /// fd, path or `Netns` (#520).
+    pub(crate) fn origin_netns(&self) -> Option<&std::sync::Arc<std::os::fd::OwnedFd>> {
+        self.netns.as_ref()
     }
 
     /// Plan 234 — install the per-Connection

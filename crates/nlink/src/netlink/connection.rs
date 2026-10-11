@@ -609,6 +609,65 @@ impl<P: ProtocolState> Connection<P> {
         self
     }
 
+    /// The network namespace this connection's socket lives in (#520).
+    ///
+    /// Exact for a connection made in a namespace (by [`Netns`], fd or
+    /// path). For one made with `new()` the kernel is asked
+    /// (`SIOCGSKNS`, which wants `CAP_NET_ADMIN`); without the privilege
+    /// it is the calling thread's namespace, which is the socket's unless
+    /// the thread has moved since.
+    ///
+    /// [`Netns`]: crate::netlink::namespace::Netns
+    pub fn netns(&self) -> Result<crate::netlink::namespace::Netns> {
+        use crate::netlink::namespace::Netns;
+        if let Some(fd) = self.socket.origin_netns() {
+            return Netns::from_fd(fd.try_clone().map_err(Error::Io)?);
+        }
+        match self.socket.netns_fd() {
+            Ok(fd) => Netns::from_fd(fd),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
+                Netns::current()
+            }
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
+    /// A connection of another protocol in the same namespace (#520):
+    /// `conn.sibling::<Nftables>()` next to a `Connection<Route>` opened in
+    /// a namespace, without naming the namespace again. A connection made
+    /// with `new()` gets a sibling made with `new()`.
+    pub fn sibling<Q>(&self) -> Result<Connection<Q>>
+    where
+        Q: ProtocolState + Default + super::protocol::construction::SyncConstructible,
+    {
+        match self.socket.origin_netns() {
+            Some(fd) => {
+                let mut socket = NetlinkSocket::new_in_namespace_fd(Q::PROTOCOL, fd.as_ref())?;
+                socket.set_namespace(fd.clone(), self.socket.namespace_marker().cloned());
+                Ok(Connection::from_parts(socket, Q::default()))
+            }
+            None => Connection::<Q>::new(),
+        }
+    }
+
+    /// [`sibling`](Self::sibling) for a generic-netlink family, whose id is
+    /// resolved inside the namespace.
+    pub async fn sibling_async<Q>(&self) -> Result<Connection<Q>>
+    where
+        Q: super::protocol::AsyncProtocolInit + super::protocol::construction::AsyncConstructible,
+    {
+        let socket = match self.socket.origin_netns() {
+            Some(fd) => {
+                let mut socket = NetlinkSocket::new_in_namespace_fd(Q::PROTOCOL, fd.as_ref())?;
+                socket.set_namespace(fd.clone(), self.socket.namespace_marker().cloned());
+                socket
+            }
+            None => NetlinkSocket::new(Q::PROTOCOL)?,
+        };
+        let state = Q::resolve_async(&socket).await?;
+        Ok(Connection::from_parts(socket, state))
+    }
+
     /// The operation timeout: 30 seconds unless set with
     /// [`timeout`](Self::timeout), `None` after
     /// [`no_timeout`](Self::no_timeout). On a dump it is the per-frame
