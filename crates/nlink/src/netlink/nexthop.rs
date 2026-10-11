@@ -118,14 +118,15 @@ pub struct ResilientParams {
 pub struct NexthopGroupMember {
     /// Nexthop ID.
     pub(crate) id: u32,
-    /// Weight (1-256, where 0 means 1).
-    pub(crate) weight: u8,
+    /// The weight, as `ip nexthop` shows it: 1 and up. The wire carries it
+    /// minus one (#672).
+    pub(crate) weight: u16,
 }
 
 impl NexthopGroupMember {
     /// Construct a new group-member descriptor. Used by builders
     /// (the parser path goes through `Nexthop::parse`).
-    pub fn new(id: u32, weight: u8) -> Self {
+    pub fn new(id: u32, weight: u16) -> Self {
         Self { id, weight }
     }
 
@@ -134,8 +135,9 @@ impl NexthopGroupMember {
         self.id
     }
 
-    /// Weight (`1..=256`, where `0` is treated by the kernel as 1).
-    pub fn weight(&self) -> u8 {
+    /// The weight, as `ip nexthop` shows it: 1 and up. Until 0.32 this
+    /// was the wire value, one less (#672).
+    pub fn weight(&self) -> u16 {
         self.weight
     }
 }
@@ -284,7 +286,7 @@ impl Nexthop {
                         if let Some(grp) = NexthopGrp::from_bytes(&payload[offset..]) {
                             members.push(NexthopGroupMember {
                                 id: grp.id,
-                                weight: grp.weight,
+                                weight: grp.weight(),
                             });
                         }
                         offset += NexthopGrp::SIZE;
@@ -568,7 +570,7 @@ const USER_HZ: u32 = 100;
 pub struct NexthopGroupBuilder {
     id: u32,
     group_type: NexthopGroupType,
-    members: Vec<(u32, u8)>, // (nexthop_id, weight)
+    members: Vec<(u32, u16)>, // (nexthop_id, weight)
     buckets: Option<u16>,
     idle_timer: Option<u32>,
     unbalanced_timer: Option<u32>,
@@ -609,8 +611,10 @@ impl NexthopGroupBuilder {
     /// Add a member to the group.
     ///
     /// - `nexthop_id`: ID of an existing nexthop object
-    /// - `weight`: Weight for load balancing (1-256, where higher = more traffic)
-    pub fn member(mut self, nexthop_id: u32, weight: u8) -> Self {
+    /// - `weight`: its share, as `ip nexthop … group <id>,<weight>` takes
+    ///   it: 1 and up (0 is 1); more than 256 needs kernel 6.12. It used to
+    ///   go on the wire as given, which the kernel weighs one more (#672).
+    pub fn member(mut self, nexthop_id: u32, weight: u16) -> Self {
         self.members.push((nexthop_id, weight));
         self
     }
@@ -677,7 +681,7 @@ impl NexthopGroupBuilder {
         // Add group members
         let mut grp_data = Vec::with_capacity(self.members.len() * NexthopGrp::SIZE);
         for (nh_id, weight) in &self.members {
-            let grp = NexthopGrp::new(*nh_id, *weight);
+            let grp = NexthopGrp::with_weight(*nh_id, *weight);
             grp_data.extend_from_slice(grp.as_bytes());
         }
         builder.append_attr(nha::GROUP, &grp_data);
