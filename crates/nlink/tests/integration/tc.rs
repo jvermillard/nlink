@@ -405,6 +405,74 @@ fn root_qdisc_line(ns: &TestNamespace, dev: &str) -> Result<String> {
     Ok(out.join(" "))
 }
 
+/// A netem options dump without `TCA_NETEM_PRNG_SEED` (and the pad that
+/// can precede it): the fixed `tc_netem_qopt`, then the attributes.
+fn without_netem_seed(blob: &[u8]) -> Vec<u8> {
+    const TCA_NETEM_PAD: u16 = 9;
+    const TCA_NETEM_PRNG_SEED: u16 = 14;
+    let mut out = blob[..24].to_vec();
+    let mut rest = &blob[24..];
+    while rest.len() >= 4 {
+        let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+        let ty = u16::from_ne_bytes([rest[2], rest[3]]) & 0x3fff;
+        let end = len.next_multiple_of(4).min(rest.len());
+        if ty != TCA_NETEM_PAD && ty != TCA_NETEM_PRNG_SEED {
+            out.extend_from_slice(&rest[..end]);
+        }
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// #633: nlink truncated a percentage where tc rounds, so the same netem
+/// put a value one unit lower in the kernel. Each set of tokens goes
+/// through `tc` on one dummy and through `NetemConfig::parse_params` on
+/// another, and the kernel's dumps of the two must be the same bytes, the
+/// seed aside: it is random unless set, and iproute2 6.1, the CI image's,
+/// cannot set one.
+#[tokio::test]
+async fn netem_percentages_land_where_tc_puts_them() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem");
+
+    let (ns, conn) = setup_tc_ns("netem-pct").await?;
+    conn.add_link(DummyLink::new("dummy1")).await?;
+    for pct in ["1%", "1.2%", "0.3%", "33.333333%", "50%", "99.99%"] {
+        let tokens = [
+            "delay",
+            "1ms",
+            "1ms",
+            pct,
+            "loss",
+            pct,
+            pct,
+            "duplicate",
+            pct,
+            pct,
+            "corrupt",
+            pct,
+            pct,
+            "reorder",
+            pct,
+            pct,
+        ];
+        let mut args = vec!["qdisc", "replace", "dev", "dummy1", "root", "netem"];
+        args.extend(tokens);
+        ns.exec("tc", &args)?;
+        conn.replace_qdisc("dummy0", NetemConfig::parse_params(&tokens)?)
+            .await?;
+        let raw = |dev: &'static str| {
+            let conn = &conn;
+            async move {
+                let q = conn.get_root_qdisc_by_name(dev).await?.expect("a root");
+                Result::Ok(without_netem_seed(q.raw_options().expect("options")))
+            }
+        };
+        assert_eq!(raw("dummy0").await?, raw("dummy1").await?, "{pct}");
+    }
+    Ok(())
+}
+
 /// #515: the slot, ECN, the PRNG seed, the rate overheads and a delay
 /// distribution, which `parse_params` refused and `NetemConfig` could not
 /// carry. The same tokens go through `tc` on one device and through

@@ -786,6 +786,35 @@ mod tests {
         ));
     }
 
+    /// #633: a probability read back is `raw → f64 percent`; turning it
+    /// into a raw value again truncated, and lost one unit for about 8 %
+    /// of values — 1.2 % loss among them — so those never matched their
+    /// own echo and were replaced on every reconcile. Every 0.01 % step.
+    #[test]
+    fn netem_matches_every_percentage_against_its_echo() {
+        use crate::util::Percent;
+        let mut never = Vec::new();
+        for i in 0..=10_000u32 {
+            let p = Percent::new(f64::from(i) / 100.0);
+            let cfg = NetemConfig::new()
+                .loss(p)
+                .duplicate(p)
+                .corrupt(p)
+                .delay(Duration::from_millis(1))
+                .reorder(p)
+                .loss_correlation(p);
+            if !netem_matches(&cfg, &make_netem_msg(cfg.clone())) {
+                never.push(p.as_percent());
+            }
+        }
+        assert!(
+            never.is_empty(),
+            "{} never converge, e.g. {:?}",
+            never.len(),
+            &never[..never.len().min(8)]
+        );
+    }
+
     #[test]
     fn netem_matches_round_trips_delay_only() {
         let desired = NetemConfig::new().delay(Duration::from_millis(50)).build();
