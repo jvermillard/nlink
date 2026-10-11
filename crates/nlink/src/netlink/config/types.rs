@@ -1850,19 +1850,13 @@ impl DeclaredQdiscType {
     /// otherwise (#346). Only the fields the declaration sets are written;
     /// the kernel fills in the rest.
     ///
+    /// `flows` is carried whenever it is declared. `fq_codel_change`
+    /// refuses it on a live qdisc even unchanged (#361), so
+    /// [`FqCodelConfig`] leaves it out of a change, and recreates the
+    /// qdisc when the live table has a different size (#486, #596).
+    ///
     /// [`FqCodelConfig`]: crate::netlink::tc::FqCodelConfig
-    /// `creating` must be `false` for a *change* to an fq_codel that
-    /// already exists. `flows` sizes the flow table, which the kernel
-    /// allocates in `fq_codel_init` and refuses to resize:
-    /// `fq_codel_change` starts with `if (tb[TCA_FQ_CODEL_FLOWS]) { if
-    /// (q->flows) return -EINVAL; }`, so a change message carrying the
-    /// attribute is rejected **even when the value is unchanged**.
-    /// Sending it anyway would make every later edit of any other knob
-    /// fail with EINVAL (#361).
-    pub(crate) fn fq_codel_config(
-        &self,
-        creating: bool,
-    ) -> Option<crate::netlink::tc::FqCodelConfig> {
+    pub(crate) fn fq_codel_config(&self) -> Option<crate::netlink::tc::FqCodelConfig> {
         let Self::FqCodel {
             limit,
             target_us,
@@ -1885,9 +1879,7 @@ impl DeclaredQdiscType {
         if let Some(i) = interval_us {
             cfg = cfg.interval(Duration::from_micros(u64::from(*i)));
         }
-        if let Some(f) = flows
-            && creating
-        {
+        if let Some(f) = flows {
             cfg = cfg.flows(*f);
         }
         if let Some(q) = quantum {
@@ -2491,14 +2483,14 @@ impl QdiscBuilder {
 
     /// Set the number of fq_codel flow buckets (`FqCodelConfig::flows`).
     ///
-    /// **Create-only.** The kernel sizes the flow table in
-    /// `fq_codel_init` and will not resize it: `fq_codel_change`
-    /// returns `EINVAL` if the attribute is present at all, *even when
-    /// the value is unchanged*. So this is applied when the qdisc is
-    /// first installed, dropped from any later change, and not compared
-    /// by the diff — declaring it cannot make a reconcile fail or churn,
-    /// but changing it on a live qdisc does nothing. Delete the qdisc to
-    /// resize the table. Added in 0.28 (#361).
+    /// The kernel sizes the flow table in `fq_codel_init` and will not
+    /// resize it: `fq_codel_change` returns `EINVAL` if the attribute is
+    /// present at all, *even when the value is unchanged*. So the value is
+    /// left out of any change to a live fq_codel. When it differs from the
+    /// live table, the diff reports it, and the apply replaces the qdisc
+    /// with a new one. As with `tc qdisc replace`, that drops its queue and
+    /// resets its statistics. Added in 0.28 (#361); compared since 0.31
+    /// (#596).
     pub fn flows(mut self, flows: u32) -> Self {
         if let Some(DeclaredQdiscType::FqCodel { flows: f, .. }) = &mut self.qdisc_type {
             *f = Some(flows);
@@ -3345,7 +3337,7 @@ mod plan_228_tests {
             .ecn(true)
             .build()
             .unwrap();
-        let lowered = q.qdisc_type.fq_codel_config(true).unwrap();
+        let lowered = q.qdisc_type.fq_codel_config().unwrap();
         let by_hand = FqCodelConfig::new()
             .limit(1200)
             .target(Duration::from_millis(5))
@@ -3353,21 +3345,10 @@ mod plan_228_tests {
             .flows(1024)
             .quantum(300)
             .ecn(true);
+        // `flows` is carried for a replace as well: `FqCodelConfig` drops
+        // it from a change itself (`fq_codel_change_mode_leaves_flows_out`
+        // in tc.rs) and recreates when the live table differs (#596).
         assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
-
-        // On a *change*, `flows` must be dropped: the kernel refuses
-        // TCA_FQ_CODEL_FLOWS on an initialised fq_codel even when the
-        // value is unchanged, so leaving it in would make every edit of
-        // any other knob fail with EINVAL (#361).
-        let changing = q.qdisc_type.fq_codel_config(false).unwrap();
-        assert_eq!(changing.flows, None, "flows must not ride on a change");
-        let without_flows = FqCodelConfig::new()
-            .limit(1200)
-            .target(Duration::from_millis(5))
-            .interval(Duration::from_millis(100))
-            .quantum(300)
-            .ecn(true);
-        assert_eq!(format!("{changing:?}"), format!("{without_flows:?}"));
     }
 
     #[test]

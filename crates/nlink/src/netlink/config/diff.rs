@@ -1802,6 +1802,7 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
                 limit,
                 target_us,
                 interval_us,
+                flows,
                 quantum,
                 ecn,
                 ..
@@ -1811,20 +1812,16 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
             // Only the fields the declaration sets are written; the kernel
             // chooses the rest, so only those are compared.
             //
-            // `flows` is deliberately *not* compared. It sizes the flow
-            // table, which the kernel allocates at init and refuses to
-            // resize, so a declared-vs-live difference cannot be acted
-            // on: reporting it would put the qdisc in
-            // `qdiscs_to_replace` on every diff, and the replace — which
-            // must omit the attribute to avoid EINVAL — would never
-            // close the gap. Changing `flows` needs the qdisc deleted
-            // and re-added, which is the caller's decision to make, not
-            // something to churn on (#361).
+            // `flows` sizes the flow table, which only `fq_codel_init`
+            // allocates. It used to be left out here because a change could
+            // not act on it (#361); `replace_qdisc` now recreates the qdisc
+            // when it differs, so the diff reports it (#596).
             //
             // `quantum` is compared as the kernel keeps it:
             // `fq_codel_change()` stores `max(256U, quantum)`, so a declared
             // 128 reads back as 256 and was replaced on every apply (#TBD).
             limit.is_none_or(|l| live.limit == l)
+                && flows.is_none_or(|f| live.flows == f)
                 && target_us.is_none_or(|t| codel_round_trip_us(t) == live.target_us)
                 && interval_us.is_none_or(|i| codel_round_trip_us(i) == live.interval_us)
                 && quantum.is_none_or(|q| live.quantum == q.max(FQ_CODEL_MIN_QUANTUM))
@@ -1880,7 +1877,7 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             .expect("matched the Htb arm")
             .write_options(&mut builder),
         DeclaredQdiscType::FqCodel { .. } => t
-            .fq_codel_config(true)
+            .fq_codel_config()
             .expect("matched the FqCodel arm")
             .write_options(&mut builder),
         DeclaredQdiscType::Tbf { .. } => t
@@ -2264,8 +2261,8 @@ mod tests {
             "undeclared knobs must not make the diff fire"
         );
         assert!(
-            qdisc_params_match(&fq(Some(512), None, None), &echo),
-            "a flows difference is not actionable, so it must not make the diff fire"
+            !qdisc_params_match(&fq(Some(512), None, None), &echo),
+            "a flows difference recreates the qdisc, so the diff must report it (#596)"
         );
         assert!(!qdisc_params_match(&fq(None, Some(1514), None), &echo));
         assert!(!qdisc_params_match(&fq(None, None, Some(false)), &echo));

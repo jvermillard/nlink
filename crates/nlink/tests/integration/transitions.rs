@@ -452,13 +452,13 @@ async fn qdisc_fields_change_in_place() -> nlink::Result<()> {
                 }),
             ],
         )
-        // `flows` is left out: a declared change never reaches the kernel
-        // (#596).
+        // A `flows` change recreates the qdisc (#596).
         .check(expect_qdisc(
             "fq_codel",
             // In µs after codel's 2^-10 s round trip: 10 ms, 200 ms.
             &[
                 ("limit", "2000"),
+                ("flows", "1024"),
                 ("quantum", "3028"),
                 ("target", "9999"),
                 ("interval", "199999"),
