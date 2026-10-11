@@ -89,6 +89,10 @@ pub struct ApplyOptions {
     /// The config applied before this one: what it declared and this one
     /// does not is removed. See [`DiffOptions::previous`] (#512).
     pub previous: Option<std::sync::Arc<super::NetworkConfig>>,
+    /// See [`DiffOptions::recreate_policy`] (#513).
+    pub recreate_policy: super::RecreatePolicy,
+    /// See [`DiffOptions::owned`] (#513).
+    pub owned: Vec<super::Owned>,
 }
 
 impl ApplyOptions {
@@ -148,6 +152,18 @@ impl ApplyOptions {
         self
     }
 
+    /// See [`DiffOptions::recreate_policy`] (#513).
+    pub fn with_recreate_policy(mut self, policy: super::RecreatePolicy) -> Self {
+        self.recreate_policy = policy;
+        self
+    }
+
+    /// See [`DiffOptions::caller_owned`] (#513).
+    pub fn with_caller_owned(mut self, owned: impl IntoIterator<Item = super::Owned>) -> Self {
+        self.owned.extend(owned);
+        self
+    }
+
     /// Diff again after the apply and fail if anything is left; see
     /// [`Self::verify`].
     pub fn with_verify(mut self, on: bool) -> Self {
@@ -164,7 +180,9 @@ impl ApplyOptions {
         let opts = DiffOptions::default()
             .purge(self.purge)
             .purge_tables(self.purge_tables.iter().copied())
-            .purge_address_devs(self.purge_address_devs.iter().cloned());
+            .purge_address_devs(self.purge_address_devs.iter().cloned())
+            .recreate_policy(self.recreate_policy.clone())
+            .caller_owned(self.owned.iter().cloned());
         match &self.previous {
             Some(previous) => opts.previous(previous.clone()),
             None => opts,
@@ -189,6 +207,9 @@ pub struct ApplyResult {
     /// The links the apply deleted and created again (or, on a dry run,
     /// would), each with why and what it lost (#513).
     pub recreated: Vec<super::LinkRecreate>,
+    /// What the apply's recreates and removals destroyed that the caller
+    /// owns or the recreate policy let go: what to put back (#513).
+    pub destroyed: Vec<super::Blocker>,
 }
 
 impl ApplyResult {
@@ -372,6 +393,7 @@ pub async fn apply_diff(
             result.summary.push(format!("Would {op}"));
             result.changes_made += 1;
             result.recreated.push(recreate.clone());
+            result.destroyed.extend(recreate.destroys.iter().cloned());
             continue;
         }
         match conn.del_link_if_exists(recreate.name.as_str()).await {
@@ -382,6 +404,7 @@ pub async fn apply_diff(
                 ));
                 result.changes_made += 1;
                 result.recreated.push(recreate.clone());
+                result.destroyed.extend(recreate.destroys.iter().cloned());
             }
             // Deleted with the link it is stacked on.
             Ok(false) => result.recreated.push(recreate.clone()),
@@ -405,6 +428,7 @@ pub async fn apply_diff(
     //     the time they come up (#512).
     for removal in diff.links_to_remove.iter().filter(|r| !r.is_refused()) {
         let op = format!("delete link {} ({})", removal.name, removal.link_kind);
+        result.destroyed.extend(removal.destroys.iter().cloned());
         if options.dry_run {
             result.summary.push(format!("Would {op}"));
             result.changes_made += 1;

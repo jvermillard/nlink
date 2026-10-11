@@ -224,7 +224,7 @@ impl RouteType {
 }
 
 /// Route protocols (RTPROT_*).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum RouteProtocol {
