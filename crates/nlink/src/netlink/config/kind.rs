@@ -894,6 +894,11 @@ impl<'a> InfoData<'a> {
         Some(u32::from_ne_bytes(p.get(..4)?.try_into().ok()?))
     }
 
+    fn u32_be(&self, t: u16) -> Option<u32> {
+        let p = self.0.get(&t)?;
+        Some(u32::from_be_bytes(p.get(..4)?.try_into().ok()?))
+    }
+
     fn ipv4(&self, t: u16) -> Option<Ipv4Addr> {
         let p = self.0.get(&t)?;
         let octets: [u8; 4] = p.get(..4)?.try_into().ok()?;
@@ -1106,6 +1111,15 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 }
             }
         }
+        DeclaredLinkType::Gre(p) | DeclaredLinkType::Gretap(p) => {
+            let kind = if matches!(declared.link_type, DeclaredLinkType::Gre(_)) { "gre" } else { "gretap" };
+            compare_tunnel(kind, p, &data, names, TunnelIds::GRE, &mut d);
+        }
+        DeclaredLinkType::Ipip(p) | DeclaredLinkType::Sit(p) => {
+            let kind = if matches!(declared.link_type, DeclaredLinkType::Ipip(_)) { "ipip" } else { "sit" };
+            compare_tunnel(kind, p, &data, names, TunnelIds::IPTUN, &mut d);
+        }
+        DeclaredLinkType::Vti(p) => compare_tunnel("vti", p, &data, names, TunnelIds::VTI, &mut d),
         DeclaredLinkType::Ipvlan {
             parent,
             mode,
@@ -2237,6 +2251,135 @@ pub(crate) fn plan(
             .is_none_or(|l| !plan.gone.contains(&l.ifindex()))
     });
     plan
+}
+
+/// Where an IPv4 tunnel family keeps each parameter in `IFLA_INFO_DATA`.
+struct TunnelIds {
+    link: u16,
+    local: u16,
+    remote: u16,
+    ttl: Option<u16>,
+    /// The key attributes, in and out, and the GRE flags that say a key is
+    /// there; vti has no flags.
+    keys: Option<TunnelKeyIds>,
+}
+
+/// A tunnel family's key attributes, in and out, and its flag attributes.
+type TunnelKeyIds = (u16, u16, Option<(u16, u16)>);
+
+impl TunnelIds {
+    /// `IFLA_GRE_*`.
+    const GRE: Self = Self {
+        link: 1,
+        local: 6,
+        remote: 7,
+        ttl: Some(8),
+        keys: Some((4, 5, Some((2, 3)))),
+    };
+    /// `IFLA_IPTUN_*`: ipip and sit.
+    const IPTUN: Self = Self {
+        link: 1,
+        local: 2,
+        remote: 3,
+        ttl: Some(4),
+        keys: None,
+    };
+    /// `IFLA_VTI_*`.
+    const VTI: Self = Self {
+        link: 1,
+        local: 4,
+        remote: 5,
+        ttl: None,
+        keys: Some((2, 3, None)),
+    };
+}
+
+/// A tunnel's declared parameters against the live link's (#516). Any
+/// difference sends them all: the kernel's tunnel `changelink` rebuilds
+/// the configuration from the request, zeroing what it is not sent. A key
+/// and its GRE flag are big-endian.
+fn compare_tunnel(
+    kind: &'static str,
+    p: &super::types::TunnelParams,
+    data: &InfoData<'_>,
+    names: &HashMap<u32, &str>,
+    ids: TunnelIds,
+    d: &mut KindDiff,
+) {
+    const GRE_KEY: u16 = 0x2000;
+    let have_local = data.ipv4(ids.local).filter(|a| !a.is_unspecified());
+    let have_remote = data.ipv4(ids.remote).filter(|a| !a.is_unspecified());
+    let have_ttl = ids.ttl.and_then(|t| data.u8(t)).filter(|t| *t != 0);
+    let have_key = ids.keys.and_then(|(ikey, _, flags)| {
+        let keyed = match flags {
+            Some((iflags, _)) => data.0.get(&iflags).and_then(|f| f.get(..2)).is_some_and(|f| {
+                u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0
+            }),
+            None => data.u32_be(ikey).is_some_and(|k| k != 0),
+        };
+        keyed.then(|| data.u32_be(ikey)).flatten()
+    });
+    let have_dev = data
+        .u32(ids.link)
+        .filter(|i| *i != 0)
+        .and_then(|i| names.get(&i).copied());
+    let mut changes = Vec::new();
+    let mut note = |what: &str, have: String, want: String| {
+        if have != want {
+            changes.push(format!("{kind} {what} {have} -> {want}"));
+        }
+    };
+    let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+    note("local", show(have_local.map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
+    note("remote", show(have_remote.map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
+    // An unset TTL is the kernel's (0, inherit; sit's is 64): not compared.
+    if ids.ttl.is_some() && p.ttl.is_some() {
+        note("ttl", show(have_ttl.map(|t| t.to_string())), show(p.ttl.map(|t| t.to_string())));
+    }
+    if ids.keys.is_some() {
+        note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+    }
+    note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
+    if changes.is_empty() {
+        return;
+    }
+    let mut attrs = Vec::new();
+    if let Some(a) = p.local {
+        attrs.push(KindAttr::Bytes(ids.local, a.octets().to_vec()));
+    }
+    if let Some(a) = p.remote {
+        attrs.push(KindAttr::Bytes(ids.remote, a.octets().to_vec()));
+    }
+    if let (Some(t), Some(attr)) = (p.ttl, ids.ttl) {
+        attrs.push(KindAttr::U8(attr, t));
+    }
+    if let (Some(k), Some((ikey, okey, flags))) = (p.key, ids.keys) {
+        if let Some((iflags, oflags)) = flags {
+            attrs.push(KindAttr::Bytes(iflags, GRE_KEY.to_be_bytes().to_vec()));
+            attrs.push(KindAttr::Bytes(oflags, GRE_KEY.to_be_bytes().to_vec()));
+        }
+        attrs.push(KindAttr::Bytes(ikey, k.to_be_bytes().to_vec()));
+        attrs.push(KindAttr::Bytes(okey, k.to_be_bytes().to_vec()));
+    }
+    if let Some(dev) = &p.underlay_dev {
+        attrs.push(KindAttr::Ifindex(ids.link, dev.clone()));
+    }
+    let mut changes = changes.into_iter();
+    // The first change line carries the whole set; the rest are notes.
+    if let Some(first) = changes.next() {
+        let mut attrs = attrs.into_iter();
+        match attrs.next() {
+            Some(attr) => d.update(kind, attr, first),
+            // Everything back to the kernel's defaults: an empty data nest.
+            None => d.update(kind, KindAttr::Bytes(0, Vec::new()), first),
+        }
+        for attr in attrs {
+            d.update.as_mut().expect("set above").attrs.push(attr);
+        }
+    }
+    if let Some(u) = d.update.as_mut() {
+        u.changes.extend(changes);
+    }
 }
 
 /// How a bridge port differs from its declared options (#516): the changes,

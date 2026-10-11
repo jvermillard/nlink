@@ -1456,6 +1456,11 @@ pub(crate) fn declared_lower(link: &DeclaredLink) -> Option<&str> {
         | DeclaredLinkType::Ipvlan { parent, .. }
         | DeclaredLinkType::Macvtap { parent, .. } => Some(parent),
         DeclaredLinkType::Vxlan { underlay_dev, .. } => underlay_dev.as_deref(),
+        DeclaredLinkType::Gre(p)
+        | DeclaredLinkType::Gretap(p)
+        | DeclaredLinkType::Ipip(p)
+        | DeclaredLinkType::Sit(p)
+        | DeclaredLinkType::Vti(p) => p.underlay_dev.as_deref(),
         _ => None,
     }
 }

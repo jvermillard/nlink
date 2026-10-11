@@ -3112,6 +3112,11 @@ impl LinkConfig for VtiLink {
 
         // IFLA_INFO_DATA
         let data = builder.nest_start(IflaInfo::Data as u16);
+        // The tunnel's own link attribute: it binds to the device
+        // through this, not through IFLA_LINK (#516).
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(vti::IFLA_VTI_LINK, idx);
+        }
 
         if let Some(local) = self.local {
             builder.append_attr(vti::IFLA_VTI_LOCAL, &local.octets());
@@ -3251,6 +3256,11 @@ impl LinkConfig for Vti6Link {
 
         // IFLA_INFO_DATA - VTI6 uses same attributes as VTI
         let data = builder.nest_start(IflaInfo::Data as u16);
+        // The tunnel's own link attribute: it binds to the device
+        // through this, not through IFLA_LINK (#516).
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(vti::IFLA_VTI_LINK, idx);
+        }
 
         if let Some(local) = self.local {
             builder.append_attr(vti::IFLA_VTI_LOCAL, &local.octets());
@@ -3334,7 +3344,9 @@ mod gre_attr {
     pub const IFLA_GRE_IGNORE_DF: u16 = 19;
     pub const IFLA_GRE_FWMARK: u16 = 20;
 
-    /// GRE_KEY flag for IFLA_GRE_IFLAGS/OFLAGS.
+    /// GRE_KEY flag for IFLA_GRE_IFLAGS/OFLAGS. The flags and the keys are
+    /// big-endian on the wire (`nla_get_be16`/`nla_get_be32`): written
+    /// native-endian, the flag read as none and the key was dropped (#516).
     pub const GRE_KEY: u16 = 0x2000;
 }
 
@@ -4553,6 +4565,11 @@ impl LinkConfig for GreLink {
         builder.append_attr_str(IflaInfo::Kind as u16, "gre");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
+        // The tunnel's own link attribute: it binds to the device
+        // through this, not through IFLA_LINK (#516).
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_LINK, idx);
+        }
         if let Some(addr) = self.local {
             builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
         }
@@ -4566,12 +4583,12 @@ impl LinkConfig for GreLink {
             builder.append_attr_u8(gre_attr::IFLA_GRE_TOS, tos);
         }
         if let Some(key) = self.ikey {
-            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
-            builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_IKEY, key);
         }
         if let Some(key) = self.okey {
-            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
-            builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_OKEY, key);
         }
         if let Some(pmtu) = self.pmtudisc {
             builder.append_attr_u8(gre_attr::IFLA_GRE_PMTUDISC, pmtu as u8);
@@ -4743,6 +4760,11 @@ impl LinkConfig for GretapLink {
         builder.append_attr_str(IflaInfo::Kind as u16, "gretap");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
+        // The tunnel's own link attribute: it binds to the device
+        // through this, not through IFLA_LINK (#516).
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_LINK, idx);
+        }
         if let Some(addr) = self.local {
             builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
         }
@@ -4756,12 +4778,12 @@ impl LinkConfig for GretapLink {
             builder.append_attr_u8(gre_attr::IFLA_GRE_TOS, tos);
         }
         if let Some(key) = self.ikey {
-            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
-            builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_IKEY, key);
         }
         if let Some(key) = self.okey {
-            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
-            builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_OKEY, key);
         }
         if let Some(pmtu) = self.pmtudisc {
             builder.append_attr_u8(gre_attr::IFLA_GRE_PMTUDISC, pmtu as u8);
@@ -4909,6 +4931,11 @@ impl LinkConfig for IpipLink {
         builder.append_attr_str(IflaInfo::Kind as u16, "ipip");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
+        // The tunnel's own link attribute: it binds to the device
+        // through this, not through IFLA_LINK (#516).
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_LINK, idx);
+        }
         if let Some(addr) = self.local {
             builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
         }
@@ -5077,6 +5104,11 @@ impl LinkConfig for SitLink {
         builder.append_attr_str(IflaInfo::Kind as u16, "sit");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
+        // The tunnel's own link attribute: it binds to the device
+        // through this, not through IFLA_LINK (#516).
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_LINK, idx);
+        }
         if let Some(addr) = self.local {
             builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
         }

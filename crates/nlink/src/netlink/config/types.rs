@@ -217,6 +217,30 @@ impl NetworkConfig {
                     errors.push(ValidationErrorInfo::new(at(), "a port has one PVID"));
                 }
             }
+            // The kernel gives every namespace a fallback device per tunnel
+            // module, which nothing can configure (`ip_tunnel_changelink`
+            // refuses it, EINVAL).
+            const FALLBACK: [(&str, &str); 6] = [
+                ("gre0", "gre"),
+                ("gretap0", "gretap"),
+                ("erspan0", "erspan"),
+                ("tunl0", "ipip"),
+                ("sit0", "sit"),
+                ("ip_vti0", "vti"),
+            ];
+            if let Some((_, kind)) = FALLBACK
+                .iter()
+                .find(|(name, kind)| *name == l.name && l.link_type.kind() == Some(*kind))
+            {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    format!(
+                        "{} is the kernel's fallback {kind} device, in every namespace, and \
+                         cannot be configured; name the tunnel otherwise",
+                        l.name
+                    ),
+                ));
+            }
             if l.bridge.is_some() && !matches!(l.link_type, DeclaredLinkType::Bridge) {
                 errors.push(ValidationErrorInfo::new(at(), "bridge options on a link that is not a bridge"));
             }
@@ -1133,6 +1157,12 @@ impl DeclaredLink {
             DeclaredLinkType::Ipvlan { .. } => Some(
                 "a MAC address is declared, but an ipvlan link shares its parent's and cannot have its own",
             ),
+            DeclaredLinkType::Gre(_)
+            | DeclaredLinkType::Ipip(_)
+            | DeclaredLinkType::Sit(_)
+            | DeclaredLinkType::Vti(_) => Some(
+                "a MAC address is declared, but an L3 tunnel has no hardware address (gretap has one)",
+            ),
             DeclaredLinkType::Netkit { mode, .. }
                 if *mode != Some(crate::netlink::link::NetkitMode::L2) =>
             {
@@ -1310,6 +1340,16 @@ pub enum DeclaredLinkType {
     },
     /// Macvtap interface (#516): a macvlan with a tap queue.
     Macvtap { parent: String, mode: MacvlanMode },
+    /// GRE tunnel (#516).
+    Gre(TunnelParams),
+    /// GRE tunnel carrying Ethernet (#516).
+    Gretap(TunnelParams),
+    /// IPv4-in-IPv4 tunnel (#516).
+    Ipip(TunnelParams),
+    /// IPv6-in-IPv4 tunnel (#516).
+    Sit(TunnelParams),
+    /// IPsec virtual tunnel interface (#516).
+    Vti(TunnelParams),
     /// Bond interface. Plan 190 §8 added 5 new option knobs.
     Bond {
         mode: BondMode,
@@ -1375,6 +1415,11 @@ impl DeclaredLinkType {
             Self::Macvlan { .. } => Some("macvlan"),
             Self::Ipvlan { .. } => Some("ipvlan"),
             Self::Macvtap { .. } => Some("macvtap"),
+            Self::Gre(_) => Some("gre"),
+            Self::Gretap(_) => Some("gretap"),
+            Self::Ipip(_) => Some("ipip"),
+            Self::Sit(_) => Some("sit"),
+            Self::Vti(_) => Some("vti"),
             Self::Bond { .. } => Some("bond"),
             Self::Ifb => Some("ifb"),
             Self::Vrf { .. } => Some("vrf"),
@@ -1425,6 +1470,34 @@ pub enum MacvlanMode {
     Passthru,
     /// Source mode (filter by source MAC).
     Source,
+}
+
+/// An IPv4 tunnel's parameters (#516): a gre, gretap, ipip, sit or vti
+/// link. Each one unset is the kernel's default (no address, TTL inherited,
+/// no key, no underlay device), and a change sends them all: a tunnel's
+/// `changelink` takes its whole configuration from the request.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TunnelParams {
+    /// The local end.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub local: Option<std::net::Ipv4Addr>,
+    /// The remote end.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub remote: Option<std::net::Ipv4Addr>,
+    /// The outer TTL (not for vti). Unset is the kernel's — inherit for
+    /// gre and ipip, 64 for sit — and not compared.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub ttl: Option<u8>,
+    /// The key, both ways (gre, gretap and vti only).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub key: Option<u32>,
+    /// The device the tunnel's packets leave through.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub underlay_dev: Option<String>,
 }
 
 /// Ipvlan mode (#516).
@@ -1674,6 +1747,103 @@ impl LinkBuilder {
             };
         } else {
             self.wrong_kind("macvlan_mode", "macvlan");
+        }
+        self
+    }
+
+    /// Create a GRE tunnel (#516); set its ends with the `tunnel_*` setters.
+    pub fn gre(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Gre(TunnelParams::default());
+        self
+    }
+
+    /// Create a GRE tunnel carrying Ethernet (#516).
+    pub fn gretap(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Gretap(TunnelParams::default());
+        self
+    }
+
+    /// Create an IPv4-in-IPv4 tunnel (#516).
+    pub fn ipip(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Ipip(TunnelParams::default());
+        self
+    }
+
+    /// Create an IPv6-in-IPv4 (sit) tunnel (#516).
+    pub fn sit(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Sit(TunnelParams::default());
+        self
+    }
+
+    /// Create an IPsec virtual tunnel interface (#516).
+    pub fn vti(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Vti(TunnelParams::default());
+        self
+    }
+
+    fn tunnel_params(&mut self, setter: &str) -> Option<&mut TunnelParams> {
+        let is_tunnel = matches!(
+            self.link_type,
+            DeclaredLinkType::Gre(_)
+                | DeclaredLinkType::Gretap(_)
+                | DeclaredLinkType::Ipip(_)
+                | DeclaredLinkType::Sit(_)
+                | DeclaredLinkType::Vti(_)
+        );
+        if !is_tunnel {
+            self.wrong_kind(setter, "gre, gretap, ipip, sit or vti");
+            return None;
+        }
+        match &mut self.link_type {
+            DeclaredLinkType::Gre(p)
+            | DeclaredLinkType::Gretap(p)
+            | DeclaredLinkType::Ipip(p)
+            | DeclaredLinkType::Sit(p)
+            | DeclaredLinkType::Vti(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// A tunnel's local end.
+    pub fn tunnel_local(mut self, local: std::net::Ipv4Addr) -> Self {
+        if let Some(p) = self.tunnel_params("tunnel_local") {
+            p.local = Some(local);
+        }
+        self
+    }
+
+    /// A tunnel's remote end.
+    pub fn tunnel_remote(mut self, remote: std::net::Ipv4Addr) -> Self {
+        if let Some(p) = self.tunnel_params("tunnel_remote") {
+            p.remote = Some(remote);
+        }
+        self
+    }
+
+    /// A tunnel's outer TTL (not vti).
+    pub fn tunnel_ttl(mut self, ttl: u8) -> Self {
+        if matches!(self.link_type, DeclaredLinkType::Vti(_)) {
+            self.wrong_kind("tunnel_ttl", "gre, gretap, ipip or sit");
+        } else if let Some(p) = self.tunnel_params("tunnel_ttl") {
+            p.ttl = Some(ttl);
+        }
+        self
+    }
+
+    /// A tunnel's key, both ways (gre, gretap, vti).
+    pub fn tunnel_key(mut self, key: u32) -> Self {
+        if matches!(self.link_type, DeclaredLinkType::Ipip(_) | DeclaredLinkType::Sit(_)) {
+            self.wrong_kind("tunnel_key", "gre, gretap or vti");
+        } else if let Some(p) = self.tunnel_params("tunnel_key") {
+            p.key = Some(key);
+        }
+        self
+    }
+
+    /// The device a tunnel's packets leave through.
+    pub fn tunnel_underlay_dev(mut self, dev: &str) -> Self {
+        if let Some(p) = self.tunnel_params("tunnel_underlay_dev") {
+            p.underlay_dev = Some(dev.to_string());
         }
         self
     }
@@ -4693,6 +4863,44 @@ mod serde_roundtrip_tests {
                 NetworkConfig::new().link("d0", |l| l.dummy().altname("d0")),
                 "not the name",
             ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+    }
+
+    #[test]
+    fn tunnels_roundtrip_and_validate() {
+        use std::net::Ipv4Addr;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy())
+            .link("gr1", |l| {
+                l.gre()
+                    .tunnel_local(Ipv4Addr::new(10, 0, 0, 1))
+                    .tunnel_remote(Ipv4Addr::new(10, 0, 0, 2))
+                    .tunnel_ttl(64)
+                    .tunnel_key(7)
+                    .tunnel_underlay_dev("d0")
+            })
+            .link("st1", |l| l.sit().tunnel_remote(Ipv4Addr::new(10, 0, 1, 2)));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""gre":{"local":"10.0.0.1","remote":"10.0.0.2","ttl":64,"key":7,"underlay-dev":"d0"}"#,
+            r#""sit":{"remote":"10.0.1.2"}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        for (cfg, says) in [
+            (NetworkConfig::new().link("ip1", |l| l.ipip().tunnel_key(1)), "tunnel_key"),
+            (NetworkConfig::new().link("vt1", |l| l.vti().tunnel_ttl(1)), "tunnel_ttl"),
+            (NetworkConfig::new().link("d0", |l| l.dummy().tunnel_remote(Ipv4Addr::LOCALHOST)), "tunnel_remote"),
+            (
+                NetworkConfig::new().link("gr1", |l| l.gre().address([2, 0, 0, 0, 0, 1])),
+                "an L3 tunnel has no hardware address",
+            ),
+            (NetworkConfig::new().link("gre0", |l| l.gre()), "the kernel's fallback gre device"),
         ] {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(says), "{says}: {err}");

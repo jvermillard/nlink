@@ -476,24 +476,37 @@ async fn test_loopback_exists() -> Result<()> {
 #[tokio::test]
 async fn test_gre_tunnel() -> Result<()> {
     require_root!();
-    nlink::require_modules!("ip_gre");
+    nlink::require_modules!("ip_gre", "dummy");
 
     let ns = TestNamespace::new("gre")?;
     let conn = ns.connection()?;
 
-    // Create GRE tunnel with key
+    // Create GRE tunnel with key, bound to an underlay device
+    conn.add_link(DummyLink::new("under0")).await?;
     conn.add_link(
         GreLink::new("gre1")
             .local(std::net::Ipv4Addr::new(10, 0, 0, 1))
             .remote(std::net::Ipv4Addr::new(10, 0, 0, 2))
             .ttl(64)
-            .key(100),
+            .key(100)
+            .link("under0"),
     )
     .await?;
 
     let link = conn.get_link_by_name("gre1").await?;
     assert!(link.is_some(), "gre1 should exist");
     assert_eq!(link.unwrap().kind(), Some("gre"));
+
+    // The key is the one asked for (#516): keys and their GRE_KEY flag are
+    // big-endian on the wire, and native-endian ones read as no key.
+    let shown = ns.exec("ip", &["-d", "-j", "link", "show", "gre1"])?;
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("ip -j");
+    let data = &shown[0]["linkinfo"]["info_data"];
+    assert_eq!(data["ikey"], "0.0.0.100", "{data}");
+    assert_eq!(data["okey"], "0.0.0.100", "{data}");
+    // And bound to its underlay: through IFLA_GRE_LINK, which `.link()`
+    // did not send (#516).
+    assert_eq!(data["link"], "under0", "{data}");
 
     // Delete it
     conn.del_link("gre1").await?;
