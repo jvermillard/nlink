@@ -129,6 +129,18 @@ impl ApplyOptions {
             .extend(devs.into_iter().map(Into::into));
         self
     }
+
+    /// The [`DiffOptions`] these options apply with: the purge switch and
+    /// its scope. Every path that diffs before applying goes through this,
+    /// so none can leave a purge option out, as the reconcile loop and
+    /// `Stack` did with [`purge_address_devs`](Self::purge_address_devs)
+    /// (#601).
+    pub fn diff_options(&self) -> DiffOptions {
+        DiffOptions::default()
+            .purge(self.purge)
+            .purge_tables(self.purge_tables.iter().copied())
+            .purge_address_devs(self.purge_address_devs.iter().cloned())
+    }
 }
 
 /// Result of applying configuration.
@@ -200,11 +212,7 @@ pub async fn apply_config(
     conn: &Connection<Route>,
     options: ApplyOptions,
 ) -> Result<ApplyResult> {
-    let diff_opts = DiffOptions::default()
-        .purge(options.purge)
-        .purge_tables(options.purge_tables.iter().copied())
-        .purge_address_devs(options.purge_address_devs.iter().cloned());
-    let diff = compute_diff_with_options(config, conn, &diff_opts).await?;
+    let diff = compute_diff_with_options(config, conn, &options.diff_options()).await?;
     apply_diff(&diff, conn, options).await
 }
 

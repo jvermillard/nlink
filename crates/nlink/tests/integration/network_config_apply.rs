@@ -719,3 +719,64 @@ async fn apply_reconcile_with_options_purges_and_plain_does_not() -> Result<()> 
     })
     .await
 }
+
+/// `ApplyOptions::purge_address_devs` reaches every path that turns
+/// `ApplyOptions` into a diff. `apply_with_options` honoured it; the
+/// reconcile loop and a `Stack`'s pre-flight diff dropped it, so a stray
+/// address on a listed but undeclared link stayed (#601).
+#[tokio::test]
+async fn purge_address_devs_reaches_reconcile_and_stack() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use nlink::netlink::addr::Ipv4Address;
+        use nlink::netlink::link::DummyLink;
+        use nlink::netlink::namespace::NamespaceSpec;
+
+        let ns = TestNamespace::new("purge-devs")?;
+        let conn = conn_in_ns(&ns)?;
+        conn.add_link(DummyLink::new("d1")).await?;
+        let stray = Ipv4Addr::new(10, 61, 0, 1);
+        conn.add_address(Ipv4Address::new("d1", stray, 24)).await?;
+
+        let cfg = NetworkConfig::new().link("d0", |l| l.dummy());
+        let opts = || {
+            ApplyOptions::default()
+                .with_purge(true)
+                .with_purge_address_devs(["d1"])
+        };
+
+        // A dry run shows the removal its apply would make.
+        let report = nlink::facade::Stack::new()
+            .network(cfg.clone())
+            .apply_in_with(NamespaceSpec::Named(ns.name()), opts().with_dry_run(true))
+            .await?;
+        let diff = report
+            .dry_run
+            .as_ref()
+            .and_then(|d| d.network.as_ref())
+            .expect("the network layer's diff");
+        assert_eq!(diff.addresses_to_remove.len(), 1, "{diff}");
+
+        // The reconcile loop removes it: d0 created, the address gone.
+        let report = cfg
+            .apply_reconcile_with_options(&conn, ReconcileOptions::default(), opts())
+            .await?;
+        assert_eq!(report.change_count, 2, "{report:?}");
+        let left: Vec<IpAddr> = conn
+            .get_addresses_by_name("d1")
+            .await?
+            .iter()
+            .filter_map(|a| a.address().copied())
+            .collect();
+        assert!(
+            !left.contains(&IpAddr::V4(stray)),
+            "the stray address stayed: {left:?}"
+        );
+        Ok(())
+    })
+    .await
+}
