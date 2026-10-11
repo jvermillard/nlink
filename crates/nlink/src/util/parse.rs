@@ -214,6 +214,31 @@ pub fn get_time(s: &str) -> Result<Duration> {
     Ok(duration)
 }
 
+/// A time as tc(8) writes it, which [`get_time`] reads back as exactly
+/// `d`: the largest of s, ms and µs that divides it, then µs with a
+/// fraction, else nanoseconds. The fraction comes before `ns` because
+/// iproute2 before 6.3 reads netem's delay in 64 ns ticks and takes no
+/// `ns` (`1499.968us`, not `1499968ns`).
+pub fn format_time(d: Duration) -> String {
+    let ns = d.as_nanos();
+    let mut candidates = Vec::new();
+    for (unit, name) in [(1_000_000_000, "s"), (1_000_000, "ms"), (1_000, "us")] {
+        if ns.is_multiple_of(unit) {
+            candidates.push(format!("{}{name}", ns / unit));
+        }
+    }
+    let fraction = format!("{:03}", ns % 1000);
+    candidates.push(format!(
+        "{}.{}us",
+        ns / 1000,
+        fraction.trim_end_matches('0')
+    ));
+    candidates
+        .into_iter()
+        .find(|text| get_time(text).ok() == Some(d))
+        .unwrap_or_else(|| format!("{ns}ns"))
+}
+
 /// Parse the numeric span of a value, rejecting negatives.
 ///
 /// `f64 as u64` **saturates to 0** for negative values, so `get_rate("-5mbit")`
