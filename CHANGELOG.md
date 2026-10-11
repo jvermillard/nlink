@@ -1198,6 +1198,14 @@ All notable changes to this project will be documented in this file.
   0. A root transition test changes a peer from 25 s to 500 ms and reads
   1 back with `wg`.
 
+- **A conntrack timeout under one second expired the entry at once
+  (#603).** `ConntrackBuilder::timeout(Duration)` sent `CTA_TIMEOUT` as
+  whole seconds by truncation. The kernel expires an entry whose timeout
+  is 0 immediately, so `timeout(Duration::from_millis(500))` added an
+  entry that was gone before the next dump, with no error. A fraction now
+  rounds up, as sfq's `perturb` (#597) and WireGuard's keepalive (#529,
+  #602) do. A root test adds a 500 ms UDP entry and finds it in the dump.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it
