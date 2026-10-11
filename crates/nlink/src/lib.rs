@@ -241,7 +241,8 @@ pub use netlink::tc_handle::{FilterPriority, TcHandle, TcHandleParseError};
 // Reconcile-pattern types shared by recipe helpers.
 pub use netlink::tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject};
 pub use netlink::{
-    Connection, Error, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result, RtnetlinkGroup,
+    Connection, Error, ErrorKind, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result,
+    ResultExt, RtnetlinkGroup,
     // `Error::validation` takes `impl IntoIterator<Item = ValidationErrorInfo>`
     // and this lived in a private module, so the public constructor was
     // uncallable from outside the crate (#280).

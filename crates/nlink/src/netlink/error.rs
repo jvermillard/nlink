@@ -399,6 +399,187 @@ pub enum Error {
     },
 }
 
+/// What kind of failure an [`Error`] is: one answer per error, for
+/// matching and for reports (#526).
+///
+/// [`Error::kind`] classifies every error, kernel or not. The `is_*`
+/// predicates stay, and agree with it; a few of them are finer
+/// (`is_no_device` is one of the two errnos [`ErrorKind::NotFound`] covers)
+/// or broader (`is_not_found` also holds for ENODEV, which is
+/// `NotFound` here too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// The object does not exist: ENOENT, ENODEV, or a not-found variant
+    /// (interface, namespace, qdisc, genl family).
+    NotFound,
+    /// The object exists already: EEXIST.
+    AlreadyExists,
+    /// The object is in use: EBUSY.
+    Busy,
+    /// Not allowed: EPERM, EACCES.
+    PermissionDenied,
+    /// The kernel, the device or nlink does not do this: EOPNOTSUPP, or
+    /// [`Error::NotSupported`].
+    NotSupported,
+    /// The kernel refused an argument: EINVAL.
+    InvalidArgument,
+    /// Try again: EAGAIN.
+    TryAgain,
+    /// The kernel's state changed under the request; redo it from a fresh
+    /// read: ERESTART (an nftables generation mismatch).
+    Restart,
+    /// A dump was interrupted by a concurrent change (`NLM_F_DUMP_INTR`).
+    DumpInterrupted,
+    /// Messages were lost: ENOBUFS on a socket that fell behind, or an
+    /// event stream's own backpressure.
+    Overrun,
+    /// No answer in time: [`Error::Timeout`] or ETIMEDOUT.
+    Timeout,
+    /// A frame or message was cut short.
+    Truncated,
+    /// ENETUNREACH.
+    NetworkUnreachable,
+    /// EHOSTUNREACH.
+    HostUnreachable,
+    /// EADDRINUSE.
+    AddressInUse,
+    /// ECONNREFUSED.
+    ConnectionRefused,
+    /// EMSGSIZE.
+    MessageTooLong,
+    /// ENAMETOOLONG.
+    NameTooLong,
+    /// EMFILE.
+    TooManyOpenFiles,
+    /// EROFS.
+    ReadOnly,
+    /// A declared configuration nlink refused before sending anything.
+    Validation,
+    /// A message, attribute or input nlink could not use: something it
+    /// failed to parse, or a value it refused.
+    Invalid,
+    /// The namespace a connection or stream was in was deleted.
+    NamespaceDeleted,
+    /// A request was refused because an event stream holds the
+    /// connection.
+    EventStreamActive,
+    /// A connection pool had no connection to give.
+    PoolExhausted,
+    /// A connection pool was closed.
+    PoolClosed,
+    /// Duplicate address detection failed.
+    DadFailed,
+    /// Anything else: an errno not named above, or an error with none.
+    Other,
+}
+
+impl ErrorKind {
+    /// The kind an errno is, when nothing else is known about the error.
+    pub fn from_errno(errno: i32) -> Self {
+        match errno {
+            libc::ENOENT | libc::ENODEV => Self::NotFound,
+            libc::EEXIST => Self::AlreadyExists,
+            libc::EBUSY => Self::Busy,
+            libc::EPERM | libc::EACCES => Self::PermissionDenied,
+            libc::EOPNOTSUPP => Self::NotSupported,
+            libc::EINVAL => Self::InvalidArgument,
+            libc::EAGAIN => Self::TryAgain,
+            libc::ERESTART => Self::Restart,
+            libc::ENOBUFS => Self::Overrun,
+            libc::ETIMEDOUT => Self::Timeout,
+            libc::ENETUNREACH => Self::NetworkUnreachable,
+            libc::EHOSTUNREACH => Self::HostUnreachable,
+            libc::EADDRINUSE => Self::AddressInUse,
+            libc::ECONNREFUSED => Self::ConnectionRefused,
+            libc::EMSGSIZE => Self::MessageTooLong,
+            libc::ENAMETOOLONG => Self::NameTooLong,
+            libc::EMFILE => Self::TooManyOpenFiles,
+            libc::EROFS => Self::ReadOnly,
+            _ => Self::Other,
+        }
+    }
+
+    /// Whether the same request can succeed if made again, unchanged or
+    /// from a fresh read: busy, try again, restart, an interrupted dump,
+    /// an overrun, a timeout.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Busy
+                | Self::TryAgain
+                | Self::Restart
+                | Self::DumpInterrupted
+                | Self::Overrun
+                | Self::Timeout
+        )
+    }
+}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::NotFound => "not found",
+            Self::AlreadyExists => "already exists",
+            Self::Busy => "busy",
+            Self::PermissionDenied => "permission denied",
+            Self::NotSupported => "not supported",
+            Self::InvalidArgument => "invalid argument",
+            Self::TryAgain => "try again",
+            Self::Restart => "restart",
+            Self::DumpInterrupted => "dump interrupted",
+            Self::Overrun => "overrun",
+            Self::Timeout => "timed out",
+            Self::Truncated => "truncated",
+            Self::NetworkUnreachable => "network unreachable",
+            Self::HostUnreachable => "host unreachable",
+            Self::AddressInUse => "address in use",
+            Self::ConnectionRefused => "connection refused",
+            Self::MessageTooLong => "message too long",
+            Self::NameTooLong => "name too long",
+            Self::TooManyOpenFiles => "too many open files",
+            Self::ReadOnly => "read-only",
+            Self::Validation => "invalid configuration",
+            Self::Invalid => "invalid",
+            Self::NamespaceDeleted => "namespace deleted",
+            Self::EventStreamActive => "event stream active",
+            Self::PoolExhausted => "pool exhausted",
+            Self::PoolClosed => "pool closed",
+            Self::DadFailed => "duplicate address detection failed",
+            Self::Other => "other",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Context on a `Result`'s error, without a `map_err` at every call site
+/// (#526).
+///
+/// ```
+/// use nlink::ResultExt;
+///
+/// fn apply() -> nlink::Result<()> {
+///     Err(nlink::Error::from_errno(libc::EBUSY)).context("apply nftables on b")
+/// }
+/// let err = apply().unwrap_err();
+/// assert_eq!(err.kind(), nlink::ErrorKind::Busy);
+/// assert!(err.to_string().starts_with("apply nftables on b: "), "{err}");
+/// ```
+pub trait ResultExt<T> {
+    /// Add `operation` to the error, as [`Error::with_context`] does. A
+    /// context on an error that has one already goes in front of it.
+    fn context(self, operation: impl Into<String>) -> Result<T>;
+}
+
+impl<T> ResultExt<T> for Result<T> {
+    fn context(self, operation: impl Into<String>) -> Result<T> {
+        self.map_err(|e| e.with_context(operation))
+    }
+}
+
 /// Structured validation error information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationErrorInfo {
@@ -565,7 +746,10 @@ impl Error {
 
     /// Add context to this error.
     ///
-    /// Wraps kernel errors with operation context. Other errors are returned unchanged.
+    /// Wraps kernel errors with operation context. A kernel error that has
+    /// a context already keeps it, after the new one (`"outer: inner"`); a
+    /// second context used to be dropped (#526). Other errors are returned
+    /// unchanged.
     pub fn with_context(self, operation: impl Into<String>) -> Self {
         match self {
             Self::Kernel {
@@ -580,6 +764,29 @@ impl Error {
                 ext_ack,
                 ext_ack_offset,
             },
+            Self::KernelWithContext {
+                operation: inner,
+                errno,
+                message,
+                ext_ack,
+                ext_ack_offset,
+            } => {
+                let outer = operation.into();
+                // The same label twice — a helper and its caller naming
+                // one operation — is said once.
+                let operation = if outer == inner || inner.starts_with(&format!("{outer}(")) {
+                    inner
+                } else {
+                    format!("{outer}: {inner}")
+                };
+                Self::KernelWithContext {
+                    operation,
+                    errno,
+                    message,
+                    ext_ack,
+                    ext_ack_offset,
+                }
+            }
             other => other,
         }
     }
@@ -641,6 +848,57 @@ impl Error {
     /// Create a GENL family not found error.
     pub fn family_not_found(name: impl Into<String>) -> Self {
         Self::FamilyNotFound { name: name.into() }
+    }
+
+    /// What kind of failure this is (#526). One answer per error; see
+    /// [`ErrorKind`].
+    ///
+    /// ```
+    /// use nlink::{Error, ErrorKind};
+    ///
+    /// let err = Error::from_errno(libc::EEXIST).with_context("add_link(d0)");
+    /// assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+    /// assert!(err.is_already_exists());
+    /// ```
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Interface(IfError::NotFound(_))
+            | Self::InterfaceNotFound { .. }
+            | Self::NamespaceNotFound { .. }
+            | Self::QdiscNotFound { .. }
+            | Self::FamilyNotFound { .. } => ErrorKind::NotFound,
+            Self::NotSupported(_) => ErrorKind::NotSupported,
+            Self::Timeout => ErrorKind::Timeout,
+            Self::FrameTruncated { .. } | Self::Truncated { .. } => ErrorKind::Truncated,
+            Self::Backpressure { .. } => ErrorKind::Overrun,
+            Self::DumpInterrupted => ErrorKind::DumpInterrupted,
+            Self::Validation(_) => ErrorKind::Validation,
+            Self::NamespaceDeleted { .. } => ErrorKind::NamespaceDeleted,
+            Self::EventStreamActive => ErrorKind::EventStreamActive,
+            Self::PoolExhausted { .. } => ErrorKind::PoolExhausted,
+            Self::PoolClosed => ErrorKind::PoolClosed,
+            Self::DadFailed { .. } => ErrorKind::DadFailed,
+            Self::Io(e) if e.raw_os_error().is_none() => match e.kind() {
+                std::io::ErrorKind::NotFound => ErrorKind::NotFound,
+                std::io::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
+                std::io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+                std::io::ErrorKind::TimedOut => ErrorKind::Timeout,
+                std::io::ErrorKind::Unsupported => ErrorKind::NotSupported,
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                    ErrorKind::Invalid
+                }
+                _ => ErrorKind::Other,
+            },
+            Self::InvalidMessage(_)
+            | Self::InvalidAttribute(_)
+            | Self::SequenceMismatch { .. }
+            | Self::Parse(_)
+            | Self::Address(_)
+            | Self::Interface(_)
+            | Self::AddressParse(_)
+            | Self::RouteParse(_) => ErrorKind::Invalid,
+            _ => self.errno().map_or(ErrorKind::Other, ErrorKind::from_errno),
+        }
     }
 
     /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
@@ -1082,6 +1340,138 @@ impl<'a> Iterator for ChainWalk<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `kind()` and the predicates agree on every errno they share (#526).
+    #[test]
+    fn kind_agrees_with_the_predicates() {
+        type Pred = fn(&Error) -> bool;
+        let pairs: [(i32, ErrorKind, Pred); 18] = [
+            (libc::ENOENT, ErrorKind::NotFound, Error::is_not_found),
+            (libc::ENODEV, ErrorKind::NotFound, Error::is_not_found),
+            (
+                libc::EEXIST,
+                ErrorKind::AlreadyExists,
+                Error::is_already_exists,
+            ),
+            (libc::EBUSY, ErrorKind::Busy, Error::is_busy),
+            (
+                libc::EPERM,
+                ErrorKind::PermissionDenied,
+                Error::is_permission_denied,
+            ),
+            (
+                libc::EACCES,
+                ErrorKind::PermissionDenied,
+                Error::is_permission_denied,
+            ),
+            (
+                libc::EOPNOTSUPP,
+                ErrorKind::NotSupported,
+                Error::is_not_supported,
+            ),
+            (
+                libc::EINVAL,
+                ErrorKind::InvalidArgument,
+                Error::is_invalid_argument,
+            ),
+            (libc::EAGAIN, ErrorKind::TryAgain, Error::is_try_again),
+            (libc::ERESTART, ErrorKind::Restart, Error::is_restart),
+            (libc::ENOBUFS, ErrorKind::Overrun, Error::is_no_buffer_space),
+            (libc::ETIMEDOUT, ErrorKind::Timeout, Error::is_timeout),
+            (
+                libc::ENETUNREACH,
+                ErrorKind::NetworkUnreachable,
+                Error::is_network_unreachable,
+            ),
+            (
+                libc::EHOSTUNREACH,
+                ErrorKind::HostUnreachable,
+                Error::is_host_unreachable,
+            ),
+            (
+                libc::EADDRINUSE,
+                ErrorKind::AddressInUse,
+                Error::is_address_in_use,
+            ),
+            (
+                libc::ECONNREFUSED,
+                ErrorKind::ConnectionRefused,
+                Error::is_connection_refused,
+            ),
+            (
+                libc::EMSGSIZE,
+                ErrorKind::MessageTooLong,
+                Error::is_message_too_long,
+            ),
+            (libc::EROFS, ErrorKind::ReadOnly, Error::is_read_only),
+        ];
+        for (errno, kind, pred) in pairs {
+            for err in [
+                Error::from_errno(errno),
+                Error::from_errno(errno).with_context("op"),
+                Error::Io(std::io::Error::from_raw_os_error(errno)),
+            ] {
+                assert_eq!(err.kind(), kind, "{err}");
+                assert!(pred(&err), "{err}");
+            }
+        }
+        assert_eq!(Error::from_errno(libc::EPROTO).kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn kind_of_the_variants() {
+        assert_eq!(Error::Timeout.kind(), ErrorKind::Timeout);
+        assert_eq!(Error::interface_not_found("d0").kind(), ErrorKind::NotFound);
+        assert_eq!(
+            Error::namespace_not_found("red").kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(Error::not_supported("x").kind(), ErrorKind::NotSupported);
+        assert_eq!(Error::invalid_message("x").kind(), ErrorKind::Invalid);
+        assert_eq!(
+            Error::validation_error("links.d0", "bad").kind(),
+            ErrorKind::Validation
+        );
+        assert_eq!(Error::DumpInterrupted.kind(), ErrorKind::DumpInterrupted);
+        let exists = Error::Io(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "x"));
+        assert_eq!(exists.kind(), ErrorKind::AlreadyExists);
+        assert!(exists.is_already_exists());
+        assert!(ErrorKind::Busy.is_retryable());
+        assert!(!ErrorKind::NotFound.is_retryable());
+    }
+
+    /// A second context goes in front of the first; it used to be dropped.
+    /// The same label twice is said once (#526).
+    #[test]
+    fn context_stacks() {
+        let err = Error::from_errno(libc::EBUSY)
+            .with_context("replace_qdisc")
+            .with_context("apply qdisc on a:eth0");
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("apply qdisc on a:eth0: replace_qdisc"),
+            "{shown}"
+        );
+        assert!(err.is_busy());
+
+        let once = Error::from_errno(libc::EBUSY)
+            .with_context("add_link(veth0, kind=veth)")
+            .with_context("add_link");
+        assert!(!once.to_string().contains("add_link: add_link"), "{once}");
+        let twice = Error::from_errno(libc::EBUSY)
+            .with_context("x")
+            .with_context("x");
+        assert!(!twice.to_string().contains("x: x"), "{twice}");
+
+        let r: Result<()> = Err(Error::from_errno(libc::ENOENT));
+        let err = r.context("del_route(10.0.0.0/8, table 100)").unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("del_route(10.0.0.0/8, table 100)"),
+            "{err}"
+        );
+        assert_eq!(err.kind(), ErrorKind::NotFound);
+    }
 
     #[test]
     fn test_from_errno() {
