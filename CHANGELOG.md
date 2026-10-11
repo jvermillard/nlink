@@ -39,6 +39,37 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The namespace watcher reported `Created` before the namespace existed,
+  constructors that return `Result` panicked, and `get_route_v4/v6` were
+  not what their docs said (#510, items 1, 2 and 4; item 3 shipped
+  earlier).**
+  - `NamespaceWatcher` fired `Created` on the marker's `IN_CREATE`. Both
+    `ip netns add` and nlink's `create` make the marker and mount the
+    namespace on it afterwards, and a mount raises no inotify event. So a
+    `connection_for(name)` in response raced into `NamespaceNotFound`,
+    and a marker nobody mounted got a `Created` at all. `Created` now
+    waits, up to 2 s, for the mount.
+  - `IN_Q_OVERFLOW` is the new `NamespaceEvent::Overflow` rather than
+    ignored.
+  - Events queued during a directory switch come out in order.
+  - `list_and_watch` lists live namespaces only.
+  - `NamespaceEventStream` implements `Stream`.
+  - `thread::spawn`, which panics when no thread can be made, is replaced
+    by `thread::Builder` in the namespace socket, create and sysctl
+    workers.
+  - A netlink socket made outside a tokio runtime is an error, not an
+    `AsyncFd::new` panic.
+  - `get_route_v4/v6` are deprecated in favour of `lookup_route`. They
+    were always a FIB lookup of the address. Their `prefix_len` became the
+    request's `dst_len`, which strict checking refuses unless it is 32 or
+    128; it is ignored now. `nlink-ip route get` uses `lookup_route`.
+
+  A root test checks that a stale marker is neither listed nor
+  `Created`, and that a real namespace's `Created` arrives through the
+  `Stream` once `connection_for` works. On master the stale marker was
+  listed. A unit test checks the socket outside a runtime; on master it
+  panicked.
+
 - **Diagnostics: `check_connectivity` picked the first route that contained
   the destination, and four heuristics misreported (#509).**
   - `check_connectivity` searched a dump of every table with `find` and

@@ -46,6 +46,10 @@ pub enum NamespaceEvent {
     /// The /var/run/netns/ directory was deleted.
     /// After this event, no namespace events will be emitted until DirectoryCreated.
     DirectoryDeleted,
+    /// The kernel's inotify queue overflowed (`IN_Q_OVERFLOW`): events were
+    /// lost. Re-list with [`namespace::list`](super::namespace::list) to
+    /// learn where things stand. It used to be ignored (#510).
+    Overflow,
 }
 
 /// Configuration for the namespace watcher.
@@ -85,8 +89,9 @@ pub struct NamespaceWatcher {
     netns_wd: Option<WatchDescriptor>,
     parent_wd: Option<WatchDescriptor>,
     /// Events discovered during watch transitions (e.g., namespaces created
-    /// between parent directory event and watch setup on netns directory).
-    pending_events: Vec<NamespaceEvent>,
+    /// between parent directory event and watch setup on netns directory),
+    /// delivered in the order found — they were popped from the back (#510).
+    pending_events: std::collections::VecDeque<NamespaceEvent>,
 }
 
 impl NamespaceWatcher {
@@ -131,7 +136,7 @@ impl NamespaceWatcher {
             config,
             netns_wd,
             parent_wd,
-            pending_events: Vec::new(),
+            pending_events: std::collections::VecDeque::new(),
         })
     }
 
@@ -143,12 +148,40 @@ impl NamespaceWatcher {
     /// Callers should handle potential duplicates: a namespace in the
     /// returned list might also generate a Created event if it was
     /// created during the brief window between watch setup and listing.
+    ///
+    /// Only live namespaces are listed: a stale marker, a file with no
+    /// namespace mounted over it, is not one (#510, #348).
     pub async fn list_and_watch() -> Result<(Vec<String>, Self)> {
         // Start watcher FIRST to avoid missing events
         let watcher = Self::new().await?;
         // Then list current namespaces
-        let current = super::namespace::list()?;
+        let current = super::namespace::list()?
+            .into_iter()
+            .filter(|name| super::namespace::is_namespace_path(Path::new(NETNS_DIR).join(name)))
+            .collect();
         Ok((current, watcher))
+    }
+
+    /// Wait for the namespace `name` to be mounted over its marker.
+    ///
+    /// `ip netns add`, and nlink's own `create`, make the marker first and
+    /// mount the namespace on it after, and a mount raises no inotify event.
+    /// `Created` used to fire on the marker, so a `connection_for(name)` in
+    /// response raced into `NamespaceNotFound` (#510). Gives up after two
+    /// seconds — a marker that never gets a namespace is not one.
+    async fn mounted(name: &str) -> bool {
+        let path = Path::new(NETNS_DIR).join(name);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if super::namespace::is_namespace_path(&path) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline || !path.exists() {
+                tracing::debug!(name, "netns marker never got a namespace; no Created");
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     /// Check if the watcher is actively monitoring /var/run/netns/.
@@ -163,12 +196,17 @@ impl NamespaceWatcher {
     /// This method is async and will wait until an event is available.
     /// Returns `Ok(None)` if the watcher has been closed.
     pub async fn recv(&mut self) -> Result<Option<NamespaceEvent>> {
-        // First drain any pending events from watch transitions
-        if let Some(event) = self.pending_events.pop() {
-            return Ok(Some(event));
-        }
-
         loop {
+            // First drain any pending events from watch transitions
+            if let Some(event) = self.pending_events.pop_front() {
+                if let NamespaceEvent::Created { name } = &event
+                    && !Self::mounted(name).await
+                {
+                    continue;
+                }
+                return Ok(Some(event));
+            }
+
             // Awaiting the EventStream parks the task until the inotify fd
             // is readable — the fd is nonblocking, so this is the only
             // correct way to wait (#183).
@@ -195,7 +233,16 @@ impl NamespaceWatcher {
                 None => None,
             };
 
+            if event.mask.contains(EventMask::Q_OVERFLOW) {
+                tracing::warn!("namespace watcher: inotify queue overflowed; events lost");
+                return Ok(Some(NamespaceEvent::Overflow));
+            }
             if let Some(ns_event) = self.process_event(event.wd, event.mask, name)? {
+                if let NamespaceEvent::Created { name } = &ns_event
+                    && !Self::mounted(name).await
+                {
+                    continue;
+                }
                 return Ok(Some(ns_event));
             }
         }
@@ -261,7 +308,7 @@ impl NamespaceWatcher {
                     if let Ok(entries) = std::fs::read_dir(NETNS_DIR) {
                         for entry in entries.flatten() {
                             if let Some(name) = entry.file_name().to_str() {
-                                self.pending_events.push(NamespaceEvent::Created {
+                                self.pending_events.push_back(NamespaceEvent::Created {
                                     name: name.to_string(),
                                 });
                             }
@@ -273,7 +320,7 @@ impl NamespaceWatcher {
                     }
 
                     // If we found namespaces during the scan, return the first one
-                    if let Some(event) = self.pending_events.pop() {
+                    if let Some(event) = self.pending_events.pop_front() {
                         return Ok(Some(event));
                     }
                 }
@@ -287,22 +334,78 @@ impl NamespaceWatcher {
     ///
     /// This consumes the watcher and returns a stream that yields events.
     pub fn into_stream(self) -> NamespaceEventStream {
-        NamespaceEventStream { watcher: self }
+        NamespaceEventStream {
+            state: StreamState::Idle(self),
+        }
     }
 }
 
-/// An async stream of namespace events.
+/// An async stream of namespace events: a [`Stream`] (#510), so it
+/// composes with `StreamExt`, `StreamMap` and `select!`.
+///
+/// [`Stream`]: tokio_stream::Stream
 pub struct NamespaceEventStream {
-    watcher: NamespaceWatcher,
+    state: StreamState,
 }
+
+/// The watcher between events, or moved into the receive in flight.
+enum StreamState {
+    Idle(NamespaceWatcher),
+    Receiving(PendingRecv),
+    Done,
+}
+
+type PendingRecv = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = (NamespaceWatcher, Result<Option<NamespaceEvent>>)> + Send,
+    >,
+>;
 
 impl NamespaceEventStream {
     /// Receive the next event from the stream.
     pub async fn next(&mut self) -> Option<Result<NamespaceEvent>> {
-        match self.watcher.recv().await {
-            Ok(Some(event)) => Some(Ok(event)),
-            Ok(None) => None,
-            Err(e) => Some(Err(e)),
+        tokio_stream::StreamExt::next(self).await
+    }
+}
+
+// The watcher is moved into a boxed future, never pinned in place.
+impl Unpin for NamespaceEventStream {}
+
+impl tokio_stream::Stream for NamespaceEventStream {
+    type Item = Result<NamespaceEvent>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        loop {
+            match std::mem::replace(&mut self.state, StreamState::Done) {
+                StreamState::Idle(mut watcher) => {
+                    self.state = StreamState::Receiving(Box::pin(async move {
+                        let result = watcher.recv().await;
+                        (watcher, result)
+                    }));
+                }
+                StreamState::Receiving(mut recv) => {
+                    let Poll::Ready((watcher, result)) = recv.as_mut().poll(cx) else {
+                        self.state = StreamState::Receiving(recv);
+                        return Poll::Pending;
+                    };
+                    return match result {
+                        Ok(Some(event)) => {
+                            self.state = StreamState::Idle(watcher);
+                            Poll::Ready(Some(Ok(event)))
+                        }
+                        Ok(None) => Poll::Ready(None),
+                        Err(e) => {
+                            self.state = StreamState::Idle(watcher);
+                            Poll::Ready(Some(Err(e)))
+                        }
+                    };
+                }
+                StreamState::Done => return Poll::Ready(None),
+            }
         }
     }
 }

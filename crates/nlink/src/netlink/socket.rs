@@ -147,17 +147,22 @@ impl NetlinkSocket {
     pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
         // `ns_fd` stays valid for the worker's lifetime: fds are process-wide
         // and the caller's handle outlives the synchronous join() below.
-        let thread_result = std::thread::spawn(move || -> Result<(Socket, u32)> {
-            // SAFETY: libc::setns switches this worker thread to the namespace
-            // specified by ns_fd, a valid namespace-file descriptor. Only this
-            // freshly-spawned thread is affected, and it exits right after.
-            let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
-            if ret < 0 {
-                return Err(Error::Io(std::io::Error::last_os_error()));
-            }
-            Self::create_raw_socket(protocol)
-        })
-        .join();
+        // `thread::spawn` panics when no thread can be made (`pids.max`,
+        // `RLIMIT_NPROC`); this returns `Result` (#510).
+        let worker = std::thread::Builder::new().name("nlink-netns".into());
+        let thread_result = worker
+            .spawn(move || -> Result<(Socket, u32)> {
+                // SAFETY: libc::setns switches this worker thread to the namespace
+                // specified by ns_fd, a valid namespace-file descriptor. Only this
+                // freshly-spawned thread is affected, and it exits right after.
+                let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
+                if ret < 0 {
+                    return Err(Error::Io(std::io::Error::last_os_error()));
+                }
+                Self::create_raw_socket(protocol)
+            })
+            .map_err(Error::Io)?
+            .join();
 
         match thread_result {
             Ok(Ok((socket, pid))) => Self::from_raw_socket(socket, pid, protocol),
@@ -290,6 +295,14 @@ impl NetlinkSocket {
     /// reactor); the socket's netns membership is already fixed, so this half
     /// is namespace-insensitive.
     fn from_raw_socket(socket: Socket, pid: u32, protocol: Protocol) -> Result<Self> {
+        // `AsyncFd::new` panics outside a tokio runtime, which `Connection::
+        // new()` and `connection_for()` reached while promising a `Result`
+        // (#510).
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(Error::Io(std::io::Error::other(
+                "nlink: a netlink socket needs a tokio runtime; create it inside one",
+            )));
+        }
         let fd = AsyncFd::new(socket)?;
 
         Ok(Self {
@@ -1637,6 +1650,16 @@ mod recv_msg_truncate_tests {
             RecvWhole::Frame(data, _) => assert_eq!(data, [2u8; 16]),
             RecvWhole::TooLarge(len) => panic!("next datagram reported as {len} bytes"),
         }
+    }
+
+    /// #510: `AsyncFd::new` panics outside a tokio runtime; `new()` returns
+    /// a `Result` and now says why instead.
+    #[test]
+    fn a_socket_outside_a_runtime_is_an_error_not_a_panic() {
+        let err = NetlinkSocket::new(Protocol::Route)
+            .err()
+            .expect("no runtime here");
+        assert!(err.to_string().contains("tokio runtime"), "{err}");
     }
 
     #[test]

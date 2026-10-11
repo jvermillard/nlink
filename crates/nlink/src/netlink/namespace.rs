@@ -1036,10 +1036,18 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
     // complete before returning.
     let ns_path_owned = ns_path.clone();
     let label = ns_path.display().to_string();
-    let thread_result = std::thread::spawn(move || -> Result<()> {
-        create_namespace_in_current_thread(&label, &ns_path_owned)
-    })
-    .join();
+    // `thread::spawn` panics when no thread can be made (#510).
+    let worker = std::thread::Builder::new().name("nlink-netns".into());
+    let thread_result = match worker
+        .spawn(move || -> Result<()> { create_namespace_in_current_thread(&label, &ns_path_owned) })
+    {
+        Ok(handle) => handle.join(),
+        Err(e) => {
+            let _ = std::fs::remove_file(&ns_path);
+            rollback_dirs(&created_dirs);
+            return Err(Error::Io(e));
+        }
+    };
 
     match thread_result {
         Ok(Ok(())) => Ok(()),
@@ -1357,7 +1365,10 @@ where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let thread_result = std::thread::spawn(move || -> Result<T> {
+    // `thread::spawn` panics when no thread can be made (#510).
+    let worker = std::thread::Builder::new().name("nlink-netns".into());
+    let thread_result = worker
+        .spawn(move || -> Result<T> {
         let target = File::open(&path).map_err(|e| namespace_open_error(&path, e))?;
         // SAFETY: setns switches only this freshly-spawned worker thread,
         // which exits right after `f` returns.
@@ -1367,7 +1378,8 @@ where
         }
         f()
     })
-    .join();
+        .map_err(Error::Io)?
+        .join();
 
     match thread_result {
         Ok(result) => result,
