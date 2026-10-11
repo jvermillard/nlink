@@ -46,6 +46,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A link recreate destroyed TC trees silently (#472).** The recreate
+  check matched a declared root or ingress qdisc against the qdisc slot
+  alone. It never read classes, leaf qdiscs or filters. A declared `htb`
+  on a link carrying a `RateLimiter` (or an `ingress` with a redirect
+  filter) let the recreate go ahead, and only the bare qdisc came back.
+  When a recreate is planned, classes and filters are now read for every
+  link that has a qdisc of its own. User-made classes (htb, hfsc, drr,
+  qfq, cbq), qdiscs under a class, and every filter now block the
+  recreate. The kernel's own (prio bands, mq queues, fq_codel flows) do
+  not.
+
 - **A link recreate was refused over what the same purge deleted, and was
   not refused when it would delete a veth's peer in another namespace
   (#471, items 1 and 3).**

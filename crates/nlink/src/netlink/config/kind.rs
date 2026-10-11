@@ -652,10 +652,14 @@ pub(crate) struct LinkExtras {
     pub(crate) proxies: Vec<NeighborMessage>,
     /// Nexthop objects.
     pub(crate) nexthops: Vec<Nexthop>,
+    /// TC classes and filters, on the links with a qdisc of their own: no
+    /// declaration describes either (#472).
+    pub(crate) classes: Vec<TcMessage>,
+    pub(crate) filters: Vec<TcMessage>,
 }
 
 impl LinkExtras {
-    pub(crate) async fn read(conn: &Connection<Route>) -> Result<Self> {
+    pub(crate) async fn read(conn: &Connection<Route>, qdiscs: &[TcMessage]) -> Result<Self> {
         let nexthops = match conn.get_nexthops().await {
             Ok(nexthops) => nexthops,
             // A kernel without nexthop objects (before 5.3) has no
@@ -663,11 +667,27 @@ impl LinkExtras {
             Err(e) if e.is_not_supported() => Vec::new(),
             Err(e) => return Err(e),
         };
+        // A link with only the kernel's default qdisc (handle 0:) has no
+        // classes or filters to lose.
+        let mut tc_links: Vec<u32> = qdiscs
+            .iter()
+            .filter(|q| q.handle().major() != 0)
+            .map(|q| q.ifindex())
+            .collect();
+        tc_links.sort_unstable();
+        tc_links.dedup();
+        let (mut classes, mut filters) = (Vec::new(), Vec::new());
+        for ifindex in tc_links {
+            classes.extend(conn.get_classes_by_index(ifindex).await?);
+            filters.extend(conn.get_filters_by_index(ifindex).await?);
+        }
         Ok(Self {
             fdb: conn.get_bridge_neighbors().await?,
             neighbours: conn.get_neighbors().await?,
             proxies: conn.get_proxy_neighbors().await?,
             nexthops,
+            classes,
+            filters,
         })
     }
 }
@@ -1049,6 +1069,16 @@ pub(crate) fn plan(
                 } else if q.parent().is_ingress() {
                     QdiscParent::Ingress
                 } else {
+                    // A qdisc under a class — an HTB leaf, say. Only a root
+                    // or ingress qdisc can be declared, so a declared root
+                    // never covers one: it was ignored, and the recreate
+                    // took it (#472).
+                    blocked_by.push(format!(
+                        "qdisc {} {} on {name} (under {})",
+                        q.kind().unwrap_or("?"),
+                        q.handle(),
+                        q.parent()
+                    ));
                     continue;
                 };
                 let is_declared = config
@@ -1061,6 +1091,29 @@ pub(crate) fn plan(
                         q.kind().unwrap_or("?")
                     ));
                 }
+            }
+            // Classes users make, and every filter — a `RateLimiter`'s tree,
+            // an IFB redirect. A declared root or ingress qdisc came back
+            // after the recreate, bare (#472). A prio's bands, an mq's
+            // queues and the flows fq_codel lists are its own, and come
+            // back with it.
+            for c in extras.classes.iter().filter(|c| {
+                c.ifindex() == l.ifindex()
+                    && matches!(c.kind(), Some("htb" | "hfsc" | "drr" | "qfq" | "cbq"))
+            }) {
+                blocked_by.push(format!(
+                    "class {} {} on {name}",
+                    c.kind().unwrap_or("?"),
+                    c.handle()
+                ));
+            }
+            for f in extras.filters.iter().filter(|f| f.ifindex() == l.ifindex()) {
+                blocked_by.push(format!(
+                    "filter {} pref {} on {name} (parent {})",
+                    f.kind().unwrap_or("?"),
+                    f.priority(),
+                    f.parent()
+                ));
             }
             // The link's FDB entries, and — for a bridge — every entry in
             // its database, whichever port it is on.
