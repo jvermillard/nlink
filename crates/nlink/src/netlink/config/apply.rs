@@ -718,28 +718,7 @@ pub async fn apply_diff(
 /// devices: the kernel refuses `IFLA_ADDRESS` on them (netkit answers a
 /// bare EOPNOTSUPP), and if the address were dropped instead the diff
 /// would ask for it on every apply. Say which knob is wrong instead.
-fn check_declared_address(link: &DeclaredLink) -> Result<()> {
-    if link.address.is_none() {
-        return Ok(());
-    }
-    let reason = match &link.link_type {
-        DeclaredLinkType::Ovpn => "an ovpn link is an L3 device with no hardware address",
-        DeclaredLinkType::Netkit { mode, .. }
-            if *mode != Some(crate::netlink::link::NetkitMode::L2) =>
-        {
-            "a netkit link in L3 mode (the default) has no hardware address; \
-             declare .netkit_mode(NetkitMode::L2) to give it one"
-        }
-        _ => return Ok(()),
-    };
-    Err(Error::InvalidMessage(format!(
-        "link {}: a MAC address is declared, but {reason}",
-        link.name
-    )))
-}
-
 async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()> {
-    check_declared_address(link)?;
     match &link.link_type {
         DeclaredLinkType::Dummy => {
             let mut config = DummyLink::new(&link.name);
@@ -1436,19 +1415,26 @@ mod tests {
         use crate::netlink::link::NetkitMode;
         const MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
 
-        let err = check_declared_address(&link(DeclaredLinkType::Ovpn, Some(MAC)))
-            .expect_err("ovpn has no MAC");
-        assert!(err.to_string().contains("ovpn"), "{err}");
+        // `validate()` runs this check now (#518), before anything changes.
+        let why = link(DeclaredLinkType::Ovpn, Some(MAC))
+            .unaddressable_mac()
+            .expect("ovpn has no MAC");
+        assert!(why.contains("ovpn"), "{why}");
         for mode in [None, Some(NetkitMode::L3)] {
-            let err = check_declared_address(&link(netkit(mode), Some(MAC)))
-                .expect_err("L3 netkit has no MAC");
-            assert!(err.to_string().contains("L2"), "{err}");
+            let why = link(netkit(mode), Some(MAC))
+                .unaddressable_mac()
+                .expect("L3 netkit has no MAC");
+            assert!(why.contains("L2"), "{why}");
         }
 
         let l2 = link(netkit(Some(NetkitMode::L2)), Some(MAC));
-        assert!(check_declared_address(&l2).is_ok());
+        assert!(l2.unaddressable_mac().is_none());
         let vrf = link(DeclaredLinkType::Vrf { table: 10 }, Some(MAC));
-        assert!(check_declared_address(&vrf).is_ok());
-        assert!(check_declared_address(&link(DeclaredLinkType::Ovpn, None)).is_ok());
+        assert!(vrf.unaddressable_mac().is_none());
+        assert!(
+            link(DeclaredLinkType::Ovpn, None)
+                .unaddressable_mac()
+                .is_none()
+        );
     }
 }
