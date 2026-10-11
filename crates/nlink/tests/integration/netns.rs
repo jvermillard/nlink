@@ -146,3 +146,88 @@ async fn an_async_family_connects_inside() -> nlink::Result<()> {
     drop(wg);
     Ok(())
 }
+
+/// A connection made in a namespace knows it, and a sibling of another
+/// protocol lands there too, however the first was opened (#520).
+#[tokio::test]
+async fn connections_know_their_namespace_and_siblings_follow() -> nlink::Result<()> {
+    use nlink::netlink::Nftables;
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("netns-sib")?;
+    let netns = Netns::open(ns.name())?;
+    let by_handle: Connection<Route> = netns.connection()?;
+    let by_name: Connection<Route> = namespace::connection_for(ns.name())?;
+    for conn in [&by_handle, &by_name] {
+        assert_eq!(conn.netns()?.id(), netns.id());
+        let nft = conn.sibling::<Nftables>()?;
+        assert_eq!(nft.netns()?.id(), netns.id());
+    }
+    let host = Connection::<Route>::new()?;
+    assert_eq!(host.netns()?.id(), Netns::current()?.id());
+    Ok(())
+}
+
+/// A pool opens its namespace once. When the name is deleted and a new
+/// namespace is created under it, a replacement connection is refused
+/// rather than made in the new namespace, which it was before (#520).
+#[tokio::test]
+async fn a_pool_never_moves_to_a_namespace_recreated_under_its_name() -> nlink::Result<()> {
+    use nlink::netlink::pool::ConnectionPoolBuilder;
+    nlink::require_root!();
+
+    let name = format!("nlk-pool-{}", std::process::id());
+    let first = Netns::create(&name)?;
+    let pool = ConnectionPoolBuilder::<Route>::new()
+        .namespace(name.as_str())
+        .size(1)
+        .acquire_timeout(Duration::from_millis(300))
+        .build()
+        .await?;
+    {
+        let conn = pool.acquire().await?;
+        assert_eq!(conn.netns()?.id(), first.id());
+    }
+
+    namespace::delete(&name)?;
+    let second = Netns::create(&name)?;
+    pool.acquire().await?.invalidate();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    match pool.acquire().await {
+        Ok(conn) => panic!(
+            "the pool replaced its connection with one in {}, the new namespace",
+            conn.netns()?.id()
+        ),
+        Err(e) => assert!(e.is_timeout() || e.is_pool_exhausted(), "{e}"),
+    }
+    drop(first);
+    second.delete()?;
+    Ok(())
+}
+
+/// A watch stream started through a namespace's name ends with
+/// `NamespaceDeleted` when the name is deleted (#504, #520).
+#[tokio::test]
+async fn a_watch_on_a_named_namespace_ends_when_it_is_deleted() -> nlink::Result<()> {
+    use tokio_stream::StreamExt;
+    nlink::require_root!();
+
+    let name = format!("nlk-watch-{}", std::process::id());
+    let netns = Netns::create(&name)?;
+    let mut stream = nlink::facade::watch::route_changes_in_namespace(&name).await?;
+    namespace::delete(&name)?;
+    let ended = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(item) = stream.next().await {
+            if let Err(e) = item {
+                return Some(e);
+            }
+        }
+        None
+    })
+    .await
+    .expect("the stream should end within 10 s");
+    let err = ended.expect("the stream should end with an error");
+    assert!(err.is_namespace_deleted(), "{err}");
+    drop(netns);
+    Ok(())
+}

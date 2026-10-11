@@ -49,6 +49,26 @@ All notable changes to this project will be documented in this file.
   does not exist, in `links_missing`. So the apply refuses before creating
   anything.
 
+- **Connections know their namespace, and a pool or watch never moves
+  to a namespace recreated under its name (#520, part 2).**
+  - **`Connection::netns()`** gives the namespace a connection's socket
+    lives in. It is exact for one made in a namespace. For one made with
+    `new()` it asks the kernel (`SIOCGSKNS`), or without the privilege
+    gives the caller's namespace.
+  - **`sibling::<Q>()` and `sibling_async::<Q>()`** make a connection of
+    another protocol in the same namespace.
+  - **`Netns::connection()`** makes its sockets on one worker thread per
+    handle; `new_in_namespace` spawns and joins a thread per socket.
+    Those sockets carry the namespace's marker, so a stream on them ends
+    with `NamespaceDeleted` when the name is deleted, like a path-opened
+    one. `Netns::from_fd` and `is_live()` are new.
+  - **`ConnectionPool` and the `*_changes_in_namespace` watches** open the
+    namespace once and make every connection there. A replacement or a
+    resync used to look the name up again, so after the namespace was
+    deleted and a new one created under the same name, it silently
+    joined the new one. Now it fails with `NamespaceDeleted`. A root
+    test recreates a pool's namespace and fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

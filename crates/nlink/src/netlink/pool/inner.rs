@@ -212,15 +212,19 @@ where
     pub async fn build(self) -> Result<ConnectionPool<P>> {
         let (tx, rx) = mpsc::channel(self.size);
         let namespace = self.namespace.clone();
+        // The namespace is opened once: every connection, and every
+        // replacement, is made in that one, never in a namespace created
+        // later under the same name (#520).
+        let netns = match &namespace {
+            Some(ns) => Some(Arc::new(namespace::Netns::open(ns)?)),
+            None => None,
+        };
         for _ in 0..self.size {
-            let conn = match &namespace {
-                Some(ns) => namespace::connection_for::<P>(ns)?,
-                None => Connection::<P>::new()?,
-            };
+            let conn = make_sync::<P>(netns.as_deref())?;
             tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
         }
         let factory: Arc<dyn Factory<P>> = Arc::new(SyncFactory {
-            namespace: namespace.clone(),
+            netns,
             _phantom: PhantomData,
         });
         Ok(ConnectionPool {
@@ -238,8 +242,21 @@ where
 
 /// 0.19 Finding C — concrete factory for SyncConstructible protocols.
 struct SyncFactory<P: ProtocolState + Default + SyncConstructible + 'static> {
-    namespace: Option<String>,
+    netns: Option<Arc<namespace::Netns>>,
     _phantom: PhantomData<fn() -> P>,
+}
+
+/// A connection in the pool's namespace, or `NamespaceDeleted` once its
+/// name no longer names it (#520).
+fn make_sync<P>(netns: Option<&namespace::Netns>) -> Result<Connection<P>>
+where
+    P: ProtocolState + Default + SyncConstructible + 'static,
+{
+    match netns {
+        Some(ns) if !ns.is_live() => Err(ns.deleted()),
+        Some(ns) => ns.connection::<P>(),
+        None => Connection::<P>::new(),
+    }
 }
 
 impl<P> Factory<P> for SyncFactory<P>
@@ -247,13 +264,8 @@ where
     P: ProtocolState + Default + SyncConstructible + 'static,
 {
     fn build(&self) -> FactoryFuture<P> {
-        let namespace = self.namespace.clone();
-        Box::pin(async move {
-            match &namespace {
-                Some(ns) => namespace::connection_for::<P>(ns),
-                None => Connection::<P>::new(),
-            }
-        })
+        let netns = self.netns.clone();
+        Box::pin(async move { make_sync::<P>(netns.as_deref()) })
     }
 }
 
@@ -272,19 +284,16 @@ where
     pub async fn build_async(self) -> Result<ConnectionPool<P>> {
         let (tx, rx) = mpsc::channel(self.size);
         let namespace = self.namespace.clone();
+        let netns = match &namespace {
+            Some(ns) => Some(Arc::new(namespace::Netns::open(ns)?)),
+            None => None,
+        };
         for _ in 0..self.size {
-            let conn = match &namespace {
-                Some(ns) => namespace::connection_for_async::<P>(ns).await?,
-                None => {
-                    let socket = crate::netlink::socket::NetlinkSocket::new(P::PROTOCOL)?;
-                    let state = P::resolve_async(&socket).await?;
-                    Connection::from_parts(socket, state)
-                }
-            };
+            let conn = make_async::<P>(netns.clone()).await?;
             tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
         }
         let factory: Arc<dyn Factory<P>> = Arc::new(AsyncFactory {
-            namespace: namespace.clone(),
+            netns,
             _phantom: PhantomData,
         });
         Ok(ConnectionPool {
@@ -304,8 +313,25 @@ where
 /// (GENL-family) protocols. Each replacement Connection
 /// re-resolves the family ID, just like the initial seed.
 struct AsyncFactory<P: ProtocolState + AsyncProtocolInit + AsyncConstructible + 'static> {
-    namespace: Option<String>,
+    netns: Option<Arc<namespace::Netns>>,
     _phantom: PhantomData<fn() -> P>,
+}
+
+/// A GENL connection in the pool's namespace, its family resolved there, or
+/// `NamespaceDeleted` once the namespace's name no longer names it (#520).
+async fn make_async<P>(netns: Option<Arc<namespace::Netns>>) -> Result<Connection<P>>
+where
+    P: ProtocolState + AsyncProtocolInit + AsyncConstructible + 'static,
+{
+    match netns {
+        Some(ns) if !ns.is_live() => Err(ns.deleted()),
+        Some(ns) => ns.connection_async::<P>().await,
+        None => {
+            let socket = crate::netlink::socket::NetlinkSocket::new(P::PROTOCOL)?;
+            let state = P::resolve_async(&socket).await?;
+            Ok(Connection::from_parts(socket, state))
+        }
+    }
 }
 
 impl<P> Factory<P> for AsyncFactory<P>
@@ -313,17 +339,7 @@ where
     P: ProtocolState + AsyncProtocolInit + AsyncConstructible + 'static,
 {
     fn build(&self) -> FactoryFuture<P> {
-        let namespace = self.namespace.clone();
-        Box::pin(async move {
-            match &namespace {
-                Some(ns) => namespace::connection_for_async::<P>(ns).await,
-                None => {
-                    let socket = crate::netlink::socket::NetlinkSocket::new(P::PROTOCOL)?;
-                    let state = P::resolve_async(&socket).await?;
-                    Ok(Connection::from_parts(socket, state))
-                }
-            }
-        })
+        Box::pin(make_async::<P>(self.netns.clone()))
     }
 }
 
