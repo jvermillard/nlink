@@ -109,7 +109,7 @@ async fn main() -> nlink::Result<()> {
     // A declarative reconcile only *adds* by default; an empty
     // `NetworkConfig::new().apply(...)` is a no-op. Plan 205 (0.23)
     // re-wired an opt-in purge — `ApplyOptions::default().with_purge(true)`
-    // (or `DiffOptions::purge(true)` on a diff) — but it is
+    // (or `PlanOptions::purge(true)` on a diff) — but it is
     // deliberately scoped to **global-scope addresses on managed
     // interfaces** and **`static`/`boot` main-table routes**, and it
     // **never removes links or qdiscs**. So purge can't tear down the

@@ -13,7 +13,7 @@
 //! that does not compare a field agrees with anything, a case can end in
 //! a check that reads the kernel through something else.
 
-use nlink::netlink::config::{ApplyOptions, DiffOptions, NetworkConfig};
+use nlink::netlink::config::{ApplyOptions, PlanOptions, NetworkConfig};
 use nlink::netlink::genl::wireguard::WireguardConfig;
 use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig};
 use nlink::netlink::{Connection, Nftables, Route, Wireguard};
@@ -54,7 +54,7 @@ impl Declarative for NetworkConfig {
 
     async fn pending(&self, conn: &Self::Conn, purge: bool) -> Result<Option<String>, String> {
         let diff = self
-            .diff_with_options(conn, DiffOptions::default().purge(purge))
+            .diff_with_options(conn, PlanOptions::default().purge(purge))
             .await
             .map_err(|e| e.to_string())?;
         Ok((!diff.is_empty()).then(|| diff.to_string()))

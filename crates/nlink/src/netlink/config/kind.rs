@@ -76,7 +76,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use super::diff::{DiffOptions, purgeable_address, purgeable_route};
+use super::diff::{PlanOptions, purgeable_address, purgeable_route};
 use super::types::{DeclaredLink, DeclaredLinkType, NetworkConfig, QdiscParent};
 use crate::netlink::{
     attr::AttrIter,
@@ -1385,7 +1385,7 @@ pub(crate) fn recreates_any(config: &NetworkConfig, links: &[LinkMessage]) -> bo
 /// not, still in the kernel with that kind: what the apply deletes (#512).
 pub(crate) fn removed_links<'a>(
     config: &NetworkConfig,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
     links: &'a [LinkMessage],
 ) -> Vec<&'a LinkMessage> {
     let declared = |name: &str| config.links.iter().any(|d| d.name == name);
@@ -1429,7 +1429,7 @@ pub(crate) fn tagged(config: &NetworkConfig, link: &LinkMessage) -> bool {
 /// removing it: what a deletion would destroy is read then (#426, #512).
 pub(crate) fn deletes_any(
     config: &NetworkConfig,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
     links: &[LinkMessage],
 ) -> bool {
     recreates_any(config, links) || !removed_links(config, opts, links).is_empty()
@@ -1641,7 +1641,7 @@ fn undeclarable_on(ifindex: u32, name: &str, extras: &LinkExtras, blocked_by: &m
 /// work out what a recreate takes with it.
 pub(crate) fn plan(
     config: &NetworkConfig,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
     links: &[LinkMessage],
     addresses: &[AddressMessage],
     routes: &[RouteMessage],

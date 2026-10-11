@@ -80,7 +80,7 @@ async fn plan_188_apply_reconcile_first_attempt_succeeds() -> Result<()> {
             )
             .await?;
         assert_eq!(report.attempts, 1, "no transient errors expected");
-        assert_eq!(report.change_count, 1);
+        assert_eq!(report.changes_made, 1);
         Ok(())
     })
     .await

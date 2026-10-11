@@ -141,6 +141,40 @@ All notable changes to this project will be documented in this file.
     `from_json_str` refuses it. Before, only the apply did.
   - An undeclared sfq `perturb` now means the kernel's 0, and is compared.
 
+- **One reconcile vocabulary, and plan options apart from execution
+  (#532, #519 part 1).**
+  - **Reconcile types.** `nlink::reconcile::{ReconcileOptions,
+    ReconcileReport}` replace two unrelated pairs of the same names: the
+    recipes' at the crate root, and the nftables pair the network and
+    WireGuard layers borrowed. Every old path names the new types.
+    - The options are `max_retries`, `backoff`, `dry_run` and
+      `fallback_to_apply`, set with `with_*` setters.
+    - The report is `attempts` and `changes_made` (the layers'
+      `change_count` is renamed), plus a recipe's per-rule counts.
+    - `dry_run` is now honoured by every layer's `apply_reconcile`: the
+      network, nftables (both reconciles) and WireGuard. It used to commit
+      anyway.
+    - The recipes retry `EBUSY`, `EAGAIN` and interrupted dumps, re-reading
+      the tree each attempt, and report their attempts.
+  - **Plan and execution.** `DiffOptions` is `PlanOptions` (a deprecated
+    alias stays). `ApplyOptions` is `{ plan: PlanOptions, exec:
+    ExecOptions }`, with the same setters.
+    - `ConfigDiff::apply` takes `impl Into<ExecOptions>`, because a
+      computed diff can only be executed. It used to take `ApplyOptions`
+      and silently ignore its plan half.
+    - Its `verify` now works: the diff keeps the config and plan it came
+      from and diffs again with them. Before, it was ignored.
+    - `ExecOptions` (`dry_run`, `continue_on_error`, `verify`) is the one
+      the `Stack` plan/apply (#519 part 2) shares across layers.
+  - **Tests:**
+    - a stale precomputed diff applied with `verify` fails `NotConverged`
+      with the drift;
+    - a purging network reconcile with `dry_run` counts the removal and
+      leaves the address;
+    - both nftables reconciles with `dry_run` commit nothing.
+
+    The first and second fail on the code before their fixes.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

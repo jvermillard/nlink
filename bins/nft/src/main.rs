@@ -988,7 +988,7 @@ async fn reconcile_file(
             .await?;
         eprintln!(
             "nft reconcile: applied {} change(s) in {} attempt(s)",
-            report.change_count, report.attempts
+            report.changes_made, report.attempts
         );
     }
     Ok(())

@@ -293,12 +293,20 @@ async fn apply_reconcile_succeeds_in_one_attempt_when_uncontended() -> nlink::Re
         let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = cfg_with_n_rules(2);
+        // A dry run commits nothing, through either reconcile (#532).
+        let dry = ReconcileOptions::default().with_dry_run(true);
+        let report = cfg.apply_reconcile(&nft, dry).await?;
+        assert!(report.dry_run && report.changes_made >= 4, "{report:?}");
+        let report = cfg.diff(&nft).await?.apply_reconcile(&nft, dry).await?;
+        assert!(report.dry_run && report.changes_made >= 4, "{report:?}");
+        assert!(nft.list_tables().await?.is_empty(), "a dry run commits nothing");
+
         let diff = cfg.diff(&nft).await?;
         let report = diff
             .apply_reconcile(&nft, ReconcileOptions::default())
             .await?;
         assert_eq!(report.attempts, 1, "no contention → single attempt");
-        assert!(report.change_count >= 4, "expected table+chain+2 rules");
+        assert!(report.changes_made >= 4, "expected table+chain+2 rules");
         Ok(())
     })
     .await

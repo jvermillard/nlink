@@ -61,8 +61,10 @@ mod types;
 // be *named* downstream — no `fn report(errs: &[ApplyError])` (#280).
 // `ApplyResult` is `Serialize` under the `serde` feature, so `ApplyError`
 // was in the JSON ABI while being unnameable in Rust.
-pub use apply::{ApplyError, ApplyOptions, ApplyResult};
-pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict, Snapshot};
+pub use apply::{ApplyError, ApplyOptions, ApplyResult, ExecOptions};
+#[allow(deprecated)]
+pub use diff::DiffOptions;
+pub use diff::{ConfigDiff, LinkChanges, PlanOptions, RouteConflict, Snapshot};
 pub use kind::{
     Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
     RecreatePolicy,
@@ -98,13 +100,13 @@ impl NetworkConfig {
         diff::compute_diff(self, conn).await
     }
 
-    /// Compute the diff with explicit [`DiffOptions`].
+    /// Compute the diff with explicit [`PlanOptions`].
     ///
-    /// With [`DiffOptions::purge`] on, the returned diff additionally
+    /// With [`PlanOptions::purge`] on, the returned diff additionally
     /// carries [`ConfigDiff::addresses_to_remove`] /
     /// [`ConfigDiff::routes_to_remove`] for undeclared kernel resources
-    /// (conservatively scoped — see [`DiffOptions::purge`]), and
-    /// [`DiffOptions::purge_tables`] / [`DiffOptions::purge_address_devs`]
+    /// (conservatively scoped — see [`PlanOptions::purge`]), and
+    /// [`PlanOptions::purge_tables`] / [`PlanOptions::purge_address_devs`]
     /// widen that scope.
     /// The default ([`Self::diff`]) never populates the removal
     /// collections, so it can only ever *add* state.
@@ -113,10 +115,10 @@ impl NetworkConfig {
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use nlink::netlink::config::DiffOptions;
+    /// # use nlink::netlink::config::PlanOptions;
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// # let config = nlink::netlink::config::NetworkConfig::new();
-    /// let diff = config.diff_with_options(&conn, DiffOptions::default().purge(true)).await?;
+    /// let diff = config.diff_with_options(&conn, PlanOptions::default().purge(true)).await?;
     /// // `diff.summary()` now shows `-` lines for resources that
     /// // would be removed; inspect before calling `diff.apply(&conn)`.
     /// # Ok(())
@@ -125,7 +127,7 @@ impl NetworkConfig {
     pub async fn diff_with_options(
         &self,
         conn: &Connection<Route>,
-        options: DiffOptions,
+        options: PlanOptions,
     ) -> Result<ConfigDiff> {
         diff::compute_diff_with_options(self, conn, &options).await
     }
@@ -162,7 +164,7 @@ impl NetworkConfig {
     /// The diff against a [`Snapshot`] read earlier, with no kernel read
     /// (#518): what [`diff_with_options`](Self::diff_with_options) returns
     /// had the kernel still been in the snapshot's state.
-    pub fn diff_snapshot(&self, snapshot: &Snapshot, options: DiffOptions) -> Result<ConfigDiff> {
+    pub fn diff_snapshot(&self, snapshot: &Snapshot, options: PlanOptions) -> Result<ConfigDiff> {
         self.validate()?;
         diff::diff_snapshot(self, snapshot, &options)
     }
@@ -200,7 +202,7 @@ impl NetworkConfig {
     /// - `dry_run`: Compute diff but don't make any changes
     /// - `continue_on_error`: Keep going if some operations fail
     /// - `purge`: also remove undeclared addresses and routes, in the scope
-    ///   [`DiffOptions::purge`] sets out. Links and qdiscs are never
+    ///   [`PlanOptions::purge`] sets out. Links and qdiscs are never
     ///   removed.
     ///
     /// # Example
@@ -231,60 +233,37 @@ impl NetworkConfig {
         apply::apply_config(self, conn, options).await
     }
 
-    /// Apply the configuration with bounded retry on transient
-    /// kernel errors. Mirrors
-    /// [`crate::netlink::nftables::config::NftablesDiff::apply_reconcile`].
+    /// Apply, retrying what a concurrent change can cause: `EBUSY`,
+    /// `EAGAIN`, and a dump the kernel interrupted (`NLM_F_DUMP_INTR`, past
+    /// the dump's own re-dumps, #494). Each attempt diffs again, so one
+    /// that failed halfway is finished by the next instead of tripping over
+    /// what it already did (Plan 207e H4). Up to `opts.max_retries`
+    /// retries, from `opts.backoff`, doubling.
     ///
-    /// Retries on [`crate::Error::is_busy`] / [`crate::Error::is_try_again`]
-    /// up to `opts.max_retries` times, with exponential backoff
-    /// starting at `opts.backoff` (doubling per attempt, capped
-    /// at `backoff × 2^10`).
-    ///
-    /// For RTNETLINK the transient-error surface is smaller than
-    /// nftables (no batch-end races), but VRF table allocation,
-    /// neighbor-cache pressure, and similar edges can still
-    /// benefit from the retry budget. Plan 187 (`Error::errno()`
-    /// Io-shape fix) ensures raw `EBUSY`/`EAGAIN` from the
-    /// socket layer is correctly classified.
-    ///
-    /// Plan 188 §2.4.
-    ///
-    /// **Note on `ReconcileOptions`**: this method uses
-    /// [`crate::netlink::nftables::config::ReconcileOptions`]
-    /// (the retry-budget shape), NOT the crate-root
-    /// `ReconcileOptions` (which is the TC recipe shape with
-    /// `fallback_to_apply` / `dry_run`). The two share a name
-    /// for legacy reasons; the apply_reconcile retry surface
-    /// uses the nftables shape.
+    /// With `opts.dry_run`, nothing changes and the report counts what
+    /// would. The same [`ReconcileOptions`](crate::reconcile::ReconcileOptions)
+    /// as every other layer and recipe (#532).
     pub async fn apply_reconcile(
         &self,
         conn: &Connection<Route>,
-        opts: crate::netlink::nftables::config::ReconcileOptions,
-    ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
+        opts: crate::reconcile::ReconcileOptions,
+    ) -> Result<crate::reconcile::ReconcileReport> {
         self.apply_reconcile_with_options(conn, opts, ApplyOptions::default())
             .await
     }
 
     /// [`Self::apply_reconcile`] with [`ApplyOptions`] for each attempt
-    /// (#345).
-    ///
-    /// `apply_reconcile` recomputed every attempt with the non-purge
-    /// [`Self::diff`] and applied with `ApplyOptions::default()`, so
-    /// purge + retry was unreachable: a concurrent-mutator consumer that
-    /// also wanted undeclared addresses and routes removed had to write
-    /// the retry loop by hand around [`Self::apply_with_options`]. Each
-    /// attempt here computes the diff with `apply.purge` /
-    /// `apply.purge_tables` (the same lowering `apply_with_options`
-    /// uses) and applies with `apply`; `dry_run` and
-    /// `continue_on_error` are honoured too.
+    /// (#345): its plan (purge, `previous`, recreate policy, ownership)
+    /// for every diff, and its execution (`continue_on_error`, `verify`)
+    /// for every apply. Either's `dry_run` makes it a dry run.
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::config::{ApplyOptions, NetworkConfig};
-    /// use nlink::netlink::nftables::config::ReconcileOptions;
+    /// use nlink::reconcile::ReconcileOptions;
     ///
-    /// let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+    /// let cfg = NetworkConfig::new() /* ... */;
     /// let report = cfg
     ///     .apply_reconcile_with_options(
     ///         &conn,
@@ -292,80 +271,34 @@ impl NetworkConfig {
     ///         ApplyOptions::default().with_purge(true),
     ///     )
     ///     .await?;
-    /// println!("{} attempt(s), {} change(s)", report.attempts, report.change_count);
+    /// println!("{} change(s) in {} attempt(s)", report.changes_made, report.attempts);
     /// # Ok(())
     /// # }
     /// ```
     pub async fn apply_reconcile_with_options(
         &self,
         conn: &Connection<Route>,
-        opts: crate::netlink::nftables::config::ReconcileOptions,
+        opts: crate::reconcile::ReconcileOptions,
         apply: ApplyOptions,
-    ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
-        // Plan 207e H4 — recompute the diff at the START of each
-        // attempt. Pre-0.19 this loop re-ran the same `apply`
-        // against changed kernel state, causing this failure mode:
-        //
-        //   Attempt 1: link X added OK, address Y add fails with EBUSY
-        //              (kernel netlink is_busy() triggers retry)
-        //   Attempt 2: re-runs full apply → link X already exists →
-        //              add_link fails with EEXIST (NOT is_busy(),
-        //              NOT is_try_again()) → reconcile gives up
-        //              with EEXIST, masking the original EBUSY.
-        //
-        // Recomputing the diff per attempt makes the second attempt
-        // see "link X already in kernel state, no work needed on the
-        // link side; retry only address Y" — which is what users
-        // expect from a reconciler.
-        //
-        // Cumulative `change_count` across attempts is the sum of
-        // each successful apply pass. An empty diff at start of an
-        // attempt is treated as "done", short-circuiting.
-        let diff_opts = apply.diff_options();
-        let mut attempt: usize = 0;
-        let mut cumulative_changes: usize = 0;
-        loop {
-            // Compute fresh diff against current kernel state, with the
-            // purge scope the caller asked for.
-            // A diff is dumps, and a dump torn by a concurrent change
-            // (`NLM_F_DUMP_INTR`, past `send_dump`'s own re-dumps) is
-            // worth another attempt like a busy apply is (#494).
-            let diff = match self.diff_with_options(conn, diff_opts.clone()).await {
-                Ok(diff) => diff,
-                Err(e) if e.is_dump_interrupted() && attempt < opts.max_retries => {
-                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
-                    tokio::time::sleep(backoff).await;
-                    attempt += 1;
-                    continue;
+    ) -> Result<crate::reconcile::ReconcileReport> {
+        let mut exec = apply.exec;
+        exec.dry_run |= opts.dry_run;
+        let plan = &apply.plan;
+        let (changes_made, attempts) = opts
+            .retry(crate::netlink::reconcile::transient, async || {
+                let diff = self.diff_with_options(conn, plan.clone()).await?;
+                if diff.is_empty() {
+                    return Ok(0);
                 }
-                Err(e) => return Err(e),
-            };
-            if diff.is_empty() {
-                return Ok(crate::netlink::nftables::config::ReconcileReport {
-                    attempts: attempt + 1,
-                    change_count: cumulative_changes,
-                });
-            }
-
-            match apply::apply_diff(&diff, conn, apply.clone()).await {
-                Ok(result) => {
-                    cumulative_changes += result.changes_made;
-                    return Ok(crate::netlink::nftables::config::ReconcileReport {
-                        attempts: attempt + 1,
-                        change_count: cumulative_changes,
-                    });
-                }
-                Err(e) if (e.is_busy() || e.is_try_again() || e.is_dump_interrupted())
-                    && attempt < opts.max_retries =>
-                {
-                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
-                    tokio::time::sleep(backoff).await;
-                    attempt += 1;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
+                Ok(apply::apply_diff(&diff, conn, exec).await?.changes_made)
+            })
+            .await?;
+        Ok(crate::reconcile::ReconcileReport {
+            attempts,
+            changes_made,
+            dry_run: exec.dry_run,
+            ..Default::default()
+        })
     }
 }
 
@@ -412,7 +345,7 @@ mod apply_reconcile_tests {
 
     #[test]
     fn reconcile_options_default_caps_at_3_retries() {
-        use crate::netlink::nftables::config::ReconcileOptions;
+        use crate::reconcile::ReconcileOptions;
         let opts = ReconcileOptions::default();
         assert_eq!(opts.max_retries, 3);
         assert_eq!(opts.backoff, Duration::from_millis(100));

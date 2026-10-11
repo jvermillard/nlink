@@ -641,7 +641,7 @@ impl std::fmt::Display for TcTreeDiff {
 /// what it owned is removed (#512, #514).
 pub(crate) fn with_previous(
     config: &super::NetworkConfig,
-    opts: &super::DiffOptions,
+    opts: &super::PlanOptions,
 ) -> Vec<(DeclaredTc, Option<DeclaredTc>)> {
     let previous = opts.previous.as_deref().map(|p| p.tc.as_slice()).unwrap_or(&[]);
     let mut out: Vec<(DeclaredTc, Option<DeclaredTc>)> = config
@@ -672,7 +672,7 @@ pub(crate) fn ifindexes(links: &[LinkMessage]) -> HashMap<String, u32> {
 /// Diff one device's declared tree against its live classes, qdiscs and
 /// filters. A device that does not exist yet has everything to add.
 /// `previous` is the tree the previous config declared on the device
-/// ([`DiffOptions::previous`](super::DiffOptions::previous)): what it owned
+/// ([`PlanOptions::previous`](super::PlanOptions::previous)): what it owned
 /// and this one does not declare goes too.
 pub(crate) fn diff_tree(
     tree: &DeclaredTc,

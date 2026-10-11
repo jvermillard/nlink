@@ -284,7 +284,7 @@ applies its ruleset), the kernel returns EBUSY for the loser.
 `apply_reconcile` retries with exponential backoff:
 
 ```rust,no_run
-use nlink::netlink::nftables::config::ReconcileOptions;
+use nlink::reconcile::ReconcileOptions;
 use std::time::Duration;
 # use nlink::netlink::nftables::config::{NftablesConfig, NftablesDiff};
 # use nlink::{Connection, Nftables};
@@ -292,8 +292,8 @@ use std::time::Duration;
 // `ReconcileOptions` is `#[non_exhaustive]`, so it is built with the
 // `with`-style setters rather than a struct literal.
 let opts = ReconcileOptions::default()
-    .max_retries(5)
-    .backoff(Duration::from_millis(50));
+    .with_max_retries(5)
+    .with_backoff(Duration::from_millis(50));
 let report = diff.apply_reconcile(conn, opts).await?;
 if report.attempts > 1 {
     tracing::warn!(

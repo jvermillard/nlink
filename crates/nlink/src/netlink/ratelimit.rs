@@ -301,6 +301,22 @@ impl RateLimiter {
         opts: ReconcileOptions,
     ) -> Result<ReconcileReport> {
         let ifindex = self.ifindex(conn).await?;
+        // Each attempt reads the trees again (#532).
+        let (mut report, attempts) = opts
+            .retry(super::reconcile::transient, async || {
+                self.reconcile_once(conn, ifindex, opts).await
+            })
+            .await?;
+        report.attempts = attempts;
+        Ok(report)
+    }
+
+    async fn reconcile_once(
+        &self,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
         let mut report = ReconcileReport {
             dry_run: opts.dry_run,
             ..ReconcileReport::default()
@@ -1353,7 +1369,14 @@ impl PerHostLimiter {
             .await?
             .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?;
         let ifindex = link.ifindex();
-        self.reconcile_inner(conn, ifindex, opts).await
+        // Each attempt dumps the tree again (#532).
+        let (mut report, attempts) = opts
+            .retry(super::reconcile::transient, async || {
+                self.reconcile_inner(conn, ifindex, opts).await
+            })
+            .await?;
+        report.attempts = attempts;
+        Ok(report)
     }
 
     async fn reconcile_inner(

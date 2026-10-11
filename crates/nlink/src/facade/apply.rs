@@ -87,8 +87,8 @@ pub async fn nftables_in_namespace(ns: &str, cfg: &NftablesConfig) -> Result<usi
 pub async fn nftables_in(ns: NamespaceSpec<'_>, cfg: &NftablesConfig) -> Result<usize> {
     let conn: Connection<Nftables> = ns.connection()?;
     // Re-diffs if another writer changes the ruleset under it (#482).
-    let opts = crate::netlink::nftables::config::ReconcileOptions::default();
-    Ok(cfg.apply_reconcile(&conn, opts).await?.change_count)
+    let opts = crate::reconcile::ReconcileOptions::default();
+    Ok(cfg.apply_reconcile(&conn, opts).await?.changes_made)
 }
 
 // =============================================================================

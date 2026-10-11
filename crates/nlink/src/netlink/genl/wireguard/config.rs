@@ -491,38 +491,36 @@ impl WireguardConfig {
         Ok(created)
     }
 
-    /// Apply with bounded retry on transient kernel errors
-    /// (EBUSY / EAGAIN). Mirrors
-    /// [`crate::netlink::nftables::config::NftablesDiff::apply_reconcile`]
-    /// and [`crate::netlink::config::NetworkConfig::apply_reconcile`].
-    ///
-    /// Plan 196 §2.3 follow-on (`wg syncconf` reconcile shape).
+    /// Apply, retrying what a concurrent change can cause (`EBUSY`,
+    /// `EAGAIN`, an interrupted dump), each attempt diffing again. With
+    /// `opts.dry_run`, only the diff: the report's `changes_made` is its
+    /// change count. Mirrors
+    /// [`NftablesConfig::apply_reconcile`](crate::netlink::nftables::config::NftablesConfig::apply_reconcile)
+    /// and
+    /// [`NetworkConfig::apply_reconcile`](crate::netlink::config::NetworkConfig::apply_reconcile).
     pub async fn apply_reconcile(
         &self,
         conn: &Connection<Wireguard>,
-        opts: crate::netlink::nftables::config::ReconcileOptions,
-    ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
-        let mut attempt: usize = 0;
-        loop {
-            match self.apply(conn).await {
-                Ok(result) => {
-                    return Ok(crate::netlink::nftables::config::ReconcileReport {
-                        attempts: attempt + 1,
-                        change_count: result.total_writes(),
-                    });
-                }
-                Err(e)
-                    if (e.is_busy() || e.is_try_again() || e.is_dump_interrupted())
-                        && attempt < opts.max_retries =>
-                {
-                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
-                    tokio::time::sleep(backoff).await;
-                    attempt += 1;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
+        opts: crate::netlink::reconcile::ReconcileOptions,
+    ) -> Result<crate::netlink::reconcile::ReconcileReport> {
+        use crate::netlink::reconcile::ReconcileReport;
+        if opts.dry_run {
+            let diff = self.diff(conn).await?;
+            return Ok(ReconcileReport {
+                attempts: 1,
+                changes_made: diff.change_count(),
+                dry_run: true,
+                ..ReconcileReport::default()
+            });
         }
+        let (result, attempts) = opts
+            .retry(crate::netlink::reconcile::transient, async || self.apply(conn).await)
+            .await?;
+        Ok(ReconcileReport {
+            attempts,
+            changes_made: result.total_writes(),
+            ..ReconcileReport::default()
+        })
     }
 
     /// Apply this configuration: compute the diff, then

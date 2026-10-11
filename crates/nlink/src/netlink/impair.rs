@@ -463,7 +463,14 @@ impl PerPeerImpairer {
         opts: ReconcileOptions,
     ) -> Result<ReconcileReport> {
         let ifindex = conn.resolve_interface(&self.target).await?;
-        self.reconcile_inner(conn, ifindex, opts).await
+        // Each attempt dumps the tree again (#532).
+        let (mut report, attempts) = opts
+            .retry(super::reconcile::transient, async || {
+                self.reconcile_inner(conn, ifindex, opts).await
+            })
+            .await?;
+        report.attempts = attempts;
+        Ok(report)
     }
 
     async fn reconcile_inner(

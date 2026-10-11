@@ -225,6 +225,7 @@ pub enum TcHandleParseError {
 /// [`recipe`](Self::recipe), [`app`](Self::app), [`system`](Self::system)
 /// constructors as documentation-bearing shortcuts.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FilterPriority(u16);
 
