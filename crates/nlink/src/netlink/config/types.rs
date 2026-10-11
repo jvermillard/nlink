@@ -5,7 +5,7 @@ use std::time::Duration;
 
 pub use crate::netlink::link::{
     AdSelect as BondAdSelect, LacpRate as BondLacpRate, NetkitMode, NetkitPolicy, NetkitScrub,
-    VlanProtocol,
+    VlanProtocol, XmitHashPolicy as BondXmitHashPolicy,
 };
 
 /// Declarative network configuration.
@@ -26,6 +26,12 @@ pub struct NetworkConfig {
     pub(crate) routes: Vec<DeclaredRoute>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) qdiscs: Vec<DeclaredQdisc>,
+    /// Mistakes a builder made that it could not return, reported by
+    /// [`validate`](Self::validate) — which `diff` and `apply` run — rather
+    /// than turned into a silently different config (#476).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) invalid: Vec<crate::netlink::error::ValidationErrorInfo>,
 }
 
 impl NetworkConfig {
@@ -73,7 +79,15 @@ impl NetworkConfig {
         use crate::netlink::error::ValidationErrorInfo;
         use std::collections::HashSet;
 
-        let mut errors = Vec::new();
+        let mut errors = self.invalid.clone();
+        for r in &self.routes {
+            if let Some(why) = r.gateway_family_mismatch() {
+                errors.push(ValidationErrorInfo::new(
+                    format!("routes.{}/{}", r.destination, r.prefix_len),
+                    why,
+                ));
+            }
+        }
         let mut links = HashSet::new();
         for l in &self.links {
             if !links.insert(l.name.as_str()) {
@@ -265,7 +279,14 @@ impl NetworkConfig {
         f: impl FnOnce(RouteBuilder) -> RouteBuilder,
     ) -> Result<Self, RouteParseError> {
         let builder = f(RouteBuilder::new(dst)?);
-        self.routes.push(builder.build());
+        if let Some(error) = builder.error {
+            return Err(error);
+        }
+        let route = builder.build();
+        if let Some(why) = route.gateway_family_mismatch() {
+            return Err(RouteParseError::InvalidGateway(why));
+        }
+        self.routes.push(route);
         Ok(self)
     }
 
@@ -280,9 +301,19 @@ impl NetworkConfig {
     ///     .qdisc("eth0", |q| q.netem().delay_ms(100).loss_pct(Percent::new(1.0)))
     ///     .qdisc("eth1", |q| q.htb().default_class(0x30));
     /// ```
+    ///
+    /// A builder with no kind (`.netem()`, `.htb(..)`, …), or a setter for
+    /// another kind, is reported by [`validate`](Self::validate). With no
+    /// kind it used to become an fq_codel — which replaced whatever root
+    /// qdisc was there — and a setter called before its kind did nothing
+    /// (#476).
     pub fn qdisc(mut self, dev: &str, f: impl FnOnce(QdiscBuilder) -> QdiscBuilder) -> Self {
-        let builder = f(QdiscBuilder::new(dev));
-        self.qdiscs.push(builder.build());
+        match f(QdiscBuilder::new(dev)).build() {
+            Ok(qdisc) => self.qdiscs.push(qdisc),
+            Err(errors) => self.invalid.extend(errors.into_iter().map(|e| {
+                crate::netlink::error::ValidationErrorInfo::new(format!("qdiscs.{dev}"), e)
+            })),
+        }
         self
     }
 
@@ -509,7 +540,10 @@ pub enum DeclaredLinkType {
     Bond {
         mode: BondMode,
         miimon: Option<u32>,
-        xmit_hash_policy: Option<u8>,
+        /// Typed since 0.31: as a raw `u8`, the create path dropped an
+        /// invalid value and the in-place update sent it, so every apply
+        /// after the first failed with `EINVAL` (#476).
+        xmit_hash_policy: Option<BondXmitHashPolicy>,
         min_links: Option<u32>,
         /// 802.3ad aggregator selection logic. Plan 190 §8.
         ad_select: Option<BondAdSelect>,
@@ -831,8 +865,8 @@ impl LinkBuilder {
         self
     }
 
-    /// Set the transmit hash policy (0=Layer2, 1=Layer34, 2=Layer23).
-    pub fn xmit_hash_policy(mut self, policy: u8) -> Self {
+    /// Set the transmit hash policy.
+    pub fn xmit_hash_policy(mut self, policy: BondXmitHashPolicy) -> Self {
         if let DeclaredLinkType::Bond {
             xmit_hash_policy, ..
         } = &mut self.link_type
@@ -1339,6 +1373,21 @@ impl TryFrom<RouteRepr> for DeclaredRoute {
 }
 
 impl DeclaredRoute {
+    /// Why the gateway cannot be used, if its family is not the
+    /// destination's (#476). The apply dropped such a gateway and the diff
+    /// still compared it, so the route was installed without one and
+    /// replaced on every apply. IPv4-via-IPv6 (RFC 5549) is `RTA_VIA`,
+    /// which nlink does not model.
+    pub(crate) fn gateway_family_mismatch(&self) -> Option<String> {
+        let gateway = self.gateway?;
+        (gateway.is_ipv4() != self.destination.is_ipv4()).then(|| {
+            format!(
+                "gateway {gateway} is not of the destination's family \
+                 (an IPv4 route via IPv6 needs RTA_VIA, which nlink does not model)"
+            )
+        })
+    }
+
     /// Get the destination address.
     pub fn destination(&self) -> IpAddr {
         self.destination
@@ -1452,6 +1501,9 @@ pub struct RouteBuilder {
     destination: IpAddr,
     prefix_len: u8,
     gateway: Option<IpAddr>,
+    /// A setter's input that did not parse; `NetworkConfig::route`
+    /// returns it.
+    error: Option<RouteParseError>,
     dev: Option<String>,
     metric: Option<u32>,
     table: Option<u32>,
@@ -1508,6 +1560,7 @@ impl RouteBuilder {
             destination,
             prefix_len,
             gateway: None,
+            error: None,
             dev: None,
             metric: None,
             table: None,
@@ -1516,9 +1569,17 @@ impl RouteBuilder {
     }
 
     /// Set the gateway address.
+    ///
+    /// A gateway that does not parse is an error from
+    /// [`NetworkConfig::route`]. It was dropped, and `.via("10.0.0.1x")
+    /// .dev("eth0")` became an on-link route (#476).
     pub fn via(mut self, gateway: &str) -> Self {
-        if let Ok(addr) = gateway.parse() {
-            self.gateway = Some(addr);
+        match gateway.parse() {
+            Ok(addr) => self.gateway = Some(addr),
+            Err(_) => {
+                self.error
+                    .get_or_insert(RouteParseError::InvalidGateway(gateway.to_string()));
+            }
         }
         self
     }
@@ -2043,6 +2104,8 @@ pub struct QdiscBuilder {
     dev: String,
     parent: QdiscParent,
     qdisc_type: Option<DeclaredQdiscType>,
+    /// Setters called for a kind the qdisc is not (#476).
+    errors: Vec<String>,
 }
 
 impl QdiscBuilder {
@@ -2051,7 +2114,21 @@ impl QdiscBuilder {
             dev: dev.to_string(),
             parent: QdiscParent::Root,
             qdisc_type: None,
+            errors: Vec::new(),
         }
+    }
+
+    /// Record a setter called for the wrong kind: it did nothing, so
+    /// `q.delay_ms(10).netem()` lost its delay and `q.htb().delay_ms(10)`
+    /// was ignored (#476).
+    fn wrong_kind(&mut self, setter: &str, kinds: &str) {
+        let is = match &self.qdisc_type {
+            Some(kind) => format!("is {}", kind.kind()),
+            None => "has no kind yet — choose the kind first".to_string(),
+        };
+        self.errors.push(format!(
+            "`.{setter}()` sets a {kinds} parameter, but this qdisc {is}"
+        ));
     }
 
     /// Configure as netem qdisc.
@@ -2080,6 +2157,8 @@ impl QdiscBuilder {
     pub fn delay_ms(mut self, ms: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { delay_us, .. }) = &mut self.qdisc_type {
             *delay_us = Some(ms.saturating_mul(1000));
+        } else {
+            self.wrong_kind("delay_ms", "netem");
         }
         self
     }
@@ -2088,6 +2167,8 @@ impl QdiscBuilder {
     pub fn delay_us(mut self, us: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { delay_us, .. }) = &mut self.qdisc_type {
             *delay_us = Some(us);
+        } else {
+            self.wrong_kind("delay_us", "netem");
         }
         self
     }
@@ -2103,6 +2184,8 @@ impl QdiscBuilder {
     pub fn jitter_ms(mut self, ms: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { jitter_us, .. }) = &mut self.qdisc_type {
             *jitter_us = Some(ms.saturating_mul(1000));
+        } else {
+            self.wrong_kind("jitter_ms", "netem");
         }
         self
     }
@@ -2111,6 +2194,8 @@ impl QdiscBuilder {
     pub fn jitter_us(mut self, us: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { jitter_us, .. }) = &mut self.qdisc_type {
             *jitter_us = Some(us);
+        } else {
+            self.wrong_kind("jitter_us", "netem");
         }
         self
     }
@@ -2129,6 +2214,8 @@ impl QdiscBuilder {
     pub fn rate(mut self, rate: crate::util::Rate) -> Self {
         if let Some(DeclaredQdiscType::Netem { rate_bps, .. }) = &mut self.qdisc_type {
             *rate_bps = Some(rate.as_bytes_per_sec());
+        } else {
+            self.wrong_kind("rate", "netem");
         }
         self
     }
@@ -2139,6 +2226,8 @@ impl QdiscBuilder {
     pub fn gap(mut self, packets: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { gap, .. }) = &mut self.qdisc_type {
             *gap = Some(packets);
+        } else {
+            self.wrong_kind("gap", "netem");
         }
         self
     }
@@ -2158,6 +2247,8 @@ impl QdiscBuilder {
     pub fn loss_pct(mut self, percent: crate::util::Percent) -> Self {
         if let Some(DeclaredQdiscType::Netem { loss_percent, .. }) = &mut self.qdisc_type {
             *loss_percent = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("loss_pct", "netem");
         }
         self
     }
@@ -2171,6 +2262,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *duplicate_percent = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("duplicate_pct", "netem");
         }
         self
     }
@@ -2184,6 +2277,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *corrupt_percent = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("corrupt_pct", "netem");
         }
         self
     }
@@ -2202,6 +2297,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *reorder_percent = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("reorder_pct", "netem");
         }
         self
     }
@@ -2221,6 +2318,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *loss_correlation = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("loss_correlation_pct", "netem");
         }
         self
     }
@@ -2252,6 +2351,8 @@ impl QdiscBuilder {
     pub fn loss_model(mut self, model: crate::netlink::tc_options::NetemLossModel) -> Self {
         if let Some(DeclaredQdiscType::Netem { loss_model, .. }) = &mut self.qdisc_type {
             *loss_model = Some(model);
+        } else {
+            self.wrong_kind("loss_model", "netem");
         }
         self
     }
@@ -2266,6 +2367,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *delay_correlation = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("delay_correlation_pct", "netem");
         }
         self
     }
@@ -2278,6 +2381,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *reorder_correlation = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("reorder_correlation_pct", "netem");
         }
         self
     }
@@ -2288,6 +2393,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *duplicate_correlation = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("duplicate_correlation_pct", "netem");
         }
         self
     }
@@ -2298,6 +2405,8 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *corrupt_correlation = Some(percent.as_percent());
+        } else {
+            self.wrong_kind("corrupt_correlation_pct", "netem");
         }
         self
     }
@@ -2316,11 +2425,15 @@ impl QdiscBuilder {
     /// default depth times default flows); the diff compares against the
     /// capped value, so declaring more installs 16256.
     pub fn limit(mut self, packets: u32) -> Self {
+        let mut fits = true;
         match &mut self.qdisc_type {
             Some(DeclaredQdiscType::Netem { limit, .. })
             | Some(DeclaredQdiscType::FqCodel { limit, .. })
             | Some(DeclaredQdiscType::Sfq { limit, .. }) => *limit = Some(packets),
-            _ => {}
+            _ => fits = false,
+        }
+        if !fits {
+            self.wrong_kind("limit", "fq_codel or netem or sfq");
         }
         self
     }
@@ -2333,6 +2446,8 @@ impl QdiscBuilder {
     pub fn target(mut self, target: Duration) -> Self {
         if let Some(DeclaredQdiscType::FqCodel { target_us, .. }) = &mut self.qdisc_type {
             *target_us = Some(target.as_micros().min(u128::from(u32::MAX)) as u32);
+        } else {
+            self.wrong_kind("target", "fq_codel");
         }
         self
     }
@@ -2342,6 +2457,8 @@ impl QdiscBuilder {
     pub fn interval(mut self, interval: Duration) -> Self {
         if let Some(DeclaredQdiscType::FqCodel { interval_us, .. }) = &mut self.qdisc_type {
             *interval_us = Some(interval.as_micros().min(u128::from(u32::MAX)) as u32);
+        } else {
+            self.wrong_kind("interval", "fq_codel");
         }
         self
     }
@@ -2359,6 +2476,8 @@ impl QdiscBuilder {
     pub fn flows(mut self, flows: u32) -> Self {
         if let Some(DeclaredQdiscType::FqCodel { flows: f, .. }) = &mut self.qdisc_type {
             *f = Some(flows);
+        } else {
+            self.wrong_kind("flows", "fq_codel");
         }
         self
     }
@@ -2369,10 +2488,14 @@ impl QdiscBuilder {
     /// fq_codel raises anything below 256 to 256 (`fq_codel_change()`), and
     /// the diff compares against that, so declaring less installs 256.
     pub fn quantum(mut self, bytes: u32) -> Self {
+        let mut fits = true;
         match &mut self.qdisc_type {
             Some(DeclaredQdiscType::FqCodel { quantum, .. })
             | Some(DeclaredQdiscType::Sfq { quantum, .. }) => *quantum = Some(bytes),
-            _ => {}
+            _ => fits = false,
+        }
+        if !fits {
+            self.wrong_kind("quantum", "fq_codel or sfq");
         }
         self
     }
@@ -2382,6 +2505,8 @@ impl QdiscBuilder {
     pub fn ecn(mut self, enabled: bool) -> Self {
         if let Some(DeclaredQdiscType::FqCodel { ecn, .. }) = &mut self.qdisc_type {
             *ecn = Some(enabled);
+        } else {
+            self.wrong_kind("ecn", "fq_codel");
         }
         self
     }
@@ -2394,6 +2519,8 @@ impl QdiscBuilder {
     pub fn perturb(mut self, period: Duration) -> Self {
         if let Some(DeclaredQdiscType::Sfq { perturb_secs, .. }) = &mut self.qdisc_type {
             *perturb_secs = Some(period.as_secs().min(u64::from(u32::MAX)) as u32);
+        } else {
+            self.wrong_kind("perturb", "sfq");
         }
         self
     }
@@ -2407,6 +2534,8 @@ impl QdiscBuilder {
     pub fn bands(mut self, bands: u8) -> Self {
         if let Some(DeclaredQdiscType::Prio { bands: b, .. }) = &mut self.qdisc_type {
             *b = Some(bands);
+        } else {
+            self.wrong_kind("bands", "prio");
         }
         self
     }
@@ -2417,6 +2546,8 @@ impl QdiscBuilder {
     pub fn priomap(mut self, map: [u8; 16]) -> Self {
         if let Some(DeclaredQdiscType::Prio { priomap, .. }) = &mut self.qdisc_type {
             *priomap = Some(map);
+        } else {
+            self.wrong_kind("priomap", "prio");
         }
         self
     }
@@ -2429,6 +2560,8 @@ impl QdiscBuilder {
     pub fn peakrate(mut self, rate: crate::util::Rate) -> Self {
         if let Some(DeclaredQdiscType::Tbf { peakrate_bps, .. }) = &mut self.qdisc_type {
             *peakrate_bps = Some(rate.as_bytes_per_sec());
+        } else {
+            self.wrong_kind("peakrate", "tbf");
         }
         self
     }
@@ -2439,6 +2572,8 @@ impl QdiscBuilder {
     pub fn mtu(mut self, bytes: u32) -> Self {
         if let Some(DeclaredQdiscType::Tbf { mtu, .. }) = &mut self.qdisc_type {
             *mtu = Some(bytes);
+        } else {
+            self.wrong_kind("mtu", "tbf");
         }
         self
     }
@@ -2458,6 +2593,8 @@ impl QdiscBuilder {
     pub fn default_class(mut self, class: u32) -> Self {
         if let Some(DeclaredQdiscType::Htb { default_class }) = &mut self.qdisc_type {
             *default_class = class;
+        } else {
+            self.wrong_kind("default_class", "htb");
         }
         self
     }
@@ -2515,6 +2652,8 @@ impl QdiscBuilder {
     pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
         if let Some(DeclaredQdiscType::Tbf { limit_bytes, .. }) = &mut self.qdisc_type {
             *limit_bytes = Some(limit.as_u32_saturating());
+        } else {
+            self.wrong_kind("limit_bytes", "tbf");
         }
         self
     }
@@ -2558,19 +2697,24 @@ impl QdiscBuilder {
         self
     }
 
-    fn build(self) -> DeclaredQdisc {
-        DeclaredQdisc {
+    /// The declared qdisc, or what was wrong with the builder: no kind —
+    /// it used to become an fq_codel that replaced the root qdisc (#476) —
+    /// or setters for another kind.
+    fn build(mut self) -> Result<DeclaredQdisc, Vec<String>> {
+        let Some(qdisc_type) = self.qdisc_type.take() else {
+            self.errors.push(
+                "no qdisc kind: choose one (`.netem()`, `.htb(..)`, `.fq_codel()`, …)".to_string(),
+            );
+            return Err(self.errors);
+        };
+        if !self.errors.is_empty() {
+            return Err(self.errors);
+        }
+        Ok(DeclaredQdisc {
             dev: self.dev,
             parent: self.parent,
-            qdisc_type: self.qdisc_type.unwrap_or(DeclaredQdiscType::FqCodel {
-                limit: None,
-                target_us: None,
-                interval_us: None,
-                flows: None,
-                quantum: None,
-                ecn: None,
-            }),
-        }
+            qdisc_type,
+        })
     }
 }
 
@@ -2905,7 +3049,7 @@ mod plan_228_tests {
         // that lands in DeclaredQdiscType is what wire-format diff
         // compares.
         let q = QdiscBuilder::new("eth0").netem().loss_pct(Percent::new(1.5));
-        let built = q.build();
+        let built = q.build().unwrap();
         assert_eq!(netem_loss(&built), Some(1.5));
     }
 
@@ -2914,7 +3058,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::new(150.0))
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(netem_loss(&q), Some(100.0));
     }
 
@@ -2923,7 +3068,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::new(-1.5))
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(netem_loss(&q), Some(0.0));
     }
 
@@ -2936,7 +3082,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::new(f64::NAN))
-            .build();
+            .build()
+            .unwrap();
         // NaN propagates through clamp; verify the stored value is NaN.
         let v = netem_loss(&q).expect("loss_percent set");
         assert!(v.is_nan(), "Percent::new(NaN) → stored NaN (documented)");
@@ -2947,7 +3094,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::new(f64::INFINITY))
-            .build();
+            .build()
+            .unwrap();
         // Infinity clamps to 100.
         assert_eq!(netem_loss(&q), Some(100.0));
     }
@@ -2959,7 +3107,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::from_fraction(0.015))
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(netem_loss(&q), Some(1.5));
     }
 
@@ -2978,7 +3127,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .duplicate_pct(Percent::new(2.5))
-            .build();
+            .build()
+            .unwrap();
         let v = netem_field(&q, |t| match t {
             DeclaredQdiscType::Netem { duplicate_percent, .. } => *duplicate_percent,
             _ => None,
@@ -2991,7 +3141,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .corrupt_pct(Percent::new(0.75))
-            .build();
+            .build()
+            .unwrap();
         let v = netem_field(&q, |t| match t {
             DeclaredQdiscType::Netem { corrupt_percent, .. } => *corrupt_percent,
             _ => None,
@@ -3004,7 +3155,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .reorder_pct(Percent::new(5.0))
-            .build();
+            .build()
+            .unwrap();
         let v = netem_field(&q, |t| match t {
             DeclaredQdiscType::Netem { reorder_percent, .. } => *reorder_percent,
             _ => None,
@@ -3017,7 +3169,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_correlation_pct(Percent::new(25.0))
-            .build();
+            .build()
+            .unwrap();
         let v = netem_field(&q, |t| match t {
             DeclaredQdiscType::Netem { loss_correlation, .. } => *loss_correlation,
             _ => None,
@@ -3030,7 +3183,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .delay_correlation_pct(Percent::new(50.0))
-            .build();
+            .build()
+            .unwrap();
         let v = netem_field(&q, |t| match t {
             DeclaredQdiscType::Netem { delay_correlation, .. } => *delay_correlation,
             _ => None,
@@ -3047,7 +3201,8 @@ mod plan_228_tests {
             .duplicate_pct(Percent::new(200.0))   // → 100.0
             .corrupt_pct(Percent::new(-10.0))     // → 0.0
             .reorder_pct(Percent::new(50.0))
-            .build();
+            .build()
+            .unwrap();
         let dup = netem_field(&q, |t| match t {
             DeclaredQdiscType::Netem { duplicate_percent, .. } => *duplicate_percent,
             _ => None,
@@ -3070,8 +3225,14 @@ mod plan_228_tests {
     #[test]
     fn rate_is_stored_in_bytes_per_second_like_netem_config() {
         use crate::util::Rate;
-        let q = QdiscBuilder::new("eth0").netem().rate(Rate::mbit(100)).build();
-        let DeclaredQdiscType::Netem { rate_bps, .. } = netem_of(&q) else { unreachable!() };
+        let q = QdiscBuilder::new("eth0")
+            .netem()
+            .rate(Rate::mbit(100))
+            .build()
+            .unwrap();
+        let DeclaredQdiscType::Netem { rate_bps, .. } = netem_of(&q) else {
+            unreachable!()
+        };
         assert_eq!(*rate_bps, Some(12_500_000), "100 Mbit/s is 12.5 MB/s");
         // …and the lowering hands NetemConfig the same Rate back.
         let cfg = q.qdisc_type.netem_config().unwrap();
@@ -3087,7 +3248,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .tbf(Rate::mbit(100), Bytes::kib(32))
             .limit_bytes(Bytes::kib(64))
-            .build();
+            .build()
+            .unwrap();
         let DeclaredQdiscType::Tbf {
             rate_bps,
             burst_bytes,
@@ -3111,13 +3273,29 @@ mod plan_228_tests {
         assert_eq!(lowered.rate, Rate::mbit(100));
 
         // No limit declared → TbfConfig's default (zero) is left alone.
-        let q = QdiscBuilder::new("eth0").tbf(Rate::kbit(512), Bytes::kb(10)).build();
+        let q = QdiscBuilder::new("eth0")
+            .tbf(Rate::kbit(512), Bytes::kb(10))
+            .build()
+            .unwrap();
         let lowered = q.qdisc_type.tbf_config().unwrap();
         assert_eq!(lowered.limit, Bytes::ZERO);
-        assert!(QdiscBuilder::new("eth0").netem().build().qdisc_type.tbf_config().is_none());
-        // limit_bytes on a non-tbf kind is a no-op, like the netem setters.
-        let q = QdiscBuilder::new("eth0").htb().limit_bytes(Bytes::kib(1)).build();
-        assert!(matches!(q.qdisc_type, DeclaredQdiscType::Htb { .. }));
+        assert!(
+            QdiscBuilder::new("eth0")
+                .netem()
+                .build()
+                .unwrap()
+                .qdisc_type
+                .tbf_config()
+                .is_none()
+        );
+        // limit_bytes on a non-tbf kind is an error, like every setter
+        // for another kind (#476).
+        let errors = QdiscBuilder::new("eth0")
+            .htb()
+            .limit_bytes(Bytes::kib(1))
+            .build()
+            .unwrap_err();
+        assert!(errors[0].contains("tbf"), "{errors:?}");
     }
 
     // ---- #361 — fq_codel / sfq / prio / tbf are configurable at all ----
@@ -3139,7 +3317,8 @@ mod plan_228_tests {
             .flows(1024)
             .quantum(300)
             .ecn(true)
-            .build();
+            .build()
+            .unwrap();
         let lowered = q.qdisc_type.fq_codel_config(true).unwrap();
         let by_hand = FqCodelConfig::new()
             .limit(1200)
@@ -3173,7 +3352,8 @@ mod plan_228_tests {
             .perturb(Duration::from_secs(10))
             .limit(200)
             .quantum(1514)
-            .build();
+            .build()
+            .unwrap();
         let lowered = q.qdisc_type.sfq_config().unwrap();
         let by_hand = SfqConfig::new().perturb(10).limit(200).quantum(1514);
         assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
@@ -3186,7 +3366,8 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .sfq()
             .perturb(Duration::from_millis(1_500))
-            .build();
+            .build()
+            .unwrap();
         let DeclaredQdiscType::Sfq { perturb_secs, .. } = &q.qdisc_type else {
             panic!("sfq");
         };
@@ -3195,11 +3376,11 @@ mod plan_228_tests {
 
     #[test]
     fn prio_bands_reach_the_lowered_config() {
-        let q = QdiscBuilder::new("eth0").prio().bands(4).build();
+        let q = QdiscBuilder::new("eth0").prio().bands(4).build().unwrap();
         let lowered = q.qdisc_type.prio_config().unwrap();
         assert_eq!(lowered.bands, 4);
         // Unset still means the kernel default, as before.
-        let bare = QdiscBuilder::new("eth0").prio().build();
+        let bare = QdiscBuilder::new("eth0").prio().build().unwrap();
         assert_eq!(bare.qdisc_type.prio_config().unwrap().bands, 3);
     }
 
@@ -3211,7 +3392,8 @@ mod plan_228_tests {
             .tbf(Rate::mbit(100), Bytes::kib(32))
             .peakrate(Rate::mbit(200))
             .mtu(1600)
-            .build();
+            .build()
+            .unwrap();
         let lowered = q.qdisc_type.tbf_config().unwrap();
         let by_hand = TbfConfig::new()
             .rate(Rate::mbit(100))
@@ -3222,13 +3404,56 @@ mod plan_228_tests {
         assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
     }
 
-    /// The setters follow the established "no-op on the wrong kind"
-    /// rule, so chaining them onto another kind cannot silently rewrite
-    /// it.
+    /// #476: a gateway that does not parse was dropped, so
+    /// `.via("10.0.0.1x").dev("eth0")` became an on-link route; and one of
+    /// the other family was dropped at apply while the diff compared it.
     #[test]
-    fn the_new_setters_are_no_ops_on_other_kinds() {
+    fn a_bad_or_foreign_gateway_is_an_error() {
+        let typo = NetworkConfig::new().route("10.0.0.0/8", |r| r.via("10.0.0.1x").dev("eth0"));
+        assert!(
+            matches!(typo, Err(RouteParseError::InvalidGateway(ref g)) if g == "10.0.0.1x"),
+            "{typo:?}"
+        );
+        let v6_for_v4 = NetworkConfig::new().route("10.0.0.0/8", |r| r.via("fd00::1"));
+        assert!(
+            matches!(v6_for_v4, Err(RouteParseError::InvalidGateway(_))),
+            "{v6_for_v4:?}"
+        );
+        assert!(
+            NetworkConfig::new()
+                .route("10.0.0.0/8", |r| r.via("10.0.0.1"))
+                .is_ok()
+        );
+    }
+
+    /// #476: a qdisc with no kind became an fq_codel, which replaced the
+    /// root qdisc; a setter before its kind was lost. Both now fail
+    /// `validate()`, which `diff` and `apply` run.
+    #[test]
+    fn a_kindless_or_misordered_qdisc_fails_validation() {
+        let kindless = NetworkConfig::new().qdisc("eth0", |q| q);
+        let err = kindless.validate().expect_err("no kind");
+        assert!(err.to_string().contains("no qdisc kind"), "{err}");
+        assert!(
+            kindless.qdiscs().is_empty(),
+            "nothing is declared in its place"
+        );
+
+        let misordered = NetworkConfig::new().qdisc("eth0", |q| q.delay_ms(10).netem());
+        let err = misordered.validate().expect_err("delay before netem");
+        assert!(err.to_string().contains("`.delay_ms()`"), "{err}");
+
+        let fine = NetworkConfig::new().qdisc("eth0", |q| q.netem().delay_ms(10));
+        assert!(fine.validate().is_ok());
+    }
+
+    /// A setter for another kind does not rewrite the qdisc — and is no
+    /// longer silently dropped either: each is an error the config's
+    /// `validate()` reports (#476).
+    #[test]
+    fn setters_for_another_kind_are_errors() {
         use crate::util::{Bytes, Rate};
-        let q = QdiscBuilder::new("eth0")
+        let errors = QdiscBuilder::new("eth0")
             .htb()
             .flows(8)
             .ecn(true)
@@ -3237,28 +3462,29 @@ mod plan_228_tests {
             .mtu(9000)
             .target(Duration::from_millis(5))
             .perturb(Duration::from_secs(1))
-            .build();
-        assert!(matches!(q.qdisc_type, DeclaredQdiscType::Htb { .. }));
+            .build()
+            .unwrap_err();
+        assert_eq!(errors.len(), 7, "{errors:?}");
+        assert!(
+            errors.iter().all(|e| e.ends_with("this qdisc is htb")),
+            "{errors:?}"
+        );
 
         // `limit` and `quantum` are shared across kinds by design; each
         // must land on the kind in hand and nowhere else.
-        let netem = QdiscBuilder::new("eth0").netem().limit(50).build();
+        let netem = QdiscBuilder::new("eth0").netem().limit(50).build().unwrap();
         let DeclaredQdiscType::Netem { limit, .. } = &netem.qdisc_type else {
             panic!("netem");
         };
         assert_eq!(*limit, Some(50));
-        let tbf = QdiscBuilder::new("eth0")
+        // tbf's limit is a byte count with its own setter; the packet
+        // `limit` must not land on it — and is an error rather than lost.
+        let errors = QdiscBuilder::new("eth0")
             .tbf(Rate::mbit(1), Bytes::kib(4))
             .limit(50)
-            .build();
-        let DeclaredQdiscType::Tbf { limit_bytes, .. } = &tbf.qdisc_type else {
-            panic!("tbf");
-        };
-        assert_eq!(
-            *limit_bytes, None,
-            "tbf's limit is a byte count and has its own setter; the packet \
-             `limit` must not land on it"
-        );
+            .build()
+            .unwrap_err();
+        assert!(errors[0].starts_with("`.limit()`"), "{errors:?}");
     }
 
     #[test]
@@ -3267,8 +3493,14 @@ mod plan_228_tests {
             .netem()
             .delay(Duration::from_micros(1_500))
             .jitter(Duration::from_micros(250))
-            .build();
-        let DeclaredQdiscType::Netem { delay_us, jitter_us, .. } = netem_of(&q) else {
+            .build()
+            .unwrap();
+        let DeclaredQdiscType::Netem {
+            delay_us,
+            jitter_us,
+            ..
+        } = netem_of(&q)
+        else {
             unreachable!()
         };
         assert_eq!((*delay_us, *jitter_us), (Some(1_500), Some(250)));
@@ -3277,8 +3509,14 @@ mod plan_228_tests {
         assert_eq!(cfg.jitter, Some(Duration::from_micros(250)));
 
         // jitter_us is the µs sibling delay_us always had.
-        let q = QdiscBuilder::new("eth0").netem().jitter_us(250).build();
-        let DeclaredQdiscType::Netem { jitter_us, .. } = netem_of(&q) else { unreachable!() };
+        let q = QdiscBuilder::new("eth0")
+            .netem()
+            .jitter_us(250)
+            .build()
+            .unwrap();
+        let DeclaredQdiscType::Netem { jitter_us, .. } = netem_of(&q) else {
+            unreachable!()
+        };
         assert_eq!(*jitter_us, Some(250));
     }
 
@@ -3290,8 +3528,14 @@ mod plan_228_tests {
             .delay_ms(u32::MAX)
             .jitter_ms(u32::MAX)
             .delay(Duration::from_secs(1 << 40))
-            .build();
-        let DeclaredQdiscType::Netem { delay_us, jitter_us, .. } = netem_of(&q) else {
+            .build()
+            .unwrap();
+        let DeclaredQdiscType::Netem {
+            delay_us,
+            jitter_us,
+            ..
+        } = netem_of(&q)
+        else {
             unreachable!()
         };
         assert_eq!((*delay_us, *jitter_us), (Some(u32::MAX), Some(u32::MAX)));
@@ -3320,7 +3564,8 @@ mod plan_228_tests {
             .gap(5)
             .rate(Rate::mbit(100))
             .limit(2000)
-            .build();
+            .build()
+            .unwrap();
         let lowered = q.qdisc_type.netem_config().unwrap();
         let by_hand = NetemConfig::new()
             .delay(Duration::from_millis(20))
@@ -3339,7 +3584,15 @@ mod plan_228_tests {
             .limit(2000)
             .build();
         assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
-        assert!(QdiscBuilder::new("eth0").htb().build().qdisc_type.netem_config().is_none());
+        assert!(
+            QdiscBuilder::new("eth0")
+                .htb()
+                .build()
+                .unwrap()
+                .qdisc_type
+                .netem_config()
+                .is_none()
+        );
     }
 }
 
@@ -3541,6 +3794,34 @@ mod serde_roundtrip_tests {
         assert_eq!(cfg.addresses().len(), 1);
         assert_eq!(cfg.routes().len(), 1);
         assert_eq!(cfg.links()[1].name(), "veth0");
+    }
+
+    /// #476: a JSON route whose gateway is of the other family is a
+    /// validation error, as from the builder; and a bond's hash policy is
+    /// typed, named in JSON.
+    #[test]
+    fn json_gateways_and_hash_policies_are_checked() {
+        // `from_json_str` validates, so it is refused at parse time.
+        let err = NetworkConfig::from_json_str(
+            r#"{ "routes": [ { "destination": "10.1.0.0/16", "gateway": "fd00::1" } ] }"#,
+        )
+        .expect_err("v6 gateway for a v4 route");
+        assert!(
+            err.to_string().contains("not of the destination's family"),
+            "{err}"
+        );
+
+        let bond = NetworkConfig::new().link("bond0", |l| {
+            l.bond().xmit_hash_policy(BondXmitHashPolicy::Layer34)
+        });
+        let json = bond.to_json_string().unwrap();
+        assert!(json.contains(r#""xmit_hash_policy":"layer34""#), "{json}");
+        let back = NetworkConfig::from_json_str(&json).unwrap();
+        assert_eq!(back.to_json_string().unwrap(), json);
+        assert!(
+            NetworkConfig::from_json_str(&json.replace("layer34", "layer99")).is_err(),
+            "an unknown policy does not parse"
+        );
     }
 
     /// A link that does not mention `state` is left as it is — what the

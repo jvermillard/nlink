@@ -234,7 +234,7 @@ struct BondPlan {
     mode: Option<BondMode>,
     miimon: Option<u32>,
     min_links: Option<u32>,
-    xmit_hash_policy: Option<u8>,
+    xmit_hash_policy: Option<nlink::netlink::config::BondXmitHashPolicy>,
     updelay: Option<u32>,
     downdelay: Option<u32>,
     resend_igmp: Option<u32>,
@@ -647,12 +647,16 @@ fn parse_bond_mode(link: &str, s: &str) -> Result<BondMode> {
     }
 }
 
-fn parse_xmit_hash(link: &str, s: &str) -> Result<u8> {
-    // Kernel: layer2=0, layer3+4=1, layer2+3=2.
+fn parse_xmit_hash(link: &str, s: &str) -> Result<nlink::netlink::config::BondXmitHashPolicy> {
+    use nlink::netlink::config::BondXmitHashPolicy as P;
+    // ip-link(8)'s names, or the kernel's numbers.
     match s.to_lowercase().as_str() {
-        "layer2" | "0" => Ok(0),
-        "layer3+4" | "1" => Ok(1),
-        "layer2+3" | "2" => Ok(2),
+        "layer2" | "0" => Ok(P::Layer2),
+        "layer3+4" | "1" => Ok(P::Layer34),
+        "layer2+3" | "2" => Ok(P::Layer23),
+        "encap2+3" | "3" => Ok(P::Encap23),
+        "encap3+4" | "4" => Ok(P::Encap34),
+        "vlan+srcmac" | "5" => Ok(P::VlanSrcMac),
         other => Err(err(link, format!("unknown xmit_hash_policy `{other}`"))),
     }
 }

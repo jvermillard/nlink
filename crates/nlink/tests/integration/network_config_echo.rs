@@ -884,7 +884,7 @@ async fn link_kind_parameter_changes_reach_the_kernel() -> nlink::Result<()> {
                     bond(|b| b.bond_mode(BondMode::BalanceXor)),
                     bond(|b| {
                         b.bond_mode(BondMode::BalanceXor)
-                            .xmit_hash_policy(1)
+                            .xmit_hash_policy(nlink::netlink::config::BondXmitHashPolicy::Layer34)
                             .min_links(1)
                             .bond_resend_igmp(3)
                     }),

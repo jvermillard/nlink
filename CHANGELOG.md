@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **Bond `xmit_hash_policy` is typed in `NetworkConfig` (#476).**
+  `LinkBuilder::xmit_hash_policy` takes a `BondXmitHashPolicy` (the
+  link module's `XmitHashPolicy`, re-exported), and
+  `DeclaredLinkType::Bond { xmit_hash_policy }` is
+  `Option<BondXmitHashPolicy>`. JSON names the policy (`"layer34"`,
+  `"vlan_src_mac"`) instead of a number. See the migration guide.
+
 - **`DiagnosticsConfig` gains `warn_no_default_route` (#509).** Struct
   literals need it, or `..Default::default()`.
 
@@ -38,6 +45,32 @@ All notable changes to this project will be documented in this file.
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **Four `NetworkConfig` builder mistakes became a different config
+  instead of an error (#476).**
+  - `route(.., |r| r.via("10.0.0.1x"))` dropped the gateway it could not
+    parse and declared an on-link route. `route()` now returns the parse
+    error.
+  - A gateway of the other family (`10.0.0.0/8 via fd00::1`) was dropped
+    at apply while the diff still compared it, so the route was installed
+    without a gateway and replaced on every apply. `route()` refuses it,
+    and `validate()` refuses it from JSON. (RFC 5549 `RTA_VIA` is not
+    modelled.)
+  - A `qdisc()` declaration that chose no kind built an fq_codel, which
+    an apply put in place of whatever root was there. It is now a
+    validation error.
+  - A `QdiscBuilder` setter that does not fit the chosen kind did
+    nothing: `q.delay_ms(10).netem()` lost the delay, and
+    `q.htb(..).delay_ms(10)` was ignored. Both are validation errors
+    naming the setter and the kinds it fits.
+  - The bond `xmit_hash_policy` was filtered through `XmitHashPolicy` on
+    create but sent raw by the in-place update, so an invalid value was
+    dropped on the first apply and failed `EINVAL` on every apply after.
+    It is typed end to end now.
+
+  A builder that cannot return an error records it, and
+  `NetworkConfig::validate()` (which `diff` and `apply` run) reports it
+  under the declaration's path, e.g. `qdiscs.eth0`.
 
 - **The namespace watcher reported `Created` before the namespace existed,
   constructors that return `Result` panicked, and `get_route_v4/v6` were
