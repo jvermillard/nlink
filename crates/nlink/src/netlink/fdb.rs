@@ -19,21 +19,22 @@
 //!     println!("{} vlan={:?}", entry.mac_str(), entry.vlan());
 //! }
 //!
-//! // Add a static FDB entry
+//! // Add a static FDB entry: frames for the MAC leave through veth0
 //! let mac = FdbEntryBuilder::parse_mac("aa:bb:cc:dd:ee:ff")?;
 //! conn.add_fdb(
 //!     FdbEntryBuilder::new(mac)
 //!         .dev("veth0")
 //!         .master("br0")
-//!         .permanent()
+//!         .static_()
 //! ).await?;
 //!
-//! // Add VXLAN FDB entry (remote VTEP)
+//! // Add VXLAN FDB entry (remote VTEP), in the device's own table
 //! use std::net::Ipv4Addr;
 //! conn.add_fdb(
 //!     FdbEntryBuilder::new([0x00; 6])  // all-zeros for BUM traffic
 //!         .dev("vxlan0")
 //!         .dst(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)))
+//!         .self_()
 //! ).await?;
 //!
 //! // Delete an entry
@@ -86,8 +87,10 @@ mod ntf {
 
 /// Neighbor states
 mod nud {
-    /// Permanent (static) entry
+    /// Permanent entry: on a bridge, a local one (the bridge's own MAC)
     pub const PERMANENT: u16 = 0x80;
+    /// Static entry: forwarded to its port, never aged
+    pub const NOARP: u16 = 0x40;
     /// Reachable (dynamic) entry
     pub const REACHABLE: u16 = 0x02;
 }
@@ -188,14 +191,23 @@ impl FdbEntry {
         self.master
     }
 
-    /// Check if this is a permanent (static) entry.
+    /// Check if this is a permanent entry (`NUD_PERMANENT`), which
+    /// `bridge fdb` shows as `permanent`: on a bridge, a local one — the
+    /// MAC is the bridge's own, and frames for it go up its stack.
     pub fn is_permanent(&self) -> bool {
         self.state == NeighborState::Permanent
     }
 
-    /// Check if this is a dynamic (learned) entry.
+    /// Check if this is a static entry (`NUD_NOARP`), which `bridge fdb`
+    /// shows as `static`: forwarded to its port, and never aged (#663).
+    pub fn is_static(&self) -> bool {
+        self.state == NeighborState::Noarp
+    }
+
+    /// Check if this is a dynamic (learned) entry: neither permanent nor
+    /// static. A static entry used to count as dynamic (#663).
     pub fn is_dynamic(&self) -> bool {
-        !self.is_permanent()
+        !self.is_permanent() && !self.is_static()
     }
 
     /// Check if entry is for the interface itself (NTF_SELF).
@@ -244,6 +256,15 @@ impl FdbEntry {
     }
 }
 
+/// The `ndm_state` an [`FdbEntryBuilder`] sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum EntryState {
+    Permanent,
+    Static,
+    #[default]
+    Dynamic,
+}
+
 /// Builder for FDB entries.
 ///
 /// # Example
@@ -258,12 +279,13 @@ impl FdbEntry {
 ///     .dev("veth0")
 ///     .master("br0")
 ///     .vlan(100)
-///     .permanent();
+///     .static_();
 ///
-/// // VXLAN remote VTEP entry
+/// // VXLAN remote VTEP entry, in the device's own table
 /// let vxlan_entry = FdbEntryBuilder::new([0x00; 6])
 ///     .dev("vxlan0")
-///     .dst(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
+///     .dst(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)))
+///     .self_();
 /// ```
 #[derive(Debug, Clone, Default)]
 #[must_use = "builders do nothing unless used"]
@@ -274,7 +296,7 @@ pub struct FdbEntryBuilder {
     dst: Option<IpAddr>,
     vni: Option<u32>,
     master: Option<InterfaceRef>,
-    permanent: bool,
+    state: EntryState,
     self_flag: bool,
     extern_learn: bool,
     sticky: bool,
@@ -284,11 +306,13 @@ pub struct FdbEntryBuilder {
 impl FdbEntryBuilder {
     /// Create a new FDB entry builder with the given MAC address.
     ///
-    /// By default, the entry is marked as permanent (static).
+    /// By default the entry is [`permanent`](Self::permanent), as with
+    /// `bridge fdb add`: on a bridge, a local entry. For one that
+    /// forwards to its port, use [`static_`](Self::static_).
     pub fn new(mac: [u8; 6]) -> Self {
         Self {
             mac,
-            permanent: true,
+            state: EntryState::Permanent,
             ..Default::default()
         }
     }
@@ -368,22 +392,36 @@ impl FdbEntryBuilder {
         self.master.as_ref()
     }
 
-    /// Mark entry as permanent (static). This is the default.
+    /// Mark the entry permanent (`NUD_PERMANENT`, `bridge fdb … permanent`).
+    /// This is the default. On a bridge it is a *local* entry: the MAC is
+    /// the bridge's own, and frames for it go up the bridge's stack rather
+    /// than out of the port. On a VXLAN device's own table, it is the
+    /// usual state of a remote. Until 0.32 this was documented as a static
+    /// entry, which it is not on a bridge (#663).
     pub fn permanent(mut self) -> Self {
-        self.permanent = true;
+        self.state = EntryState::Permanent;
+        self
+    }
+
+    /// Mark the entry static (`NUD_NOARP`, `bridge fdb … static`): frames
+    /// for the MAC are forwarded to the entry's port, and the entry never
+    /// ages (#663).
+    pub fn static_(mut self) -> Self {
+        self.state = EntryState::Static;
         self
     }
 
     /// Mark entry as dynamic (will age out).
     pub fn dynamic(mut self) -> Self {
-        self.permanent = false;
+        self.state = EntryState::Dynamic;
         self
     }
 
     /// Add to interface's own FDB (sets NTF_SELF flag).
     ///
-    /// This is typically used for entries on the bridge port itself
-    /// rather than entries forwarded to the master bridge.
+    /// A VXLAN device's remotes go here. Without it the entry goes to the
+    /// bridge the device is a port of, and a device that is not one fails
+    /// with `EOPNOTSUPP` (#663).
     pub fn self_(mut self) -> Self {
         self.self_flag = true;
         self
@@ -425,10 +463,10 @@ impl FdbEntryBuilder {
         ifindex: u32,
         master_idx: Option<u32>,
     ) {
-        let state = if self.permanent {
-            nud::PERMANENT
-        } else {
-            nud::REACHABLE
+        let state = match self.state {
+            EntryState::Permanent => nud::PERMANENT,
+            EntryState::Static => nud::NOARP,
+            EntryState::Dynamic => nud::REACHABLE,
         };
 
         let mut ntf_flags: u8 = 0;
@@ -846,7 +884,7 @@ mod tests {
     #[test]
     fn test_builder_default() {
         let builder = FdbEntryBuilder::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
-        assert!(builder.permanent); // default is permanent
+        assert_eq!(builder.state, EntryState::Permanent); // default is permanent
         assert!(!builder.self_flag);
     }
 
@@ -922,8 +960,41 @@ mod tests {
         assert_eq!(builder.dev, Some(InterfaceRef::Name("veth0".to_string())));
         assert_eq!(builder.master, Some(InterfaceRef::Name("br0".to_string())));
         assert_eq!(builder.vlan, Some(100));
-        assert!(!builder.permanent);
+        assert_eq!(builder.state, EntryState::Dynamic);
         assert!(builder.self_flag);
+    }
+
+    /// Each state goes out as `bridge fdb` sends it, and a static entry
+    /// reads back as static, not dynamic (#663).
+    #[test]
+    fn test_states_on_the_wire_and_back() {
+        for (b, want) in [
+            (FdbEntryBuilder::new([2, 0, 0, 0, 0, 1]), nud::PERMANENT),
+            (FdbEntryBuilder::new([2, 0, 0, 0, 0, 1]).static_(), nud::NOARP),
+            (FdbEntryBuilder::new([2, 0, 0, 0, 0, 1]).dynamic(), nud::REACHABLE),
+        ] {
+            let mut m = MessageBuilder::new(NlMsgType::RTM_NEWNEIGH, 0);
+            b.write_add(&mut m, 3, None);
+            let bytes = m.finish();
+            // nlmsghdr (16), then ndmsg: family, pad, pad, ifindex (4), state (2).
+            assert_eq!(u16::from_ne_bytes([bytes[24], bytes[25]]), want);
+        }
+        let entry = |state| FdbEntry {
+            ifindex: 1,
+            mac: [0; 6],
+            vlan: None,
+            dst: None,
+            vni: None,
+            state,
+            flags: 0,
+            master: None,
+        };
+        let s = entry(NeighborState::Noarp);
+        assert!(s.is_static() && !s.is_dynamic() && !s.is_permanent());
+        let p = entry(NeighborState::Permanent);
+        assert!(p.is_permanent() && !p.is_dynamic() && !p.is_static());
+        assert!(entry(NeighborState::Reachable).is_dynamic());
+        assert!(entry(NeighborState::Stale).is_dynamic());
     }
 
     #[test]
