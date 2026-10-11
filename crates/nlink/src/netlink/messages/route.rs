@@ -19,6 +19,8 @@ mod attr_ids {
     pub const RTA_GATEWAY: u16 = 5;
     pub const RTA_PRIORITY: u16 = 6;
     pub const RTA_PREFSRC: u16 = 7;
+    /// The route's metrics: a nest of `RTAX_*` u32s.
+    pub const RTA_METRICS: u16 = 8;
     /// Plan 202 — multipath nexthop chain (`RTA_MULTIPATH`).
     pub const RTA_MULTIPATH: u16 = 9;
     pub const RTA_TABLE: u16 = 15;
@@ -69,6 +71,9 @@ pub struct RouteMessage {
     /// the kernel dumps `RTA_OIF` / `RTA_MULTIPATH` alongside only while
     /// `net.ipv4.nexthop_compat_mode` is on.
     pub(crate) nh_id: Option<u32>,
+    /// The route's metrics (`RTA_METRICS`): path MTU, advertised MSS, …
+    /// `None` when the route has none (#516).
+    pub(crate) metrics: Option<crate::netlink::route::RouteMetrics>,
 }
 
 /// One nexthop parsed from an `RTA_MULTIPATH` chain. Plan 202.
@@ -171,6 +176,22 @@ impl RouteMessage {
     /// Get the preferred source address.
     pub fn prefsrc(&self) -> Option<&IpAddr> {
         self.prefsrc.as_ref()
+    }
+
+    /// The route's metrics (`RTA_METRICS`): `ip route … mtu 1400 advmss
+    /// 1360`. `None` when it has none.
+    pub fn metrics(&self) -> Option<&crate::netlink::route::RouteMetrics> {
+        self.metrics.as_ref()
+    }
+
+    /// The `rtm_flags` (`RTNH_F_*`, `RTM_F_*`).
+    pub fn flags(&self) -> u32 {
+        self.header.rtm_flags
+    }
+
+    /// Whether the gateway was declared on-link (`RTNH_F_ONLINK`).
+    pub fn is_onlink(&self) -> bool {
+        self.header.rtm_flags & u32::from(crate::netlink::route::rtnh_flags::ONLINK) != 0
     }
 
     /// Get the route preference.
@@ -446,6 +467,9 @@ impl FromNetlink for RouteMessage {
                 }
                 attr_ids::RTA_NH_ID if attr_data.len() >= 4 => {
                     msg.nh_id = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::RTA_METRICS => {
+                    msg.metrics = Some(crate::netlink::route::RouteMetrics::parse(attr_data));
                 }
                 attr_ids::RTA_MULTIPATH => {
                     // Plan 202 — parse the nexthop chain.
