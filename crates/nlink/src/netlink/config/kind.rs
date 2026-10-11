@@ -643,7 +643,7 @@ pub(crate) struct KindPlan {
 /// What hangs off the links beyond the four dumps every diff takes (links,
 /// addresses, routes, qdiscs), and a recreate destroys with them. Read
 /// only when the plan recreates a link ([`recreates_any`]).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct LinkExtras {
     /// The `AF_BRIDGE` neighbour dump: every device's FDB entries.
     pub(crate) fdb: Vec<NeighborMessage>,

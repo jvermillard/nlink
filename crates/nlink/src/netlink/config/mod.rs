@@ -61,7 +61,7 @@ mod types;
 // `ApplyResult` is `Serialize` under the `serde` feature, so `ApplyError`
 // was in the JSON ABI while being unnameable in Rust.
 pub use apply::{ApplyError, ApplyOptions, ApplyResult};
-pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict};
+pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict, Snapshot};
 pub use kind::LinkRecreate;
 pub use types::*;
 
@@ -120,6 +120,14 @@ impl NetworkConfig {
         options: DiffOptions,
     ) -> Result<ConfigDiff> {
         diff::compute_diff_with_options(self, conn, &options).await
+    }
+
+    /// The diff against a [`Snapshot`] read earlier, with no kernel read
+    /// (#518): what [`diff_with_options`](Self::diff_with_options) returns
+    /// had the kernel still been in the snapshot's state.
+    pub fn diff_snapshot(&self, snapshot: &Snapshot, options: DiffOptions) -> Result<ConfigDiff> {
+        self.validate()?;
+        diff::diff_snapshot(self, snapshot, &options)
     }
 
     /// Apply the configuration to achieve the desired state.

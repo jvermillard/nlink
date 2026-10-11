@@ -252,6 +252,16 @@ pub enum Error {
         path: std::path::PathBuf,
     },
 
+    /// A declarative apply went through, and a second diff still found
+    /// work to do (#518): the kernel did not take some change the way the
+    /// diff expected, or something changed the state meanwhile. Asked for
+    /// with `ApplyOptions::with_verify(true)`.
+    #[error("the apply did not converge; a second diff still finds:\n{remaining}")]
+    NotConverged {
+        /// What the second diff found.
+        remaining: Box<crate::netlink::config::ConfigDiff>,
+    },
+
     /// Qdisc not found.
     #[error("qdisc not found: {kind} on {interface}")]
     QdiscNotFound {
@@ -434,6 +444,9 @@ pub enum ErrorKind {
     PoolClosed,
     /// Duplicate address detection failed.
     DadFailed,
+    /// A declarative apply went through, and a second diff still found
+    /// work to do.
+    NotConverged,
     /// Anything else: an errno not named above, or an error with none.
     Other,
 }
@@ -510,6 +523,7 @@ impl std::fmt::Display for ErrorKind {
             Self::PoolExhausted => "pool exhausted",
             Self::PoolClosed => "pool closed",
             Self::DadFailed => "duplicate address detection failed",
+            Self::NotConverged => "did not converge",
             Self::Other => "other",
         };
         f.write_str(s)
@@ -839,6 +853,7 @@ impl Error {
             Self::PoolExhausted { .. } => ErrorKind::PoolExhausted,
             Self::PoolClosed => ErrorKind::PoolClosed,
             Self::DadFailed { .. } => ErrorKind::DadFailed,
+            Self::NotConverged { .. } => ErrorKind::NotConverged,
             Self::Io(e) if e.raw_os_error().is_none() => match e.kind() {
                 std::io::ErrorKind::NotFound => ErrorKind::NotFound,
                 std::io::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
@@ -1364,6 +1379,17 @@ mod tests {
             }
         }
         assert_eq!(Error::from_errno(libc::EPROTO).kind(), ErrorKind::Other);
+    }
+
+    /// `NotConverged` says what was left, and is its own kind (#518).
+    #[test]
+    fn not_converged_shows_what_is_left() {
+        let err = Error::NotConverged {
+            remaining: Box::default(),
+        };
+        assert_eq!(err.kind(), ErrorKind::NotConverged);
+        assert!(err.to_string().contains("did not converge"), "{err}");
+        assert!(!err.kind().is_retryable());
     }
 
     #[test]

@@ -81,6 +81,10 @@ pub struct ApplyOptions {
     /// Extra interfaces to purge addresses from — see
     /// [`DiffOptions::purge_address_devs`]. Ignored unless `purge` is on.
     pub purge_address_devs: Vec<String>,
+    /// Diff again after the apply, and fail with
+    /// [`Error::NotConverged`](crate::Error::NotConverged) if anything is
+    /// left (#518). Off by default; ignored on a dry run.
+    pub verify: bool,
 }
 
 impl ApplyOptions {
@@ -127,6 +131,13 @@ impl ApplyOptions {
     ) -> Self {
         self.purge_address_devs
             .extend(devs.into_iter().map(Into::into));
+        self
+    }
+
+    /// Diff again after the apply and fail if anything is left; see
+    /// [`Self::verify`].
+    pub fn with_verify(mut self, on: bool) -> Self {
+        self.verify = on;
         self
     }
 
@@ -212,8 +223,19 @@ pub async fn apply_config(
     conn: &Connection<Route>,
     options: ApplyOptions,
 ) -> Result<ApplyResult> {
-    let diff = compute_diff_with_options(config, conn, &options.diff_options()).await?;
-    apply_diff(&diff, conn, options).await
+    let diff_opts = options.diff_options();
+    let diff = compute_diff_with_options(config, conn, &diff_opts).await?;
+    let verify = options.verify && !options.dry_run;
+    let result = apply_diff(&diff, conn, options).await?;
+    if verify {
+        let remaining = compute_diff_with_options(config, conn, &diff_opts).await?;
+        if !remaining.is_empty() {
+            return Err(Error::NotConverged {
+                remaining: Box::new(remaining),
+            });
+        }
+    }
+    Ok(result)
 }
 
 /// Apply a pre-computed diff.

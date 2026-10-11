@@ -780,3 +780,45 @@ async fn purge_address_devs_reaches_reconcile_and_stack() -> Result<()> {
     })
     .await
 }
+
+/// A snapshot diff is the live diff, with no kernel read: after an apply it
+/// still describes the state it was read from, and a fresh one is empty.
+/// `with_verify` re-diffs after the apply (#518).
+#[tokio::test]
+async fn a_snapshot_diff_is_the_live_diff_without_a_read() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        use nlink::netlink::config::Snapshot;
+
+        let ns = TestNamespace::new("snapshot")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().mtu(1400).up())
+            .address("d0", "10.62.0.1/24")?;
+
+        let before = Snapshot::read(&conn).await?;
+        let live = cfg.diff(&conn).await?;
+        let offline = cfg.diff_snapshot(&before, DiffOptions::default())?;
+        assert_eq!(offline.to_string(), live.to_string());
+        assert!(!offline.is_empty());
+
+        let applied = cfg
+            .apply_with_options(&conn, ApplyOptions::default().with_verify(true))
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        let stale = cfg.diff_snapshot(&before, DiffOptions::default())?;
+        assert_eq!(
+            stale.to_string(),
+            offline.to_string(),
+            "a snapshot does not change"
+        );
+        let now = Snapshot::read(&conn).await?;
+        assert!(now.links().iter().any(|l| l.name() == Some("d0")));
+        assert!(cfg.diff_snapshot(&now, DiffOptions::default())?.is_empty());
+        Ok(())
+    })
+    .await
+}
