@@ -27,28 +27,42 @@ fn tc_json(ns: &TestNamespace, what: &str, dev: &str, extra: &[&str]) -> Result<
     serde_json::from_str(&out).map_err(|e| format!("{e}: {out}"))
 }
 
+/// `tc <what> show dev <dev> [extra]` inside `ns`, as text: iproute2 6.1
+/// (the CI lane's) prints HTB classes as text even with `-j`.
+fn tc_text(ns: &TestNamespace, what: &str, dev: &str, extra: &[&str]) -> Result<String, String> {
+    let mut args = vec![what, "show", "dev", dev];
+    args.extend_from_slice(extra);
+    ns.exec("tc", &args).map_err(|e| e.to_string())
+}
+
 /// The class handles `tc class show` lists on `dev`, sorted.
 fn class_handles(ns: &TestNamespace, dev: &str) -> Result<Vec<String>, String> {
-    let classes = tc_json(ns, "class", dev, &[])?;
-    let mut handles: Vec<String> = classes
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| c["handle"].as_str().map(str::to_string))
+    let mut handles: Vec<String> = tc_text(ns, "class", dev, &[])?
+        .lines()
+        .filter_map(|l| l.strip_prefix("class "))
+        .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
         .collect();
     handles.sort();
     Ok(handles)
 }
 
+/// The word after `key` in `text`.
+fn word_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let mut words = text.split_whitespace();
+    words.find(|w| *w == key)?;
+    words.next()
+}
+
 /// `(priority, kind)` of each filter `tc filter show` lists at `parent`,
 /// one per filter (the per-handle lines folded), sorted.
 fn filters_at(ns: &TestNamespace, dev: &str, parent: &str) -> Result<Vec<(u64, String)>, String> {
-    let filters = tc_json(ns, "filter", dev, &["parent", parent])?;
-    let mut out: Vec<(u64, String)> = filters
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|f| Some((f["pref"].as_u64()?, f["kind"].as_str()?.to_string())))
+    let mut out: Vec<(u64, String)> = tc_text(ns, "filter", dev, &["parent", parent])?
+        .lines()
+        .filter(|l| l.starts_with("filter "))
+        .filter_map(|l| {
+            let pref: u64 = word_after(l, "pref")?.parse().ok()?;
+            Some((pref, word_after(l, &pref.to_string())?.to_string()))
+        })
         .collect();
     out.sort();
     out.dedup();
@@ -149,16 +163,15 @@ async fn a_tree_changes_in_place_and_drops_what_it_no_longer_declares() -> nlink
             ));
         }
         // The values, not only the names: 1:10's rate and the flower's port.
-        let rate = tc_json(&ns, "class", "d0", &["classid", "1:10"])?;
-        let want_rate = if i == 0 { 7_500_000 } else { 3_750_000 };
-        if rate[0]["rate"].as_u64() != Some(want_rate) {
-            return Err(format!("1:10's rate: {rate}, want {want_rate} bytes/s"));
+        let class = tc_text(&ns, "class", "d0", &["classid", "1:10"])?;
+        let want_rate = if i == 0 { "60Mbit" } else { "30Mbit" };
+        if word_after(&class, "rate") != Some(want_rate) {
+            return Err(format!("1:10's rate, want {want_rate}: {class}"));
         }
-        let flower = tc_json(&ns, "filter", "d0", &["parent", "1:", "pref", "1"])?;
-        let port = if i == 0 { 22 } else { 80 };
-        let shown = flower.to_string();
-        if !shown.contains(&format!("\"dst_port\":{port}")) {
-            return Err(format!("the flower should match port {port}: {shown}"));
+        let flower = tc_text(&ns, "filter", "d0", &["parent", "1:", "pref", "1"])?;
+        let port = if i == 0 { "22" } else { "80" };
+        if word_after(&flower, "dst_port") != Some(port) {
+            return Err(format!("the flower should match port {port}: {flower}"));
         }
         Ok(())
     })
@@ -192,12 +205,11 @@ async fn an_ifb_redirect_shapes_what_a_device_receives() -> nlink::Result<()> {
         assert!(diff.is_empty(), "the redirect does not converge:\n{diff}");
 
         assert_eq!(deliver_udp(&pair.a, &pair.b, dst, 5), 0, "redirected into a 100% loss");
-        let netem = tc_json(&pair.b, "qdisc", "ifb0", &["root"]).map_err(nlink::Error::InvalidMessage)?;
         let shown = pair.b.exec("tc", &["-s", "-j", "qdisc", "show", "dev", "ifb0", "root"])?;
         let stats: serde_json::Value = serde_json::from_str(&shown).expect("tc -j");
         assert!(
             stats[0]["drops"].as_u64().unwrap_or(0) > 0,
-            "the IFB's netem dropped nothing — was anything redirected? {netem} {shown}"
+            "the IFB's netem dropped nothing — was anything redirected? {shown}"
         );
 
         // Dropped from the config, with the one that declared it as the
