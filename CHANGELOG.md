@@ -702,6 +702,31 @@ All notable changes to this project will be documented in this file.
     with a label change made in place, and with an IPv6 metric reset in
     place.
 
+- **Declared routes carry a source, a scope, `onlink` and metrics (#516,
+  row 2).** `RouteBuilder` gains `src`, `scope`, `onlink`, `mtu`,
+  `advmss`, `window`, `initcwnd`, `initrwnd` and `hoplimit`. The JSON form
+  has the same fields (`scope` by name).
+  - **Comparison.** The diff compares each attribute. A replace drops what
+    it isn't sent, so an attribute left out of the declaration is one the
+    route must not have. The scope is compared only when declared, because
+    the kernel otherwise picks link for a route without a gateway and
+    global for one with.
+  - **Imperative side.** `RouteMessage` now parses `RTA_METRICS`
+    (`metrics()`) and exposes `flags()` and `is_onlink()`. `Ipv4Route` and
+    `Ipv6Route` gain `onlink()`, which only `NextHop` had.
+  - **Undo.** The route a replace overwrites is recorded with its
+    attributes, so an undo restores them.
+  - **Validation.** `onlink` without a device is a validation error (the
+    kernel's "Nexthop device required for onlink"), and so is a `src` of
+    the other family.
+  - **Not here.** A protocol per route stays config-wide
+    (`NetworkConfig::routes_protocol`, #512), because ownership is decided
+    by it.
+  - **Test.** A transition test takes an IPv4 and an IPv6 route A→B→none.
+    Every step converges, `ip -j -d route` shows exactly the declared
+    source, flags and metrics, and it passes on iproute2 6.1. Without the
+    attribute comparison, step 2 never applies.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

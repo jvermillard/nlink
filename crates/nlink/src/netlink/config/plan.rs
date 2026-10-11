@@ -536,6 +536,7 @@ mod tests {
             metric: None,
             table: Some(254),
             route_type: DeclaredRouteType::Unicast,
+            attrs: Default::default(),
         }
     }
 

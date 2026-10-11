@@ -135,6 +135,14 @@ impl NetworkConfig {
                     ));
                 }
             }
+            // `fib_check_nh` refuses it: "Nexthop device required for
+            // onlink" (#516).
+            if r.attrs.onlink && r.dev.is_none() {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    "onlink needs a device: declare the route's dev",
+                ));
+            }
             // Table 0 is RT_TABLE_UNSPEC: the kernel puts the route in main
             // (254), and a diff comparing 0 with 254 re-added it forever.
             if r.table == Some(0) {
@@ -1938,6 +1946,56 @@ pub struct DeclaredRoute {
     pub(crate) metric: Option<u32>,
     pub(crate) table: Option<u32>,
     pub(crate) route_type: DeclaredRouteType,
+    /// The source, scope, on-link flag and metrics (#516). All unset by
+    /// default: none of them is sent.
+    pub(crate) attrs: RouteAttrs,
+}
+
+/// What a route carries besides where it goes and how (#516). A replace
+/// drops what it is not sent, so an attribute left out is one the route
+/// does not have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RouteAttrs {
+    /// `src`: the source address for traffic it carries (`RTA_PREFSRC`).
+    pub(crate) prefsrc: Option<IpAddr>,
+    /// The scope; the kernel's (link for a route with no gateway, global
+    /// otherwise) when unset, and then not compared.
+    pub(crate) scope: Option<crate::netlink::types::route::RouteScope>,
+    /// `onlink`: the gateway is on the link whatever the subnets say.
+    pub(crate) onlink: bool,
+    /// The metrics `ip route` sets: `mtu`, `advmss`, `window`,
+    /// `initcwnd`, `initrwnd`, `hoplimit`.
+    pub(crate) mtu: Option<u32>,
+    pub(crate) advmss: Option<u32>,
+    pub(crate) window: Option<u32>,
+    pub(crate) initcwnd: Option<u32>,
+    pub(crate) initrwnd: Option<u32>,
+    pub(crate) hoplimit: Option<u32>,
+}
+
+impl RouteAttrs {
+    /// The metrics, as the imperative API takes them; `None` for none.
+    pub(crate) fn metrics(&self) -> Option<crate::netlink::route::RouteMetrics> {
+        let m = crate::netlink::route::RouteMetrics {
+            mtu: self.mtu,
+            advmss: self.advmss,
+            window: self.window,
+            initcwnd: self.initcwnd,
+            initrwnd: self.initrwnd,
+            hoplimit: self.hoplimit,
+            ..Default::default()
+        };
+        (m != crate::netlink::route::RouteMetrics::default()).then_some(m)
+    }
+
+    /// The six metrics a declaration has, from a route's metrics.
+    pub(crate) fn with_metrics(mut self, m: Option<&crate::netlink::route::RouteMetrics>) -> Self {
+        if let Some(m) = m {
+            (self.mtu, self.advmss, self.window) = (m.mtu, m.advmss, m.window);
+            (self.initcwnd, self.initrwnd, self.hoplimit) = (m.initcwnd, m.initrwnd, m.hoplimit);
+        }
+        self
+    }
 }
 
 /// Serde shadow for [`DeclaredRoute`] — string `destination`/`gateway`
@@ -1964,6 +2022,33 @@ struct RouteRepr {
         skip_serializing_if = "DeclaredRouteType::is_unicast"
     )]
     route_type: DeclaredRouteType,
+    /// The source address for traffic the route carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    src: Option<String>,
+    /// `global`, `site`, `link` or `host`; the kernel's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    /// The gateway is on the link whatever the subnets say.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    onlink: bool,
+    /// Path MTU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mtu: Option<u32>,
+    /// Advertised MSS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advmss: Option<u32>,
+    /// TCP window clamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<u32>,
+    /// Initial congestion window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initcwnd: Option<u32>,
+    /// Initial receive window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initrwnd: Option<u32>,
+    /// Hop limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hoplimit: Option<u32>,
 }
 
 // Delegate `DeclaredRoute`'s schema to `RouteRepr` so it describes
@@ -1998,6 +2083,7 @@ impl From<DeclaredRoute> for RouteRepr {
         } else {
             format!("{}/{}", r.destination, r.prefix_len)
         };
+        let a = r.attrs;
         RouteRepr {
             destination,
             gateway: r.gateway.map(|g| g.to_string()),
@@ -2005,6 +2091,15 @@ impl From<DeclaredRoute> for RouteRepr {
             metric: r.metric,
             table: r.table,
             route_type: r.route_type,
+            src: a.prefsrc.map(|s| s.to_string()),
+            scope: a.scope.map(|s| s.name().to_string()),
+            onlink: a.onlink,
+            mtu: a.mtu,
+            advmss: a.advmss,
+            window: a.window,
+            initcwnd: a.initcwnd,
+            initrwnd: a.initrwnd,
+            hoplimit: a.hoplimit,
         }
     }
 }
@@ -2048,6 +2143,20 @@ impl TryFrom<RouteRepr> for DeclaredRoute {
             (dst, plen)
         };
 
+        let prefsrc = match r.src.as_deref() {
+            Some(s) => match s.parse::<IpAddr>() {
+                Ok(ip) if ip.is_ipv4() == destination.is_ipv4() => Some(ip),
+                _ => return Err(RouteParseError::InvalidAttribute(format!("src {s:?}"))),
+            },
+            None => None,
+        };
+        let scope = match r.scope.as_deref() {
+            Some(name) => Some(
+                route_scope(name)
+                    .ok_or_else(|| RouteParseError::InvalidAttribute(format!("scope {name:?}")))?,
+            ),
+            None => None,
+        };
         Ok(DeclaredRoute {
             destination,
             prefix_len,
@@ -2056,6 +2165,17 @@ impl TryFrom<RouteRepr> for DeclaredRoute {
             metric: r.metric,
             table: r.table,
             route_type: r.route_type,
+            attrs: RouteAttrs {
+                prefsrc,
+                scope,
+                onlink: r.onlink,
+                mtu: r.mtu,
+                advmss: r.advmss,
+                window: r.window,
+                initcwnd: r.initcwnd,
+                initrwnd: r.initrwnd,
+                hoplimit: r.hoplimit,
+            },
         })
     }
 }
@@ -2099,6 +2219,26 @@ impl DeclaredRoute {
     /// Get the route metric.
     pub fn metric(&self) -> Option<u32> {
         self.metric
+    }
+
+    /// The declared source address (`src`).
+    pub fn src(&self) -> Option<IpAddr> {
+        self.attrs.prefsrc
+    }
+
+    /// The declared scope; `None` leaves it to the kernel.
+    pub fn scope(&self) -> Option<crate::netlink::types::route::RouteScope> {
+        self.attrs.scope
+    }
+
+    /// Whether the gateway is declared on-link.
+    pub fn is_onlink(&self) -> bool {
+        self.attrs.onlink
+    }
+
+    /// The declared metrics (`mtu`, `advmss`, …); `None` for none.
+    pub fn metrics(&self) -> Option<crate::netlink::route::RouteMetrics> {
+        self.attrs.metrics()
     }
 
     /// Get the routing table.
@@ -2180,6 +2320,10 @@ pub enum RouteParseError {
     /// Invalid gateway address.
     #[error("invalid gateway address: {0}")]
     InvalidGateway(String),
+    /// An attribute beyond the destination and gateway that cannot be
+    /// (#516): a `src` of the other family, an unknown scope.
+    #[error("invalid route attribute: {0}")]
+    InvalidAttribute(String),
 }
 
 /// Builder for route configuration.
@@ -2196,6 +2340,7 @@ pub struct RouteBuilder {
     metric: Option<u32>,
     table: Option<u32>,
     route_type: DeclaredRouteType,
+    attrs: RouteAttrs,
 }
 
 impl RouteBuilder {
@@ -2253,7 +2398,71 @@ impl RouteBuilder {
             metric: None,
             table: None,
             route_type: DeclaredRouteType::default(),
+            attrs: RouteAttrs::default(),
         })
+    }
+
+    /// The source address for traffic the route carries (`ip route …
+    /// src`, `RTA_PREFSRC`). It must be an address of the route's family.
+    pub fn src(mut self, src: &str) -> Self {
+        match src.parse::<IpAddr>() {
+            Ok(ip) if ip.is_ipv4() == self.destination.is_ipv4() => self.attrs.prefsrc = Some(ip),
+            _ => {
+                self.error
+                    .get_or_insert(RouteParseError::InvalidAttribute(format!("src {src:?}")));
+            }
+        }
+        self
+    }
+
+    /// The route's scope (`global`, `site`, `link`, `host`). Unset, the
+    /// kernel's: link for a route with no gateway, global otherwise.
+    pub fn scope(mut self, scope: crate::netlink::types::route::RouteScope) -> Self {
+        self.attrs.scope = Some(scope);
+        self
+    }
+
+    /// The gateway is on the link whatever the subnets say (`onlink`).
+    /// Needs a device.
+    pub fn onlink(mut self) -> Self {
+        self.attrs.onlink = true;
+        self
+    }
+
+    /// The path MTU (`ip route … mtu`).
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.attrs.mtu = Some(mtu);
+        self
+    }
+
+    /// The advertised MSS (`advmss`).
+    pub fn advmss(mut self, advmss: u32) -> Self {
+        self.attrs.advmss = Some(advmss);
+        self
+    }
+
+    /// The TCP window clamp (`window`).
+    pub fn window(mut self, window: u32) -> Self {
+        self.attrs.window = Some(window);
+        self
+    }
+
+    /// The initial congestion window (`initcwnd`).
+    pub fn initcwnd(mut self, initcwnd: u32) -> Self {
+        self.attrs.initcwnd = Some(initcwnd);
+        self
+    }
+
+    /// The initial receive window (`initrwnd`).
+    pub fn initrwnd(mut self, initrwnd: u32) -> Self {
+        self.attrs.initrwnd = Some(initrwnd);
+        self
+    }
+
+    /// The hop limit (`hoplimit`).
+    pub fn hoplimit(mut self, hoplimit: u32) -> Self {
+        self.attrs.hoplimit = Some(hoplimit);
+        self
     }
 
     /// Set the gateway address.
@@ -2317,8 +2526,22 @@ impl RouteBuilder {
             metric: self.metric,
             table: self.table,
             route_type: self.route_type,
+            attrs: self.attrs,
         }
     }
+}
+
+/// A scope by the name `ip route` gives it.
+#[cfg(feature = "serde")]
+fn route_scope(name: &str) -> Option<crate::netlink::types::route::RouteScope> {
+    use crate::netlink::types::route::RouteScope;
+    Some(match name {
+        "global" | "universe" => RouteScope::Universe,
+        "site" => RouteScope::Site,
+        "link" => RouteScope::Link,
+        "host" => RouteScope::Host,
+        _ => return None,
+    })
 }
 
 // ============================================================================
@@ -3762,6 +3985,54 @@ mod serde_roundtrip_tests {
                 r#"{"addresses":[{"dev":"eth0","address":"10.0.0.1/24","preferred-lft":"3600s"}]}"#,
                 "needs a valid one",
             ),
+        ] {
+            let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();
+            assert!(err.contains(says), "{doc}: {err}");
+        }
+    }
+
+    #[test]
+    fn route_attributes_roundtrip_and_validate() {
+        use crate::netlink::types::route::RouteScope;
+        let cfg = NetworkConfig::new()
+            .route("10.81.0.0/16", |r| {
+                r.via("10.80.0.2")
+                    .dev("d0")
+                    .src("10.80.0.1")
+                    .onlink()
+                    .scope(RouteScope::Universe)
+                    .mtu(1400)
+                    .advmss(1300)
+            })
+            .unwrap()
+            .route("fd81::/64", |r| r.via("fd80::2").hoplimit(10).initrwnd(20))
+            .unwrap();
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""src":"10.80.0.1""#,
+            r#""scope":"global""#,
+            r#""onlink":true"#,
+            r#""mtu":1400"#,
+            r#""hoplimit":10"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        assert_eq!(cfg.routes()[0].metrics().and_then(|m| m.advmss), Some(1300));
+
+        // A source of the other family, at the builder and in a document.
+        assert!(NetworkConfig::new().route("10.0.0.0/8", |r| r.src("fd00::1")).is_err());
+        let err = NetworkConfig::new()
+            .route("10.0.0.0/8", |r| r.via("10.1.0.1").onlink())
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("onlink needs a device"), "{err}");
+        for (doc, says) in [
+            (r#"{"routes":[{"destination":"10.0.0.0/8","src":"fd00::1"}]}"#, "src"),
+            (r#"{"routes":[{"destination":"10.0.0.0/8","scope":"galaxy"}]}"#, "scope"),
         ] {
             let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();
             assert!(err.contains(says), "{doc}: {err}");

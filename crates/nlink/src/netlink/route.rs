@@ -167,7 +167,7 @@ pub trait RouteConfig: Send + Sync {
 }
 
 /// Route metrics configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteMetrics {
     /// Path MTU
     pub mtu: Option<u32>,
@@ -203,6 +203,37 @@ impl RouteMetrics {
     /// Create empty metrics.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Read an `RTA_METRICS` nest. Unknown `RTAX_*` attributes (and
+    /// `RTAX_CC_ALGO`, a string) are skipped.
+    pub(crate) fn parse(nest: &[u8]) -> Self {
+        let mut m = Self::default();
+        for (ty, payload) in crate::netlink::attr::AttrIter::new(nest) {
+            let Some(v) = payload.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+            else {
+                continue;
+            };
+            let slot = match ty & 0x3FFF {
+                rtax::MTU => &mut m.mtu,
+                rtax::WINDOW => &mut m.window,
+                rtax::RTT => &mut m.rtt,
+                rtax::RTTVAR => &mut m.rttvar,
+                rtax::SSTHRESH => &mut m.ssthresh,
+                rtax::CWND => &mut m.cwnd,
+                rtax::ADVMSS => &mut m.advmss,
+                rtax::REORDERING => &mut m.reordering,
+                rtax::HOPLIMIT => &mut m.hoplimit,
+                rtax::INITCWND => &mut m.initcwnd,
+                rtax::FEATURES => &mut m.features,
+                rtax::RTO_MIN => &mut m.rto_min,
+                rtax::INITRWND => &mut m.initrwnd,
+                rtax::QUICKACK => &mut m.quickack,
+                _ => continue,
+            };
+            *slot = Some(v);
+        }
+        m
     }
 
     /// Set path MTU.
@@ -467,6 +498,8 @@ pub struct Ipv4Route {
     mpls_encap: Option<MplsEncap>,
     /// SRv6 encapsulation
     srv6_encap: Option<Srv6Encap>,
+    /// `rtm_flags`: `RTNH_F_ONLINK` for [`onlink`](Self::onlink).
+    flags: u32,
 }
 
 impl Ipv4Route {
@@ -504,6 +537,7 @@ impl Ipv4Route {
             nexthop_id: None,
             mpls_encap: None,
             srv6_encap: None,
+            flags: 0,
         }
     }
 
@@ -526,6 +560,7 @@ impl Ipv4Route {
             nexthop_id: None,
             mpls_encap: None,
             srv6_encap: None,
+            flags: 0,
         }
     }
 
@@ -592,6 +627,13 @@ impl Ipv4Route {
     /// Set route metrics (MTU, advmss, etc.).
     pub fn metrics(mut self, metrics: RouteMetrics) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// The gateway is on the link even if no address's subnet covers it
+    /// (`ip route … onlink`, `RTNH_F_ONLINK`). Needs a device.
+    pub fn onlink(mut self) -> Self {
+        self.flags |= u32::from(rtnh_flags::ONLINK);
         self
     }
 
@@ -755,7 +797,8 @@ impl RouteConfig for Ipv4Route {
             .with_table(table_u8)
             .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
-            .with_type(self.route_type as u8);
+            .with_type(self.route_type as u8)
+            .with_flags(self.flags);
 
         builder.append(&rtmsg);
 
@@ -888,7 +931,8 @@ impl RouteConfig for Ipv4Route {
             .with_table(table_u8)
             .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
-            .with_type(self.route_type as u8);
+            .with_type(self.route_type as u8)
+            .with_flags(self.flags);
 
         builder.append(&rtmsg);
 
@@ -964,6 +1008,8 @@ pub struct Ipv6Route {
     mpls_encap: Option<MplsEncap>,
     /// SRv6 encapsulation
     srv6_encap: Option<Srv6Encap>,
+    /// `rtm_flags`: `RTNH_F_ONLINK` for [`onlink`](Self::onlink).
+    flags: u32,
 }
 
 impl Ipv6Route {
@@ -997,6 +1043,7 @@ impl Ipv6Route {
             nexthop_id: None,
             mpls_encap: None,
             srv6_encap: None,
+            flags: 0,
         }
     }
 
@@ -1020,6 +1067,7 @@ impl Ipv6Route {
             nexthop_id: None,
             mpls_encap: None,
             srv6_encap: None,
+            flags: 0,
         }
     }
 
@@ -1086,6 +1134,13 @@ impl Ipv6Route {
     /// Set route metrics (MTU, advmss, etc.).
     pub fn metrics(mut self, metrics: RouteMetrics) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// The gateway is on the link even if no address's subnet covers it
+    /// (`ip route … onlink`, `RTNH_F_ONLINK`). Needs a device.
+    pub fn onlink(mut self) -> Self {
+        self.flags |= u32::from(rtnh_flags::ONLINK);
         self
     }
 
@@ -1217,7 +1272,8 @@ impl RouteConfig for Ipv6Route {
             .with_table(table_u8)
             .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
-            .with_type(self.route_type as u8);
+            .with_type(self.route_type as u8)
+            .with_flags(self.flags);
 
         builder.append(&rtmsg);
 
@@ -1337,7 +1393,8 @@ impl RouteConfig for Ipv6Route {
             .with_table(table_u8)
             .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
-            .with_type(self.route_type as u8);
+            .with_type(self.route_type as u8)
+            .with_flags(self.flags);
 
         builder.append(&rtmsg);
 

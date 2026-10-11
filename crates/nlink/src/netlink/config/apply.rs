@@ -1194,6 +1194,18 @@ async fn add_route(
 
             // Set route type — the same mapping the diff compares with.
             config = config.route_type(route.route_type.kernel_type());
+            if let Some(IpAddr::V4(src)) = route.attrs.prefsrc {
+                config = config.prefsrc(src);
+            }
+            if let Some(scope) = route.attrs.scope {
+                config = config.scope(scope);
+            }
+            if route.attrs.onlink {
+                config = config.onlink();
+            }
+            if let Some(metrics) = route.attrs.metrics() {
+                config = config.metrics(metrics);
+            }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -1223,6 +1235,18 @@ async fn add_route(
             }
 
             config = config.route_type(route.route_type.kernel_type());
+            if let Some(IpAddr::V6(src)) = route.attrs.prefsrc {
+                config = config.prefsrc(src);
+            }
+            if let Some(scope) = route.attrs.scope {
+                config = config.scope(scope);
+            }
+            if route.attrs.onlink {
+                config = config.onlink();
+            }
+            if let Some(metrics) = route.attrs.metrics() {
+                config = config.metrics(metrics);
+            }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`

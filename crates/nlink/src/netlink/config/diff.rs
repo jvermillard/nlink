@@ -2013,6 +2013,14 @@ fn declared_from_live(
         metric: r.priority(),
         table: Some(r.table_id()),
         route_type,
+        // What it carries, so an undo puts it back as it was (#516).
+        attrs: super::types::RouteAttrs {
+            prefsrc: r.prefsrc().copied(),
+            scope: Some(r.scope()),
+            onlink: r.is_onlink(),
+            ..Default::default()
+        }
+        .with_metrics(r.metrics()),
     })
 }
 
@@ -2025,6 +2033,26 @@ pub(crate) fn route_text(route: &DeclaredRoute) -> String {
     }
     if let Some(d) = &route.dev {
         out.push_str(&format!(" dev {d}"));
+    }
+    // What a change of these alone is a change of (#516).
+    let a = &route.attrs;
+    if let Some(src) = a.prefsrc {
+        out.push_str(&format!(" src {src}"));
+    }
+    if a.onlink {
+        out.push_str(" onlink");
+    }
+    for (name, value) in [
+        ("mtu", a.mtu),
+        ("advmss", a.advmss),
+        ("window", a.window),
+        ("initcwnd", a.initcwnd),
+        ("initrwnd", a.initrwnd),
+        ("hoplimit", a.hoplimit),
+    ] {
+        if let Some(v) = value {
+            out.push_str(&format!(" {name} {v}"));
+        }
     }
     out
 }
@@ -2070,9 +2098,24 @@ fn route_matches(declared: &DeclaredRoute, declared_oif: Option<u32>, r: &RouteM
     // apply.
     route_matches_but_metric(declared, declared_oif, r)
         && kernel_metric(declared) == r.priority().unwrap_or(0)
+        && route_attrs_match(declared, r)
 }
 
 /// [`route_matches`] without the metric: same gateway, device and type.
+/// Whether `r` carries what `declared` declares beyond its gateway and
+/// device (#516): the source, the on-link flag and the metrics, each
+/// absent when not declared (a replace drops what it is not sent), and the
+/// scope when it is declared (the kernel picks one otherwise).
+fn route_attrs_match(declared: &DeclaredRoute, r: &RouteMessage) -> bool {
+    let a = &declared.attrs;
+    let live = super::types::RouteAttrs::default().with_metrics(r.metrics());
+    a.prefsrc.as_ref() == r.prefsrc()
+        && a.onlink == r.is_onlink()
+        && a.scope.is_none_or(|s| s == r.scope())
+        && (a.mtu, a.advmss, a.window) == (live.mtu, live.advmss, live.window)
+        && (a.initcwnd, a.initrwnd, a.hoplimit) == (live.initcwnd, live.initrwnd, live.hoplimit)
+}
+
 fn route_matches_but_metric(
     declared: &DeclaredRoute,
     declared_oif: Option<u32>,
@@ -2376,6 +2419,7 @@ mod tests {
             metric,
             table: None,
             route_type: DeclaredRouteType::Unicast,
+            attrs: Default::default(),
         };
         assert_eq!(kernel_metric(&route("2001:db8::", None)), 1024);
         assert_eq!(kernel_metric(&route("2001:db8::", Some(0))), 1024);
@@ -2533,6 +2577,7 @@ mod tests {
             metric: None,
             table: Some(254),
             route_type: DeclaredRouteType::Unicast,
+            attrs: Default::default(),
         }
     }
 

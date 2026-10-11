@@ -1167,3 +1167,69 @@ async fn address_attributes_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// Route attributes changed A→B→none (#516): source, on-link and metrics
+/// for IPv4, source and metrics for IPv6. A replace drops what it is not
+/// sent, so each step converges and `ip -j -d route` shows exactly what
+/// it declares.
+#[tokio::test]
+async fn route_attributes_change_in_place() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    type RB = nlink::netlink::config::RouteBuilder;
+    let step = |v4: fn(RB) -> RB, v6: fn(RB) -> RB| {
+        dummy(|l| l)
+            .address("d0", "10.80.0.1/24")
+            .and_then(|c| c.address("d0", "10.80.0.9/24"))
+            .expect("addresses")
+            .address_with("d0", "fd80::1/64", |a| a.nodad())
+            .and_then(|c| c.address_with("d0", "fd80::9/64", |a| a.nodad()))
+            .expect("v6 addresses")
+            .route("10.81.0.0/16", move |r| v4(r.via("10.80.0.2").dev("d0")))
+            .and_then(|c| c.route("fd81::/64", move |r| v6(r.via("fd80::2").dev("d0"))))
+            .expect("routes")
+    };
+    let steps = [
+        step(
+            |r| r.src("10.80.0.1").onlink().mtu(1400).advmss(1300),
+            |r| r.src("fd80::1").hoplimit(10),
+        ),
+        step(
+            |r| r.src("10.80.0.9").mtu(1500).initcwnd(10),
+            |r| r.src("fd80::9").hoplimit(20).mtu(1280),
+        ),
+        step(|r| r, |r| r),
+    ];
+    // (prefsrc, onlink, metrics) as `ip -j -d route` shows them.
+    let want: [[(&str, bool, &str); 2]; 3] = [
+        [
+            ("10.80.0.1", true, r#"[{"mtu":1400,"advmss":1300}]"#),
+            ("fd80::1", false, r#"[{"hoplimit":10}]"#),
+        ],
+        [
+            ("10.80.0.9", false, r#"[{"mtu":1500,"initcwnd":10}]"#),
+            ("fd80::9", false, r#"[{"mtu":1280,"hoplimit":20}]"#),
+        ],
+        [("", false, "null"), ("", false, "null")],
+    ];
+    let ns = TestNamespace::new("tr-rtattr")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        for (k, (family, dst)) in [("-4", "10.81.0.0/16"), ("-6", "fd81::/64")].into_iter().enumerate() {
+            let routes = ip_json(&ns, &[family, "-d", "route", "show", dst])?;
+            let r = &routes[0];
+            let have = (
+                r["prefsrc"].as_str().unwrap_or(""),
+                r["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == "onlink")),
+                r["metrics"].clone(),
+            );
+            let (src, onlink, metrics) = want[i][k];
+            let metrics: serde_json::Value = serde_json::from_str(metrics).expect("json");
+            if have != (src, onlink, metrics) {
+                return Err(format!("{dst} step {}: want {:?}, have {have:?}: {r}", i + 1, want[i][k]));
+            }
+        }
+        Ok(())
+    })
+    .await
+}

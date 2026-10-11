@@ -73,6 +73,12 @@ impl RtMsg {
         self
     }
 
+    /// Set the `RTNH_F_*` / `RTM_F_*` flags (`rtm_flags`).
+    pub fn with_flags(mut self, flags: u32) -> Self {
+        self.rtm_flags = flags;
+        self
+    }
+
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
         <Self as IntoBytes>::as_bytes(self)
