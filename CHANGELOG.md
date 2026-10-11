@@ -633,6 +633,39 @@ All notable changes to this project will be documented in this file.
   the code without their fixes. Trees are not in the JSON/YAML form yet: a
   filter's actions have no document shape.
 
+- **The apply is a plan of steps, with a journal that undoes it (#518).**
+  `ConfigDiff::plan() -> Plan { steps: Vec<Step> }` lists every kernel call
+  an apply makes, in the order it makes them.
+  - **Hidden steps are explicit now:**
+    - an MTU raised before a link stacked on it is created;
+    - a bridge MTU pinned again after its ports moved it;
+    - a VLAN held down after its lower device came up;
+    - an IPv6 address's old prefix removed right before the new one is
+      added;
+    - refusals (a missing link, a route someone else owns, a recreate or
+      removal that would destroy undeclared state).
+  - **What runs is what prints.** `Plan::apply` runs the steps in order,
+    and `ConfigDiff::apply` is now `plan().apply()`, so the printed plan
+    and the executed one cannot drift apart. `Display` numbers each step,
+    with its reason where the plan knows one.
+  - **Replaces are changes.** A route that replaces one in its place is
+    `Step::ReplaceRoute { before, after }`. The diff prints it as
+    `~ route … (replacing …)` instead of `+`.
+  - **Journal and undo.** `ApplyResult::journal` records each step that
+    changed something, with `Step::inverse()` where one can be known:
+    addresses and routes added or removed, links created, a link's state,
+    MTU, master and MAC, and qdiscs the previous config declared.
+    `ApplyResult::undo()` is the plan that puts those back, last first;
+    `irreversible()` lists what it cannot.
+  - **Tests.**
+    - Unit tests pin the step order (the hidden steps included), the
+      rendering and the inverses.
+    - A root test applies B over A (an MTU, a new address, a route's
+      gateway), runs B's undo, and finds A's diff empty again. It fails
+      when the replaced route is not recorded: the step then prints as `+`
+      and its undo deletes the route instead of restoring it.
+    - The whole root suite runs through the new executor.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

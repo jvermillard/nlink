@@ -309,6 +309,11 @@ pub struct ConfigDiff {
     /// MTU step skips them; not counted, shown or serialized (#473).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) mtus_first: Vec<(String, u32)>,
+    /// The kernel route each route in `routes_to_add` replaces, when one is
+    /// there (#518): `(declared, replaced)`. Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) routes_replaced: Vec<(DeclaredRoute, DeclaredRoute)>,
     /// The protocol the apply installs declared routes with: the config's
     /// [`routes_protocol`](super::NetworkConfig::routes_protocol) (#512).
     /// Not shown or serialized.
@@ -474,19 +479,15 @@ impl ConfigDiff {
         }
         // Routes
         for route in &self.routes_to_add {
-            let via = route
-                .gateway
-                .map(|g| format!(" via {}", g))
-                .unwrap_or_default();
-            let dev = route
-                .dev
-                .as_ref()
-                .map(|d| format!(" dev {}", d))
-                .unwrap_or_default();
-            lines.push(format!(
-                "+ route {}/{}{}{}",
-                route.destination, route.prefix_len, via, dev
-            ));
+            // A route that replaces one is a change, not an addition (#518).
+            match self.routes_replaced.iter().find(|(r, _)| r == route) {
+                Some((_, before)) => lines.push(format!(
+                    "~ route {} (replacing {})",
+                    route_text(route),
+                    route_text(before)
+                )),
+                None => lines.push(format!("+ route {}", route_text(route))),
+            }
         }
         for conflict in &self.routes_refused {
             lines.push(conflict.to_string());
@@ -609,7 +610,7 @@ impl std::fmt::Display for RouteConflict {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LinkChanges {
     /// Change state to up.
     pub set_up: bool,
@@ -636,7 +637,22 @@ pub struct LinkChanges {
     pub set_kind_params: Vec<String>,
     /// The attributes behind `set_kind_params`.
     #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) kind_update: Option<KindUpdate>,
+    /// What the link had, for the change's inverse (#518). `None` for a
+    /// link this apply creates.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) was: Option<LinkWas>,
+}
+
+/// What a link had before a [`LinkChanges`] (#518).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LinkWas {
+    pub(crate) up: bool,
+    pub(crate) mtu: Option<u32>,
+    pub(crate) master: Option<String>,
+    pub(crate) address: Option<[u8; 6]>,
 }
 
 impl LinkChanges {
@@ -1401,7 +1417,17 @@ fn compute_link_changes(
     ifindex_to_name: &HashMap<u32, &str>,
     bonds: &HashSet<&str>,
 ) -> LinkChanges {
-    let mut changes = LinkChanges::default();
+    let mut changes = LinkChanges {
+        was: Some(LinkWas {
+            up: existing.is_up(),
+            mtu: existing.mtu,
+            master: existing
+                .master()
+                .and_then(|idx| ifindex_to_name.get(&idx).map(|n| n.to_string())),
+            address: existing.address().and_then(|a| <[u8; 6]>::try_from(a).ok()),
+        }),
+        ..LinkChanges::default()
+    };
 
     // Plan 207a M10 — read the IFF_UP administrative flag from
     // ifi_flags, NOT the OperState (RFC 2863) field. OperState
@@ -1801,7 +1827,19 @@ fn diff_routes(
                 route: declared.clone(),
                 held_by: describe_route(r, ifindex_to_name),
             }),
-            None => diff.routes_to_add.push(declared.clone()),
+            None => {
+                // What the replace overwrites, if anything (#518).
+                let replaced = current_by_key.get(&key).and_then(|kernel_routes| {
+                    kernel_routes
+                        .iter()
+                        .find(|r| r.priority().unwrap_or(0) == slot && r.header.rtm_tos == 0)
+                        .and_then(|r| declared_from_live(r, ifindex_to_name))
+                });
+                if let Some(replaced) = replaced {
+                    diff.routes_replaced.push((declared.clone(), replaced));
+                }
+                diff.routes_to_add.push(declared.clone());
+            }
         }
     }
 
@@ -1862,15 +1900,14 @@ fn diff_routes(
         if !(r.is_ipv4() || r.is_ipv6()) || !config.owns_route_protocol(r.protocol()) {
             continue;
         }
-        let route_type = match r.route_type() {
-            RouteType::Unicast => DeclaredRouteType::Unicast,
-            RouteType::Blackhole => DeclaredRouteType::Blackhole,
-            RouteType::Unreachable => DeclaredRouteType::Unreachable,
-            RouteType::Prohibit => DeclaredRouteType::Prohibit,
-            // Local/broadcast/multicast/anycast/… are kernel-managed
-            // — never purge them.
-            _ => continue,
-        };
+        // Local/broadcast/multicast/anycast/… are kernel-managed — never
+        // purge them.
+        if !matches!(
+            r.route_type(),
+            RouteType::Unicast | RouteType::Blackhole | RouteType::Unreachable | RouteType::Prohibit
+        ) {
+            continue;
+        }
         let dst = r.destination.unwrap_or_else(|| {
             if r.is_ipv4() {
                 IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
@@ -1901,20 +1938,57 @@ fn diff_routes(
         if !(superseded || purged || dropped) {
             continue;
         }
-        let dev = r
+        if let Some(route) = declared_from_live(r, ifindex_to_name) {
+            diff.routes_to_remove.push(route);
+        }
+    }
+}
+
+/// A kernel route as the declaration that would install it; `None` for a
+/// type no declaration has (local, broadcast, …).
+fn declared_from_live(
+    r: &RouteMessage,
+    ifindex_to_name: &HashMap<u32, &str>,
+) -> Option<DeclaredRoute> {
+    let route_type = match r.route_type() {
+        RouteType::Unicast => DeclaredRouteType::Unicast,
+        RouteType::Blackhole => DeclaredRouteType::Blackhole,
+        RouteType::Unreachable => DeclaredRouteType::Unreachable,
+        RouteType::Prohibit => DeclaredRouteType::Prohibit,
+        _ => return None,
+    };
+    let destination = r.destination.unwrap_or_else(|| {
+        if r.is_ipv4() {
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        }
+    });
+    Some(DeclaredRoute {
+        destination,
+        prefix_len: r.dst_len(),
+        gateway: r.gateway().copied(),
+        dev: r
             .oif()
             .and_then(|idx| ifindex_to_name.get(&idx))
-            .map(|n| n.to_string());
-        diff.routes_to_remove.push(DeclaredRoute {
-            destination: dst,
-            prefix_len: r.dst_len(),
-            gateway: r.gateway().copied(),
-            dev,
-            metric: r.priority(),
-            table: Some(r.table_id()),
-            route_type,
-        });
+            .map(|n| n.to_string()),
+        metric: r.priority(),
+        table: Some(r.table_id()),
+        route_type,
+    })
+}
+
+/// A declared route the way the diff prints it: `10.1.0.0/16 via 10.0.0.1
+/// dev eth0`.
+pub(crate) fn route_text(route: &DeclaredRoute) -> String {
+    let mut out = format!("{}/{}", route.destination, route.prefix_len);
+    if let Some(g) = route.gateway {
+        out.push_str(&format!(" via {g}"));
     }
+    if let Some(d) = &route.dev {
+        out.push_str(&format!(" dev {d}"));
+    }
+    out
 }
 
 /// A kernel route the way `ip route` prints it.

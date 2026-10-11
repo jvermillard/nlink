@@ -884,6 +884,53 @@ async fn a_precomputed_diff_verifies_against_its_own_config() -> Result<()> {
     .await
 }
 
+/// The apply runs its plan step by step and journals what it changed;
+/// the journal's undo puts the kernel back (#518). Applying config B over
+/// A — an MTU, a route's gateway, an address — and then B's undo leaves
+/// A's diff empty, and the route change was planned as a replace of the
+/// route it overwrote, not an addition.
+#[tokio::test]
+async fn the_journal_of_an_apply_undoes_it() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("journal")?;
+        let conn = conn_in_ns(&ns)?;
+        let a = NetworkConfig::new()
+            .link("d0", |l| l.dummy().mtu(1400).up())
+            .address("d0", "10.65.0.1/24")?
+            .route("10.66.0.0/16", |r| r.via("10.65.0.2").dev("d0"))?;
+        let b = NetworkConfig::new()
+            .link("d0", |l| l.dummy().mtu(1500).up())
+            .address("d0", "10.65.0.1/24")?
+            .address("d0", "10.65.1.1/24")?
+            .route("10.66.0.0/16", |r| r.via("10.65.0.3").dev("d0"))?;
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        let diff = b.diff(&conn).await?;
+        let plan = diff.plan();
+        let shown = plan.to_string();
+        assert!(
+            shown.contains("~ route 10.66.0.0/16 via 10.65.0.3 dev d0 (replacing 10.66.0.0/16 via 10.65.0.2 dev d0)"),
+            "{shown}"
+        );
+        let applied = diff.apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(applied.journal.len(), 3, "mtu, address, route: {:?}", applied.journal);
+        assert_eq!(applied.irreversible().count(), 0);
+        assert!(b.diff(&conn).await?.is_empty());
+
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+        Ok(())
+    })
+    .await
+}
+
 /// With the previous config, an apply removes exactly what that config
 /// declared and this one does not: an address, a route in a table nothing
 /// declares into any more, a qdisc. What nobody declared stays (#512).
