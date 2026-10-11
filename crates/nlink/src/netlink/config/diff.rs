@@ -623,6 +623,7 @@ impl std::fmt::Display for RouteConflict {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct LinkChanges {
     /// Change state to up.
     pub set_up: bool,
@@ -647,6 +648,26 @@ pub struct LinkChanges {
     /// change on a live link is not here: it makes the diff recreate the
     /// link ([`ConfigDiff::links_to_recreate`]) (#417).
     pub set_kind_params: Vec<String>,
+    /// New transmit queue length (#516).
+    pub set_txqlen: Option<u32>,
+    /// New alias (#516); empty clears it.
+    pub set_alias: Option<String>,
+    /// New group (#516).
+    pub set_group: Option<u32>,
+    /// New GSO/GRO limits (#516).
+    pub set_gso_max_size: Option<u32>,
+    /// See [`Self::set_gso_max_size`].
+    pub set_gso_max_segs: Option<u32>,
+    /// See [`Self::set_gso_max_size`].
+    pub set_gro_max_size: Option<u32>,
+    /// Promiscuous mode on or off (#516).
+    pub set_promisc: Option<bool>,
+    /// Protodown on or off (#516).
+    pub set_protodown: Option<bool>,
+    /// Alternative names to add (#516).
+    pub add_altnames: Vec<String>,
+    /// Alternative names to take off (#516).
+    pub del_altnames: Vec<String>,
     /// The attributes behind `set_kind_params`.
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
@@ -665,9 +686,34 @@ pub(crate) struct LinkWas {
     pub(crate) mtu: Option<u32>,
     pub(crate) master: Option<String>,
     pub(crate) address: Option<[u8; 6]>,
+    pub(crate) txqlen: Option<u32>,
+    pub(crate) alias: Option<String>,
+    pub(crate) group: Option<u32>,
+    pub(crate) gso_max_size: Option<u32>,
+    pub(crate) gso_max_segs: Option<u32>,
+    pub(crate) gro_max_size: Option<u32>,
+    pub(crate) promisc: bool,
+    pub(crate) protodown: Option<bool>,
 }
 
 impl LinkChanges {
+    /// The changes that give a link just created its declared attributes
+    /// (#516).
+    pub(crate) fn declaring(a: &super::types::LinkAttrs) -> Self {
+        Self {
+            set_txqlen: a.txqlen,
+            set_alias: a.alias.clone(),
+            set_group: a.group,
+            set_gso_max_size: a.gso_max_size,
+            set_gso_max_segs: a.gso_max_segs,
+            set_gro_max_size: a.gro_max_size,
+            set_promisc: a.promisc,
+            set_protodown: a.protodown,
+            add_altnames: a.altnames.clone().unwrap_or_default(),
+            ..Self::default()
+        }
+    }
+
     /// Check if any changes are needed.
     pub fn is_empty(&self) -> bool {
         !self.set_up
@@ -677,6 +723,16 @@ impl LinkChanges {
             && !self.unset_master
             && self.set_address.is_none()
             && self.kind_update.is_none()
+            && self.set_txqlen.is_none()
+            && self.set_alias.is_none()
+            && self.set_group.is_none()
+            && self.set_gso_max_size.is_none()
+            && self.set_gso_max_segs.is_none()
+            && self.set_gro_max_size.is_none()
+            && self.set_promisc.is_none()
+            && self.set_protodown.is_none()
+            && self.add_altnames.is_empty()
+            && self.del_altnames.is_empty()
     }
 
     /// Get a summary of the changes.
@@ -708,6 +764,27 @@ impl LinkChanges {
             ));
         }
         parts.extend(self.set_kind_params.iter().cloned());
+        for (name, v) in [
+            ("txqlen", self.set_txqlen),
+            ("group", self.set_group),
+            ("gso_max_size", self.set_gso_max_size),
+            ("gso_max_segs", self.set_gso_max_segs),
+            ("gro_max_size", self.set_gro_max_size),
+        ] {
+            if let Some(v) = v {
+                parts.push(format!("{name}={v}"));
+            }
+        }
+        if let Some(alias) = &self.set_alias {
+            parts.push(format!("alias={alias:?}"));
+        }
+        for (name, v) in [("promisc", self.set_promisc), ("protodown", self.set_protodown)] {
+            if let Some(on) = v {
+                parts.push(format!("{name} {}", if on { "on" } else { "off" }));
+            }
+        }
+        parts.extend(self.add_altnames.iter().map(|a| format!("+altname {a}")));
+        parts.extend(self.del_altnames.iter().map(|a| format!("-altname {a}")));
         parts.join(", ")
     }
 }
@@ -1384,7 +1461,7 @@ fn new_peer_changes(declared: &DeclaredLink, bonds: &HashSet<&str>) -> LinkChang
         set_mtu: declared.mtu,
         set_address: declared.address,
         set_master,
-        ..LinkChanges::default()
+        ..LinkChanges::declaring(&declared.attrs)
     }
 }
 
@@ -1429,6 +1506,7 @@ fn compute_link_changes(
     ifindex_to_name: &HashMap<u32, &str>,
     bonds: &HashSet<&str>,
 ) -> LinkChanges {
+    const IFF_PROMISC: u32 = libc::IFF_PROMISC as u32;
     let mut changes = LinkChanges {
         was: Some(LinkWas {
             up: existing.is_up(),
@@ -1437,9 +1515,42 @@ fn compute_link_changes(
                 .master()
                 .and_then(|idx| ifindex_to_name.get(&idx).map(|n| n.to_string())),
             address: existing.address().and_then(|a| <[u8; 6]>::try_from(a).ok()),
+            txqlen: existing.txqlen(),
+            alias: existing.alias().map(str::to_string),
+            group: existing.group(),
+            gso_max_size: existing.gso_max_size(),
+            gso_max_segs: existing.gso_max_segs(),
+            gro_max_size: existing.gro_max_size(),
+            promisc: existing.flags() & IFF_PROMISC != 0,
+            protodown: existing.proto_down(),
         }),
         ..LinkChanges::default()
     };
+
+    // The attributes beyond kind, state, MTU, master and MAC (#516): each
+    // declared one, compared with what the link reports.
+    let a = &declared.attrs;
+    let differs = |want: Option<u32>, have: Option<u32>| want.filter(|w| Some(*w) != have);
+    changes.set_txqlen = differs(a.txqlen, existing.txqlen());
+    changes.set_group = differs(a.group, Some(existing.group().unwrap_or(0)));
+    changes.set_gso_max_size = differs(a.gso_max_size, existing.gso_max_size());
+    changes.set_gso_max_segs = differs(a.gso_max_segs, existing.gso_max_segs());
+    changes.set_gro_max_size = differs(a.gro_max_size, existing.gro_max_size());
+    changes.set_alias = a
+        .alias
+        .clone()
+        .filter(|want| want.as_str() != existing.alias().unwrap_or(""));
+    changes.set_promisc = a
+        .promisc
+        .filter(|on| *on != (existing.flags() & IFF_PROMISC != 0));
+    changes.set_protodown = a
+        .protodown
+        .filter(|on| *on != existing.proto_down().unwrap_or(false));
+    if let Some(want) = &a.altnames {
+        let have = existing.altnames();
+        changes.add_altnames = want.iter().filter(|n| !have.contains(n)).cloned().collect();
+        changes.del_altnames = have.iter().filter(|n| !want.contains(n)).cloned().collect();
+    }
 
     // Plan 207a M10 — read the IFF_UP administrative flag from
     // ifi_flags, NOT the OperState (RFC 2863) field. OperState
@@ -2249,6 +2360,7 @@ mod tests {
             mtu: None,
             master: MasterSpec::Unmanaged,
             address: None,
+            attrs: Default::default(),
         }
     }
 

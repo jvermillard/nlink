@@ -952,6 +952,12 @@ async fn create_link(
         if let Some(owner) = owner {
             conn.set_link_alias(link.name.as_str(), owner).await?;
         }
+        // The declared attributes beyond the create's (#516), before the
+        // link comes up.
+        if !link.attrs.is_empty() {
+            let changes = super::diff::LinkChanges::declaring(&link.attrs);
+            set_link_attrs(conn, &link.name, &changes).await?;
+        }
     }
 
     // Enslave before bringing up: a bond refuses a port that is already
@@ -1010,11 +1016,66 @@ async fn modify_link(
     {
         conn.set_link_mtu(name, mtu).await?;
     }
+    set_link_attrs(conn, name, changes).await?;
     if changes.set_up {
         conn.set_link_up(name).await?;
     }
     if changes.set_down && master_changes {
         conn.set_link_down(name).await?;
+    }
+    Ok(())
+}
+
+/// Set what `changes` says of the attributes beyond kind, state, MTU,
+/// master and MAC (#516), each its own request.
+async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChanges) -> Result<()> {
+    let has_any = changes.set_txqlen.is_some()
+        || changes.set_alias.is_some()
+        || changes.set_group.is_some()
+        || changes.set_gso_max_size.is_some()
+        || changes.set_gso_max_segs.is_some()
+        || changes.set_gro_max_size.is_some()
+        || changes.set_promisc.is_some()
+        || changes.set_protodown.is_some()
+        || !changes.add_altnames.is_empty()
+        || !changes.del_altnames.is_empty();
+    if !has_any {
+        return Ok(());
+    }
+    let ifindex = conn
+        .get_link_by_name(name)
+        .await?
+        .ok_or_else(|| Error::interface_not_found(name))?
+        .ifindex();
+    if let Some(v) = changes.set_txqlen {
+        conn.set_link_txqlen_by_index(ifindex, v).await?;
+    }
+    if let Some(alias) = &changes.set_alias {
+        conn.set_link_alias_by_index(ifindex, alias).await?;
+    }
+    if let Some(v) = changes.set_group {
+        conn.set_link_group_by_index(ifindex, v).await?;
+    }
+    if let Some(v) = changes.set_gso_max_size {
+        conn.set_link_gso_max_size_by_index(ifindex, v).await?;
+    }
+    if let Some(v) = changes.set_gso_max_segs {
+        conn.set_link_gso_max_segs_by_index(ifindex, v).await?;
+    }
+    if let Some(v) = changes.set_gro_max_size {
+        conn.set_link_gro_max_size_by_index(ifindex, v).await?;
+    }
+    if let Some(on) = changes.set_promisc {
+        conn.set_link_promisc_by_index(ifindex, on).await?;
+    }
+    if let Some(on) = changes.set_protodown {
+        conn.set_link_protodown_by_index(ifindex, on).await?;
+    }
+    for altname in &changes.del_altnames {
+        conn.del_link_altname_by_index(ifindex, altname).await?;
+    }
+    for altname in &changes.add_altnames {
+        conn.add_link_altname_by_index(ifindex, altname).await?;
     }
     Ok(())
 }
@@ -1469,6 +1530,7 @@ mod tests {
             mtu: None,
             master: crate::netlink::config::MasterSpec::Unmanaged,
             address,
+            attrs: Default::default(),
         }
     }
 
