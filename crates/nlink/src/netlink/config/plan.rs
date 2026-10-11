@@ -239,6 +239,19 @@ fn invert_link_changes(changes: &LinkChanges) -> Option<LinkChanges> {
         set_master: if master_moved { was.master.clone() } else { None },
         unset_master: master_moved && was.master.is_none(),
         set_address: changes.set_address.and(was.address),
+        set_txqlen: changes.set_txqlen.and(was.txqlen),
+        set_alias: changes
+            .set_alias
+            .as_ref()
+            .map(|_| was.alias.clone().unwrap_or_default()),
+        set_group: changes.set_group.map(|_| was.group.unwrap_or(0)),
+        set_gso_max_size: changes.set_gso_max_size.and(was.gso_max_size),
+        set_gso_max_segs: changes.set_gso_max_segs.and(was.gso_max_segs),
+        set_gro_max_size: changes.set_gro_max_size.and(was.gro_max_size),
+        set_promisc: changes.set_promisc.map(|_| was.promisc),
+        set_protodown: changes.set_protodown.map(|_| was.protodown.unwrap_or(false)),
+        add_altnames: changes.del_altnames.clone(),
+        del_altnames: changes.add_altnames.clone(),
         ..LinkChanges::default()
     })
 }
@@ -626,7 +639,7 @@ mod tests {
                 up: true,
                 mtu: Some(1400),
                 master: Some("br0".into()),
-                address: None,
+                ..LinkWas::default()
             }),
             ..LinkChanges::default()
         };

@@ -209,6 +209,10 @@ impl NlMsgType {
     pub const RTM_DELCHAIN: u16 = 101;
     pub const RTM_GETCHAIN: u16 = 102;
 
+    // Link properties (Linux 5.5+): alternative names, in IFLA_PROP_LIST.
+    pub const RTM_NEWLINKPROP: u16 = 108;
+    pub const RTM_DELLINKPROP: u16 = 109;
+
     // Nexthop messages (Linux 5.3+)
     pub const RTM_NEWNEXTHOP: u16 = 104;
     pub const RTM_DELNEXTHOP: u16 = 105;

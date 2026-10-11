@@ -3553,6 +3553,109 @@ impl Connection<Route> {
             .await
             .map_err(|e| e.with_context("set_link_txqlen"))
     }
+
+    /// One `RTM_SETLINK` carrying a single u32 attribute.
+    async fn set_link_u32_by_index(
+        &self,
+        ifindex: u32,
+        attr: super::types::link::IflaAttr,
+        value: u32,
+        what: &'static str,
+    ) -> Result<()> {
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        builder.append_attr_u32(attr as u16, value);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context(what))
+    }
+
+    /// Set a link's group (`ip link set … group N`, `IFLA_GROUP`).
+    pub async fn set_link_group(&self, iface: impl Into<InterfaceRef>, group: u32) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.set_link_group_by_index(ifindex, group).await
+    }
+
+    /// [`Self::set_link_group`] by index.
+    pub async fn set_link_group_by_index(&self, ifindex: u32, group: u32) -> Result<()> {
+        use super::types::link::IflaAttr;
+        self.set_link_u32_by_index(ifindex, IflaAttr::Group, group, "set_link_group")
+            .await
+    }
+
+    /// Set the largest GSO packet a link builds (`gso_max_size`), in bytes.
+    pub async fn set_link_gso_max_size_by_index(&self, ifindex: u32, bytes: u32) -> Result<()> {
+        use super::types::link::IflaAttr;
+        self.set_link_u32_by_index(ifindex, IflaAttr::GsoMaxSize, bytes, "set_link_gso_max_size")
+            .await
+    }
+
+    /// Set the most segments a GSO packet has (`gso_max_segs`).
+    pub async fn set_link_gso_max_segs_by_index(&self, ifindex: u32, segs: u32) -> Result<()> {
+        use super::types::link::IflaAttr;
+        self.set_link_u32_by_index(ifindex, IflaAttr::GsoMaxSegs, segs, "set_link_gso_max_segs")
+            .await
+    }
+
+    /// Set the largest packet GRO builds (`gro_max_size`), in bytes.
+    pub async fn set_link_gro_max_size_by_index(&self, ifindex: u32, bytes: u32) -> Result<()> {
+        use super::types::link::IflaAttr;
+        self.set_link_u32_by_index(ifindex, IflaAttr::GroMaxSize, bytes, "set_link_gro_max_size")
+            .await
+    }
+
+    /// Turn a link's promiscuous mode on or off (`ip link set … promisc`):
+    /// `IFF_PROMISC` in `ifi_change`, the flag a user sets, which the
+    /// kernel reports back in the link's flags.
+    pub async fn set_link_promisc_by_index(&self, ifindex: u32, on: bool) -> Result<()> {
+        const IFF_PROMISC: u32 = libc::IFF_PROMISC as u32;
+        let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
+        ifinfo.ifi_flags = if on { IFF_PROMISC } else { 0 };
+        ifinfo.ifi_change = IFF_PROMISC;
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&ifinfo);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_promisc"))
+    }
+
+    /// Hold a link down for a control plane, or release it (`ip link set …
+    /// protodown`). Only devices that implement it take it (vxlan,
+    /// macvlan, …); others answer `EOPNOTSUPP`.
+    pub async fn set_link_protodown_by_index(&self, ifindex: u32, on: bool) -> Result<()> {
+        use super::types::link::IflaAttr;
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        builder.append_attr_u8(IflaAttr::ProtoDown as u16, u8::from(on));
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_protodown"))
+    }
+
+    /// Give a link an alternative name (`ip link property add … altname`,
+    /// Linux 5.5+): up to 127 bytes, usable wherever its name is.
+    pub async fn add_link_altname_by_index(&self, ifindex: u32, altname: &str) -> Result<()> {
+        self.link_altname(NlMsgType::RTM_NEWLINKPROP, ifindex, altname)
+            .await
+            .map_err(|e| e.with_context("add_link_altname"))
+    }
+
+    /// Take an alternative name off a link (`ip link property del`).
+    pub async fn del_link_altname_by_index(&self, ifindex: u32, altname: &str) -> Result<()> {
+        self.link_altname(NlMsgType::RTM_DELLINKPROP, ifindex, altname)
+            .await
+            .map_err(|e| e.with_context("del_link_altname"))
+    }
+
+    async fn link_altname(&self, msg_type: u16, ifindex: u32, altname: &str) -> Result<()> {
+        use super::types::link::IflaAttr;
+        let mut builder = ack_request(msg_type);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        let list = builder.nest_start(IflaAttr::PropList as u16);
+        builder.append_attr_str(IflaAttr::AltIfname as u16, altname);
+        builder.nest_end(list);
+        self.send_ack(builder).await
+    }
 }
 
 // ============================================================================

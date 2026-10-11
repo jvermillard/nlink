@@ -727,6 +727,34 @@ All notable changes to this project will be documented in this file.
     source, flags and metrics, and it passes on iproute2 6.1. Without the
     attribute comparison, step 2 never applies.
 
+- **Declared links carry their queue length, alias, group, GSO/GRO
+  limits, promiscuous mode, protodown and alternative names (#516, row
+  3).**
+  - **Builder.** `LinkBuilder` gains `txqlen`, `alias`, `group`,
+    `gso_max_size`, `gso_max_segs`, `gro_max_size`, `promisc`, `protodown`
+    and `altname`. The JSON form has the same fields at the top level of
+    the link.
+  - **Diff and apply.** Each declared attribute is compared and changed in
+    place (`LinkChanges::set_*`, `add_altnames`/`del_altnames`), and a link
+    created by the apply gets them before it comes up. An attribute not
+    declared is left alone. Declared altnames are the link's: one it has
+    and nothing declares is taken off.
+  - **Validation.** These are validation errors:
+    - an alias in a config with an `owner` tag, which is written as the
+      alias;
+    - an alias over 255 bytes;
+    - an altname the kernel would refuse.
+  - **New imperative calls.** `set_link_group`, `set_link_gso_max_size`,
+    `set_link_gso_max_segs`, `set_link_gro_max_size`,
+    `set_link_promisc`, `set_link_protodown` and
+    `add`/`del_link_altname` (`RTM_NEWLINKPROP`/`RTM_DELLINKPROP`), all
+    `_by_index`. `LinkMessage` reads `IFLA_PROTO_DOWN` (`proto_down()`)
+    and `IFLA_PROP_LIST` (`altnames()`).
+  - **Test.** A transition test changes every one of them A→B on a dummy,
+    with protodown on a vxlan (dummy and veth refuse it). Every step
+    converges, as checked through `ip -j -d link` on iproute2 6.15 and
+    6.1. It fails with the attributes unset.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

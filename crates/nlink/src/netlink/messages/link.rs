@@ -31,6 +31,9 @@ mod attr_ids {
     pub const IFLA_MIN_MTU: u16 = 50;
     pub const IFLA_MAX_MTU: u16 = 51;
     pub const IFLA_PERM_ADDRESS: u16 = 54;
+    pub const IFLA_PROTO_DOWN: u16 = 39;
+    pub const IFLA_PROP_LIST: u16 = 52;
+    pub const IFLA_ALT_IFNAME: u16 = 53;
     // Plan 190 §2.3c — GSO/GRO/TSO caps.
     pub const IFLA_GSO_MAX_SEGS: u16 = 40;
     pub const IFLA_GSO_MAX_SIZE: u16 = 41;
@@ -114,6 +117,10 @@ pub struct LinkMessage {
     /// IPv4-specific GRO max bytes (IFLA_GRO_IPV4_MAX_SIZE,
     /// kernel 6.6+). Plan 190 §2.3c.
     pub(crate) gro_ipv4_max_size: Option<u32>,
+    /// Protodown (IFLA_PROTO_DOWN): held down by a control plane.
+    pub(crate) proto_down: Option<bool>,
+    /// Alternative names (IFLA_PROP_LIST / IFLA_ALT_IFNAME).
+    pub(crate) altnames: Vec<String>,
 }
 
 /// Link type information from IFLA_LINKINFO.
@@ -343,6 +350,18 @@ impl LinkMessage {
     /// The interface's alias (`IFLA_IFALIAS`), if it has one.
     pub fn alias(&self) -> Option<&str> {
         self.alias.as_deref()
+    }
+
+    /// Whether a control plane holds the link down (`IFLA_PROTO_DOWN`,
+    /// `ip link set … protodown on`). `None` from a kernel or device that
+    /// does not report it.
+    pub fn proto_down(&self) -> Option<bool> {
+        self.proto_down
+    }
+
+    /// The link's alternative names (`ip link property add … altname`).
+    pub fn altnames(&self) -> &[String] {
+        &self.altnames
     }
 
     /// Get the master device index.
@@ -687,6 +706,15 @@ impl FromNetlink for LinkMessage {
                 }
                 // Plan 190 §2.3c — GSO/GRO/TSO cap parsing.
                 // accept-larger-than-expected per CLAUDE.md §"Parser robustness" rule 1.
+                attr_ids::IFLA_PROTO_DOWN if !attr_data.is_empty() => {
+                    msg.proto_down = Some(attr_data[0] != 0);
+                }
+                attr_ids::IFLA_PROP_LIST => {
+                    msg.altnames = crate::netlink::attr::AttrIter::new(attr_data)
+                        .filter(|(t, _)| t & 0x3FFF == attr_ids::IFLA_ALT_IFNAME)
+                        .map(|(_, p)| String::from_utf8_lossy(p).trim_end_matches('\0').to_string())
+                        .collect();
+                }
                 attr_ids::IFLA_GSO_MAX_SEGS if attr_data.len() >= 4 => {
                     msg.gso_max_segs =
                         Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));

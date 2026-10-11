@@ -1233,3 +1233,102 @@ async fn route_attributes_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// Link attributes changed A→B (#516): queue length, alias, group, the
+/// GSO/GRO limits, promiscuous mode, alternative names, and protodown on a
+/// vxlan (dummy and veth refuse it). A third step that declares none
+/// leaves them as they are: an attribute not declared is not managed.
+#[tokio::test]
+async fn link_attributes_change_in_place() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "vxlan");
+
+    struct Want {
+        txqlen: u64,
+        alias: &'static str,
+        group: &'static str,
+        gso: (u64, u64, u64),
+        promisc: bool,
+        altnames: &'static [&'static str],
+        protodown: bool,
+    }
+    let declare = |w: Option<&Want>| {
+        let mut cfg = NetworkConfig::new();
+        cfg = match w {
+            Some(w) => {
+                let (size, segs, gro) = w.gso;
+                cfg.link("d0", |l| {
+                    let mut l = l
+                        .dummy()
+                        .txqlen(w.txqlen as u32)
+                        .alias(w.alias)
+                        .group(w.group.parse().unwrap())
+                        .gso_max_size(size as u32)
+                        .gso_max_segs(segs as u32)
+                        .gro_max_size(gro as u32)
+                        .promisc(w.promisc);
+                    for a in w.altnames {
+                        l = l.altname(a);
+                    }
+                    l
+                })
+                .link("vx0", |l| l.vxlan(42).vxlan_local(v4(10, 0, 0, 1)).protodown(w.protodown))
+            }
+            None => cfg
+                .link("d0", |l| l.dummy())
+                .link("vx0", |l| l.vxlan(42).vxlan_local(v4(10, 0, 0, 1))),
+        };
+        cfg
+    };
+    let a = Want {
+        txqlen: 500,
+        alias: "lab-a",
+        group: "7",
+        gso: (32000, 50, 32000),
+        promisc: true,
+        altnames: &["d0-a", "d0-b"],
+        protodown: true,
+    };
+    let b = Want {
+        txqlen: 1000,
+        alias: "lab-b",
+        group: "9",
+        gso: (16000, 20, 16000),
+        promisc: false,
+        altnames: &["d0-b", "d0-c"],
+        protodown: false,
+    };
+    let steps = [declare(Some(&a)), declare(Some(&b)), declare(None)];
+    let ns = TestNamespace::new("tr-linkattr")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let w = if i == 0 { &a } else { &b };
+        let d0 = &ip_json(&ns, &["-d", "link", "show", "d0"])?[0];
+        let vx0 = &ip_json(&ns, &["-d", "link", "show", "vx0"])?[0];
+        let flags: Vec<&str> = d0["flags"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
+        let mut altnames: Vec<&str> = d0["altnames"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).collect();
+        altnames.sort();
+        let have = (
+            d0["txqlen"].as_u64(),
+            d0["ifalias"].as_str(),
+            d0["group"].as_str(),
+            (d0["gso_max_size"].as_u64(), d0["gso_max_segs"].as_u64(), d0["gro_max_size"].as_u64()),
+            flags.contains(&"PROMISC"),
+            altnames.clone(),
+            vx0["proto_down"].as_bool().unwrap_or(false),
+        );
+        let want = (
+            Some(w.txqlen),
+            Some(w.alias),
+            Some(w.group),
+            (Some(w.gso.0), Some(w.gso.1), Some(w.gso.2)),
+            w.promisc,
+            w.altnames.to_vec(),
+            w.protodown,
+        );
+        if have != want {
+            return Err(format!("step {}: want {want:?}, have {have:?}", i + 1));
+        }
+        Ok(())
+    })
+    .await
+}

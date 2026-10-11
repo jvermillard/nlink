@@ -172,6 +172,32 @@ impl NetworkConfig {
             if let Some(why) = l.unaddressable_mac() {
                 errors.push(ValidationErrorInfo::new(format!("links.{}", l.name), why));
             }
+            // What `do_setlink` and `rtnl_linkprop` refuse (#516).
+            let at = || format!("links.{}", l.name);
+            if let Some(alias) = &l.attrs.alias {
+                if alias.len() > 255 {
+                    errors.push(ValidationErrorInfo::new(at(), "an alias is at most 255 bytes"));
+                }
+                if self.owner.is_some() {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        "an alias and an owner tag: the owner tag is written as the alias",
+                    ));
+                }
+            }
+            for altname in l.attrs.altnames.iter().flatten() {
+                let bad = altname.is_empty()
+                    || altname.len() > 127
+                    || altname == "."
+                    || altname == ".."
+                    || altname.bytes().any(|b| b == b'/' || b == b':' || b.is_ascii_whitespace());
+                if bad || *altname == l.name {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        format!("altname {altname:?}: 1 to 127 bytes, no '/', ':' or space, not the name"),
+                    ));
+                }
+            }
             match &l.link_type {
                 DeclaredLinkType::Vxlan { vni, .. } if *vni >= 1 << 24 => {
                     errors.push(ValidationErrorInfo::new(
@@ -709,6 +735,53 @@ pub struct DeclaredLink {
     // schema must say "optional string", not "array of 6 integers".
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub(crate) address: Option<[u8; 6]>,
+    /// The queue length, alias, group, GSO/GRO limits, promiscuous mode,
+    /// protodown and alternative names (#516). Unset ones are left alone.
+    #[cfg_attr(feature = "serde", serde(flatten, default))]
+    pub(crate) attrs: LinkAttrs,
+}
+
+/// What a link carries besides kind, state, MTU, master and MAC (#516).
+/// Each is changed in place; one left unset is not compared.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LinkAttrs {
+    /// The transmit queue length (`txqlen`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) txqlen: Option<u32>,
+    /// The alias (`IFLA_IFALIAS`, `ip link set … alias`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) alias: Option<String>,
+    /// The group (`IFLA_GROUP`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) group: Option<u32>,
+    /// The largest GSO packet, in bytes.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) gso_max_size: Option<u32>,
+    /// The most segments of a GSO packet.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) gso_max_segs: Option<u32>,
+    /// The largest GRO packet, in bytes.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) gro_max_size: Option<u32>,
+    /// Promiscuous mode.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) promisc: Option<bool>,
+    /// Held down for a control plane (only devices that implement it).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) protodown: Option<bool>,
+    /// The alternative names: exactly these, when declared.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) altnames: Option<Vec<String>>,
+}
+
+impl LinkAttrs {
+    /// Whether any is declared.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl DeclaredLink {
@@ -1038,6 +1111,7 @@ pub struct LinkBuilder {
     mtu: Option<u32>,
     master: MasterSpec,
     address: Option<[u8; 6]>,
+    attrs: LinkAttrs,
     /// Setters called for another kind, which did nothing. `link` moves
     /// them into the config, where `validate()` reports them (#518).
     errors: Vec<String>,
@@ -1052,6 +1126,7 @@ impl LinkBuilder {
             mtu: None,
             master: MasterSpec::Unmanaged,
             address: None,
+            attrs: LinkAttrs::default(),
             errors: Vec::new(),
         }
     }
@@ -1066,6 +1141,7 @@ impl LinkBuilder {
             mtu: link.mtu,
             master: link.master,
             address: link.address,
+            attrs: link.attrs,
             errors: Vec::new(),
         }
     }
@@ -1470,6 +1546,69 @@ impl LinkBuilder {
         self
     }
 
+    /// The transmit queue length (`ip link set … txqlen`).
+    pub fn txqlen(mut self, txqlen: u32) -> Self {
+        self.attrs.txqlen = Some(txqlen);
+        self
+    }
+
+    /// The alias (`ip link set … alias`), at most 255 bytes. A config with
+    /// an [`owner`](NetworkConfig::owner) tag writes that as the alias of
+    /// the links it creates, so the two do not mix.
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.attrs.alias = Some(alias.to_string());
+        self
+    }
+
+    /// The group (`ip link set … group N`).
+    pub fn group(mut self, group: u32) -> Self {
+        self.attrs.group = Some(group);
+        self
+    }
+
+    /// The largest GSO packet the link builds, in bytes.
+    pub fn gso_max_size(mut self, bytes: u32) -> Self {
+        self.attrs.gso_max_size = Some(bytes);
+        self
+    }
+
+    /// The most segments a GSO packet has.
+    pub fn gso_max_segs(mut self, segs: u32) -> Self {
+        self.attrs.gso_max_segs = Some(segs);
+        self
+    }
+
+    /// The largest packet GRO builds, in bytes.
+    pub fn gro_max_size(mut self, bytes: u32) -> Self {
+        self.attrs.gro_max_size = Some(bytes);
+        self
+    }
+
+    /// Promiscuous mode on or off.
+    pub fn promisc(mut self, on: bool) -> Self {
+        self.attrs.promisc = Some(on);
+        self
+    }
+
+    /// Hold the link down for a control plane, or not (`protodown`). Only
+    /// devices that implement it take it (vxlan, macvlan, …): on a dummy
+    /// or veth the apply fails with `EOPNOTSUPP`.
+    pub fn protodown(mut self, on: bool) -> Self {
+        self.attrs.protodown = Some(on);
+        self
+    }
+
+    /// An alternative name (`ip link property add … altname`), up to 127
+    /// bytes. Declared ones are the link's alternative names: one it has
+    /// and no declaration names is taken off.
+    pub fn altname(mut self, altname: &str) -> Self {
+        self.attrs
+            .altnames
+            .get_or_insert_with(Vec::new)
+            .push(altname.to_string());
+        self
+    }
+
     fn build(self) -> DeclaredLink {
         DeclaredLink {
             name: self.name,
@@ -1478,6 +1617,7 @@ impl LinkBuilder {
             mtu: self.mtu,
             master: self.master,
             address: self.address,
+            attrs: self.attrs,
         }
     }
 }
@@ -3988,6 +4128,60 @@ mod serde_roundtrip_tests {
         ] {
             let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();
             assert!(err.contains(says), "{doc}: {err}");
+        }
+    }
+
+    #[test]
+    fn link_attributes_roundtrip_and_validate() {
+        let cfg = NetworkConfig::new().link("d0", |l| {
+            l.dummy()
+                .txqlen(500)
+                .alias("lab")
+                .group(7)
+                .gso_max_size(32000)
+                .gso_max_segs(50)
+                .gro_max_size(32000)
+                .promisc(true)
+                .protodown(false)
+                .altname("d0-a")
+                .altname("d0-b")
+        });
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""txqlen":500"#,
+            r#""alias":"lab""#,
+            r#""group":7"#,
+            r#""gso-max-size":32000"#,
+            r#""promisc":true"#,
+            r#""protodown":false"#,
+            r#""altnames":["d0-a","d0-b"]"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        for (cfg, says) in [
+            (
+                NetworkConfig::new()
+                    .owner("lab")
+                    .link("d0", |l| l.dummy().alias("mine")),
+                "the owner tag is written as the alias",
+            ),
+            (
+                NetworkConfig::new().link("d0", |l| l.dummy().alias(&"x".repeat(256))),
+                "at most 255 bytes",
+            ),
+            (
+                NetworkConfig::new().link("d0", |l| l.dummy().altname("a/b")),
+                "altname \"a/b\"",
+            ),
+            (
+                NetworkConfig::new().link("d0", |l| l.dummy().altname("d0")),
+                "not the name",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
         }
     }
 
