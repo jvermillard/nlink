@@ -1090,3 +1090,80 @@ async fn qdisc_handles_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// Address attributes changed A→B→none (#516): an IPv4 metric and label
+/// (the label only a recreate changes), IPv6 flags and metric (changed in
+/// place), lifetimes from finite to forever. Every step converges, and
+/// `ip -j addr` shows what each declares.
+#[tokio::test]
+async fn address_attributes_change_in_place() -> nlink::Result<()> {
+    use std::time::Duration;
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    type Want = (Option<u64>, &'static str, bool, bool, bool);
+    let step = |a: fn(nlink::netlink::config::AddressBuilder) -> nlink::netlink::config::AddressBuilder,
+                b: fn(nlink::netlink::config::AddressBuilder) -> nlink::netlink::config::AddressBuilder,
+                c: fn(nlink::netlink::config::AddressBuilder) -> nlink::netlink::config::AddressBuilder| {
+        dummy(|l| l)
+            .address_with("d0", "10.70.0.1/24", a)
+            .and_then(|cfg| cfg.address_with("d0", "fd70::1/64", b))
+            .and_then(|cfg| cfg.address_with("d0", "10.71.0.1/24", c))
+            .expect("valid addresses")
+    };
+    let steps = [
+        step(
+            |a| a.metric(100).label("d0:a"),
+            |a| a.nodad().metric(100),
+            |a| a.lifetime(Duration::from_secs(3600), Duration::from_secs(1800)),
+        ),
+        step(
+            |a| a.metric(200).label("d0:b"),
+            |a| a.noprefixroute().metric(200),
+            |a| a,
+        ),
+        step(|a| a, |a| a, |a| a),
+    ];
+    // (10.70 metric, 10.70 label, fd70 nodad, fd70 noprefixroute, 10.71 dynamic)
+    let want: [Want; 3] = [
+        (Some(100), "d0:a", true, false, true),
+        (Some(200), "d0:b", false, true, false),
+        (None, "d0", false, false, false),
+    ];
+    let ns = TestNamespace::new("tr-addr")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let links = ip_json(&ns, &["addr", "show", "dev", "d0"])?;
+        let info = links[0]["addr_info"].as_array().cloned().unwrap_or_default();
+        let find = |local: &str| {
+            info.iter()
+                .find(|a| a["local"] == local)
+                .cloned()
+                .ok_or_else(|| format!("{local} missing: {info:?}"))
+        };
+        let (v4, v6, life) = (find("10.70.0.1")?, find("fd70::1")?, find("10.71.0.1")?);
+        let flag = |a: &serde_json::Value, k: &str| a[k].as_bool().unwrap_or(false);
+        let have: Want = (
+            v4["metric"].as_u64(),
+            if v4["label"] == "d0:a" { "d0:a" } else if v4["label"] == "d0:b" { "d0:b" } else { "d0" },
+            flag(&v6, "nodad"),
+            flag(&v6, "noprefixroute"),
+            flag(&life, "dynamic"),
+        );
+        let fd70_metric = v6["metric"].as_u64();
+        let want_fd70 = want[i].0;
+        if have != want[i] || fd70_metric != want_fd70 {
+            return Err(format!(
+                "step {}: want {:?} (fd70 metric {want_fd70:?}), have {have:?} (fd70 metric {fd70_metric:?}): {info:?}",
+                i + 1,
+                want[i]
+            ));
+        }
+        // One 10.70.0.1, whatever the label: a recreate, not a second one.
+        let copies = info.iter().filter(|a| a["local"] == "10.70.0.1").count();
+        if copies != 1 {
+            return Err(format!("{copies} copies of 10.70.0.1"));
+        }
+        Ok(())
+    })
+    .await
+}

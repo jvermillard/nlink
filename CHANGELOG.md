@@ -329,6 +329,14 @@ All notable changes to this project will be documented in this file.
   `clsact` to its default `--parent root`, which the kernel refuses; it
   now sends them to their hook, as `tc qdisc add dev X clsact` does.
 
+- **Deleting an IPv4 address removes the one it names (#516).** The
+  delete sent only `IFA_LOCAL`, and `inet_rtm_deladdr` then deletes the
+  first address with that local, whatever its prefix or peer. Removing
+  `10.7.0.1/16` took `10.7.0.1/24` when both were there; so did a purge or
+  a `previous` removal. It now sends `IFA_ADDRESS` too: the peer, or the
+  address. A root test deletes one of two prefixes and one of two peers.
+  It fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -665,6 +673,34 @@ All notable changes to this project will be documented in this file.
       when the replaced route is not recorded: the step then prints as `+`
       and its undo deletes the route instead of restoring it.
     - The whole root suite runs through the new executor.
+
+- **Declared addresses carry their attributes (#516, row 1).**
+  `NetworkConfig::address_with(dev, cidr, |a| …)` declares a peer, an IPv4
+  label, a metric (`IFA_RT_PRIORITY`), the flags `nodad`, `optimistic`,
+  `noprefixroute`, `home` and `mngtmpaddr`, and valid and preferred
+  lifetimes. Each is also a field of the JSON form (`peer`, `label`,
+  `metric`, `flags: [..]`, `valid-lft`, `preferred-lft`). A setter the
+  family has no use for is a validation error, as is a label not starting
+  with the device name, or a preferred lifetime longer than the valid one.
+  - **In-place changes.** An IPv4 metric or lifetime, or an IPv6 flag,
+    metric or lifetime, is changed with `NLM_F_REPLACE`
+    (`ConfigDiff::addresses_to_change`, `Step::ChangeAddress`).
+  - **Recreates.** An IPv4 label or flag, which a replace leaves as it
+    was, and an IPv6 metric going back to none, which `inet6_addr_modify`
+    skips, are a delete right before the add.
+  - **Peers.** For IPv4, a different peer is another address, as in the
+    kernel.
+  - **Not compared.** A lifetime counts down, so it is compared as
+    finite-or-forever only. `optimistic` is cleared when DAD ends, so it
+    is not compared.
+  - **Purge.** A purge still leaves lifetime'd addresses alone, because it
+    can't tell them from a DHCP lease. A declared one that the config
+    drops goes through `previous`.
+  - **New accessors.** `AddressMessage::metric()` and `peer()`.
+  - **Test.** A transition test changes every attribute A→B→none,
+    converging at each step and checked through `ip -j addr`. It fails
+    with a label change made in place, and with an IPv6 metric reset in
+    place.
 
 ## [0.31.0] - 2026-10-11
 

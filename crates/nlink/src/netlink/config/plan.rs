@@ -95,6 +95,9 @@ pub enum Step {
     },
     /// Add a declared address.
     AddAddress(DeclaredAddress),
+    /// Change an address's metric, lifetimes or (IPv6) flags in place
+    /// (#516).
+    ChangeAddress(DeclaredAddress),
     /// Delete an address.
     DeleteAddress {
         /// The address.
@@ -278,6 +281,9 @@ impl fmt::Display for Step {
             Self::AddAddress(a) => {
                 write!(f, "+ address {}/{} on {}", a.address, a.prefix_len, a.dev)
             }
+            Self::ChangeAddress(a) => {
+                write!(f, "~ address {}/{} on {}", a.address, a.prefix_len, a.dev)
+            }
             Self::DeleteAddress { address: a, .. } => {
                 write!(f, "- address {}/{} on {}", a.address, a.prefix_len, a.dev)
             }
@@ -434,14 +440,15 @@ impl super::ConfigDiff {
         steps.extend(self.vlans_held_down.iter().map(|vlan| Step::HoldVlanDown {
             vlan: vlan.clone(),
         }));
-        // An IPv6 address re-prefixed is deleted at its old prefix right
-        // before it is added at the new one: the kernel knows it by the
-        // address alone (#461).
+        // An address deleted to be added again is deleted right before the
+        // add: an IPv6 address re-prefixed, which the kernel knows by the
+        // address alone (#461), and an IPv4 address whose label or flags
+        // only a recreate changes (#516).
         let re_prefixed = |old: &DeclaredAddress, new: &DeclaredAddress| {
-            new.address.is_ipv6()
-                && old.dev == new.dev
+            old.dev == new.dev
                 && old.address == new.address
-                && old.prefix_len != new.prefix_len
+                && (new.address.is_ipv6()
+                    || (old.prefix_len == new.prefix_len && old.attrs.peer == new.attrs.peer))
         };
         for address in &self.addresses_to_add {
             for old in self
@@ -449,16 +456,22 @@ impl super::ConfigDiff {
                 .iter()
                 .filter(|old| re_prefixed(old, address))
             {
-                steps.push(Step::DeleteAddress {
-                    address: old.clone(),
-                    reason: Some(format!(
+                let reason = if old.prefix_len == address.prefix_len {
+                    "re-added: only a recreate makes that change".to_string()
+                } else {
+                    format!(
                         "re-added at /{}: the kernel knows an address by itself alone",
                         address.prefix_len
-                    )),
+                    )
+                };
+                steps.push(Step::DeleteAddress {
+                    address: old.clone(),
+                    reason: Some(reason),
                 });
             }
             steps.push(Step::AddAddress(address.clone()));
         }
+        steps.extend(self.addresses_to_change.iter().cloned().map(Step::ChangeAddress));
         for route in &self.routes_to_add {
             let before = self
                 .routes_replaced
@@ -511,11 +524,7 @@ mod tests {
     use crate::netlink::config::{ConfigDiff, DeclaredRouteType, diff::LinkWas};
 
     fn addr(dev: &str, a: &str, plen: u8) -> DeclaredAddress {
-        DeclaredAddress {
-            dev: dev.to_string(),
-            address: a.parse().unwrap(),
-            prefix_len: plen,
-        }
+        DeclaredAddress::plain(dev, a.parse().unwrap(), plen)
     }
 
     fn route(dst: &str, plen: u8, via: &str) -> DeclaredRoute {
