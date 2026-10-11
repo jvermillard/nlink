@@ -537,6 +537,9 @@ pub struct DiagnosticsConfig {
     /// loss detection stayed silent about 1500× longer than asked
     /// (#274).
     pub min_bytes_for_rate: u64,
+    /// Whether a scan warns that there is no default route. On by default;
+    /// a lab namespace often has none on purpose (#509).
+    pub warn_no_default_route: bool,
 }
 
 impl Default for DiagnosticsConfig {
@@ -550,6 +553,7 @@ impl Default for DiagnosticsConfig {
             skip_loopback: true,
             skip_down: false,
             min_bytes_for_rate: 1000,
+            warn_no_default_route: true,
         }
     }
 }
@@ -630,8 +634,10 @@ impl Diagnostics {
             map
         };
 
-        // Get routes and split by family
-        let all_routes = self.conn.get_routes().await.unwrap_or_default();
+        // Get routes and split by family. A failed dump is an error: it was
+        // swallowed into an empty list, which then raised a spurious "no
+        // default route" (#509).
+        let all_routes = self.conn.get_routes().await?;
         let ipv4_routes: Vec<_> = all_routes.iter().filter(|r| r.is_ipv4()).collect();
         let ipv6_routes: Vec<_> = all_routes.iter().filter(|r| r.is_ipv6()).collect();
 
@@ -639,7 +645,8 @@ impl Diagnostics {
         let routes = self.build_route_diag(&ipv4_routes, &ipv6_routes);
 
         // Check for missing default route
-        if !routes.has_default_ipv4 && !routes.has_default_ipv6 {
+        if self.config.warn_no_default_route && !routes.has_default_ipv4 && !routes.has_default_ipv6
+        {
             all_issues.push(Issue {
                 severity: Severity::Warning,
                 category: IssueCategory::NoDefaultRoute,
@@ -701,11 +708,14 @@ impl Diagnostics {
             };
 
             // Store current stats for next calculation
-            prev_stats.insert(ifindex, (Instant::now(), stats));
+            let prev = prev_stats
+                .insert(ifindex, (Instant::now(), stats))
+                .map(|(_, prev)| prev);
             seen.insert(ifindex);
 
             // Detect issues for this interface
-            let mut issues = self.detect_link_issues(&link, &stats, &addr_by_ifindex, timestamp);
+            let mut issues =
+                self.detect_link_issues(&link, &stats, prev.as_ref(), &addr_by_ifindex, timestamp);
 
             // Get TC diagnostics
             let tc = qdiscs_by_ifindex.get(&ifindex).and_then(|qs| {
@@ -793,10 +803,13 @@ impl Diagnostics {
             LinkRates::default()
         };
 
-        prev_stats.insert(ifindex, (Instant::now(), stats));
+        let prev = prev_stats
+            .insert(ifindex, (Instant::now(), stats))
+            .map(|(_, prev)| prev);
 
         // Detect issues
-        let mut issues = self.detect_link_issues(&link, &stats, &addr_by_ifindex, timestamp);
+        let mut issues =
+            self.detect_link_issues(&link, &stats, prev.as_ref(), &addr_by_ifindex, timestamp);
 
         // Get TC diagnostics
         let qdiscs = self.conn.get_qdiscs_by_name(dev).await?;
@@ -828,93 +841,64 @@ impl Diagnostics {
         let timestamp = Instant::now();
         let mut issues = Vec::new();
 
-        // Get routes and filter by address family
-        let all_routes = self.conn.get_routes().await?;
-        let routes: Vec<_> = match dest {
-            IpAddr::V4(_) => all_routes.iter().filter(|r| r.is_ipv4()).collect(),
-            IpAddr::V6(_) => all_routes.iter().filter(|r| r.is_ipv6()).collect(),
+        // What the kernel would do with a packet to `dest`: a FIB lookup,
+        // as `ip route get` does. This was a `find` over a dump of every
+        // table, called "longest prefix match": the first route that
+        // contained `dest` won — usually the default route — whatever the
+        // policy rules said, and a blackhole counted as a route (#509).
+        let lookup = match self.conn.lookup_route(dest).await {
+            Ok(route) => Ok(route),
+            Err(e) => {
+                let why = match e.errno() {
+                    Some(libc::ENETUNREACH) => "no route matches it",
+                    Some(libc::EHOSTUNREACH) => "an unreachable route matches it",
+                    Some(libc::EACCES) => "a prohibit route matches it",
+                    Some(libc::EINVAL) => "a blackhole route matches it",
+                    _ => return Err(e),
+                };
+                Err(why)
+            }
         };
 
-        // Find matching route (simple longest prefix match)
-        let matching_route = routes.iter().find(|r| {
-            if let Some(dst) = &r.destination {
-                // For default route (0.0.0.0/0 or ::/0)
-                if r.dst_len() == 0 {
-                    return true;
-                }
-                // Check if destination matches (simplified)
-                match (dest, dst) {
-                    (IpAddr::V4(d), IpAddr::V4(p)) => {
-                        let prefix_len = r.dst_len();
-                        let mask = if prefix_len >= 32 {
-                            u32::MAX
-                        } else {
-                            u32::MAX << (32 - prefix_len)
-                        };
-                        (u32::from(d) & mask) == (u32::from(*p) & mask)
-                    }
-                    (IpAddr::V6(d), IpAddr::V6(p)) => {
-                        let d_bytes = d.octets();
-                        let p_bytes = p.octets();
-                        let prefix_len = r.dst_len();
-                        let full_bytes = (prefix_len / 8) as usize;
-                        let remaining_bits = prefix_len % 8;
+        let (route, gateway, output_interface, oif) = match lookup {
+            Ok(r) => {
+                let gateway = r.gateway;
+                let oif = r.oif;
+                let output_interface = if let Some(idx) = oif {
+                    self.conn
+                        .get_link_by_index(idx)
+                        .await?
+                        .and_then(|l| l.name().map(|s| s.to_string()))
+                } else {
+                    None
+                };
 
-                        if d_bytes[..full_bytes] != p_bytes[..full_bytes] {
-                            return false;
-                        }
+                let route_info = RouteInfo {
+                    destination: r
+                        .destination
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "default".to_string()),
+                    prefix_len: r.dst_len(),
+                    gateway,
+                    oif,
+                    dev_name: output_interface.clone(),
+                    source: r.prefsrc().copied(),
+                    metric: r.priority(),
+                };
 
-                        if remaining_bits > 0 && full_bytes < 16 {
-                            let mask = 0xFF << (8 - remaining_bits);
-                            (d_bytes[full_bytes] & mask) == (p_bytes[full_bytes] & mask)
-                        } else {
-                            true
-                        }
-                    }
-                    _ => false,
-                }
-            } else {
-                // Default route
-                r.dst_len() == 0
+                (Some(route_info), gateway, output_interface, oif)
             }
-        });
-
-        let (route, gateway, output_interface, oif) = if let Some(r) = matching_route {
-            let gateway = r.gateway;
-            let oif = r.oif;
-            let output_interface = if let Some(idx) = oif {
-                self.conn
-                    .get_link_by_index(idx)
-                    .await?
-                    .and_then(|l| l.name().map(|s| s.to_string()))
-            } else {
-                None
-            };
-
-            let route_info = RouteInfo {
-                destination: r
-                    .destination
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "default".to_string()),
-                prefix_len: r.dst_len(),
-                gateway,
-                oif,
-                dev_name: output_interface.clone(),
-                source: r.prefsrc().copied(),
-                metric: r.priority(),
-            };
-
-            (Some(route_info), gateway, output_interface, oif)
-        } else {
-            issues.push(Issue {
-                severity: Severity::Error,
-                category: IssueCategory::NoRoute,
-                message: format!("No route to {}", dest),
-                details: None,
-                interface: None,
-                timestamp,
-            });
-            (None, None, None, None)
+            Err(why) => {
+                issues.push(Issue {
+                    severity: Severity::Error,
+                    category: IssueCategory::NoRoute,
+                    message: format!("No route to {}", dest),
+                    details: Some(why.to_string()),
+                    interface: None,
+                    timestamp,
+                });
+                (None, None, None, None)
+            }
         };
 
         // Check if gateway is reachable via neighbor cache
@@ -1048,10 +1032,12 @@ impl Diagnostics {
                 .unwrap_or("?");
 
             let drops = qdisc.drops() as u64;
-            let packets = qdisc.packets();
+            // Dropped packets are not among the sent ones (#509); and
+            // netem's drops are its configured loss, not a bottleneck.
+            let offered = qdisc.packets() + drops;
 
-            if packets > 0 {
-                let drop_rate = drops as f64 / packets as f64;
+            if offered > 0 && qdisc.kind() != Some("netem") {
+                let drop_rate = drops as f64 / offered as f64;
 
                 if drop_rate > self.config.qdisc_drop_threshold {
                     bottlenecks.push(Bottleneck {
@@ -1157,6 +1143,7 @@ impl Diagnostics {
         &self,
         link: &LinkMessage,
         stats: &LinkStats,
+        prev: Option<&LinkStats>,
         addr_by_ifindex: &HashMap<u32, Vec<AddressMessage>>,
         timestamp: Instant,
     ) -> Vec<Issue> {
@@ -1190,9 +1177,33 @@ impl Diagnostics {
 
         // Check for packet loss. The *rate* is a fraction of packets;
         // the *gate* is a byte count, as its name says (#274).
-        let total_packets = stats.total_packets();
-        let total_bytes = stats.total_bytes();
-        let total_dropped = stats.total_dropped();
+        //
+        // Since the previous sample when there is one: on lifetime counters
+        // one old burst flagged the interface for as long as it existed
+        // (#509). A counter that went backwards — a recreated link — means
+        // the lifetime figures are the interval's.
+        let current = (
+            stats.total_packets(),
+            stats.total_bytes(),
+            stats.total_dropped(),
+            stats.total_errors(),
+        );
+        let (total_packets, total_bytes, total_dropped, total_errors) = match prev {
+            Some(p)
+                if current.0 >= p.total_packets()
+                    && current.1 >= p.total_bytes()
+                    && current.2 >= p.total_dropped()
+                    && current.3 >= p.total_errors() =>
+            {
+                (
+                    current.0 - p.total_packets(),
+                    current.1 - p.total_bytes(),
+                    current.2 - p.total_dropped(),
+                    current.3 - p.total_errors(),
+                )
+            }
+            _ => current,
+        };
 
         if total_bytes > self.config.min_bytes_for_rate && total_packets > 0 && total_dropped > 0 {
             let drop_rate = total_dropped as f64 / total_packets as f64;
@@ -1212,7 +1223,6 @@ impl Diagnostics {
         }
 
         // Check for errors
-        let total_errors = stats.total_errors();
         if total_bytes > self.config.min_bytes_for_rate && total_packets > 0 && total_errors > 0 {
             let error_rate = total_errors as f64 / total_packets as f64;
             if error_rate > self.config.error_rate_threshold {
@@ -1261,21 +1271,39 @@ impl Diagnostics {
         let mut issues = Vec::new();
 
         let drops = tc.drops() as u64;
-        let packets = tc.packets();
+        // A dropped packet is not among the ones sent, so the share of
+        // packets dropped is out of both (#509).
+        let offered = tc.packets() + drops;
 
-        if packets > 0 {
-            let drop_rate = drops as f64 / packets as f64;
+        if offered > 0 && drops > 0 {
+            let drop_rate = drops as f64 / offered as f64;
+            // netem drops what its configured loss tells it to, and the
+            // kernel counts those as drops: that is the impairment working,
+            // not a fault (#509).
+            let netem = tc.kind() == Some("netem");
             if drop_rate > self.config.qdisc_drop_threshold {
                 issues.push(Issue {
-                    severity: Severity::Warning,
+                    severity: if netem {
+                        Severity::Info
+                    } else {
+                        Severity::Warning
+                    },
                     category: IssueCategory::QdiscDrops,
-                    message: format!(
-                        "Qdisc {} dropping {:.2}% of packets on {}",
-                        tc.kind().unwrap_or("?"),
-                        drop_rate * 100.0,
-                        iface
-                    ),
-                    details: Some(format!("{} drops out of {} packets", drops, packets)),
+                    message: if netem {
+                        format!(
+                            "netem on {} dropped {:.2}% of packets (emulated loss counts as drops)",
+                            iface,
+                            drop_rate * 100.0
+                        )
+                    } else {
+                        format!(
+                            "Qdisc {} dropping {:.2}% of packets on {}",
+                            tc.kind().unwrap_or("?"),
+                            drop_rate * 100.0,
+                            iface
+                        )
+                    },
+                    details: Some(format!("{drops} dropped out of {offered} packets")),
                     interface: Some(iface.to_string()),
                     timestamp,
                 });
@@ -1605,5 +1633,94 @@ mod tests {
         let config = DiagnosticsConfig::default();
         assert_eq!(config.packet_loss_threshold, 0.01);
         assert!(config.skip_loopback);
+    }
+
+    fn qdisc(kind: &str, packets: u64, drops: u32) -> TcMessage {
+        use crate::netlink::messages::{TcStatsBasic, TcStatsQueue};
+        let mut q = TcMessage::new();
+        q.kind = Some(kind.to_string());
+        q.stats_basic = Some(TcStatsBasic {
+            bytes: packets * 1000,
+            packets,
+        });
+        q.stats_queue = Some(TcStatsQueue {
+            drops,
+            ..Default::default()
+        });
+        q
+    }
+
+    /// #509: a qdisc's drop rate is out of the packets it was offered,
+    /// sent and dropped, not of the sent alone; and netem's drops are its
+    /// configured loss, reported as such rather than as a fault.
+    #[tokio::test]
+    async fn qdisc_drops_are_a_share_of_what_was_offered_and_netem_is_info() {
+        let diag = Diagnostics::new(Connection::<Route>::new().expect("socket"));
+        let issues = diag.detect_tc_issues(&qdisc("fq_codel", 50, 50), "eth0", Instant::now());
+        let issue = issues
+            .iter()
+            .find(|i| i.category == IssueCategory::QdiscDrops)
+            .unwrap();
+        assert!(issue.message.contains("50.00%"), "{}", issue.message);
+        assert_eq!(issue.severity, Severity::Warning);
+
+        let issues = diag.detect_tc_issues(&qdisc("netem", 90, 10), "eth0", Instant::now());
+        let issue = issues
+            .iter()
+            .find(|i| i.category == IssueCategory::QdiscDrops)
+            .unwrap();
+        assert_eq!(issue.severity, Severity::Info, "{}", issue.message);
+        assert!(issue.message.contains("emulated loss"), "{}", issue.message);
+    }
+
+    /// #509: loss and error rates came from lifetime counters, so one old
+    /// burst flagged an interface for as long as it existed. With a previous
+    /// sample they are the interval's.
+    #[tokio::test]
+    async fn loss_is_measured_since_the_previous_sample() {
+        let diag = Diagnostics::new(Connection::<Route>::new().expect("socket"));
+        let link = crate::netlink::messages::LinkMessageBuilder::new()
+            .ifindex(7)
+            .name("eth7")
+            .build();
+        let stats = |packets: u64, dropped: u64| LinkStats {
+            rx_packets: packets,
+            rx_bytes: packets * 1000,
+            rx_dropped: dropped,
+            ..Default::default()
+        };
+        let lossy = |issues: &[Issue]| {
+            issues
+                .iter()
+                .any(|i| i.category == IssueCategory::HighPacketLoss)
+        };
+        let none = HashMap::new();
+        // A burst long ago: 5,000 drops in the first 10,000 packets.
+        let then = stats(10_000, 5_000);
+        // Since then: 100,000 clean packets.
+        let now = stats(110_000, 5_000);
+        assert!(lossy(&diag.detect_link_issues(
+            &link,
+            &now,
+            None,
+            &none,
+            Instant::now()
+        )));
+        assert!(!lossy(&diag.detect_link_issues(
+            &link,
+            &now,
+            Some(&then),
+            &none,
+            Instant::now()
+        )));
+        // Counters went backwards (the link was recreated): lifetime again.
+        let fresh = stats(1_000, 500);
+        assert!(lossy(&diag.detect_link_issues(
+            &link,
+            &fresh,
+            Some(&now),
+            &none,
+            Instant::now()
+        )));
     }
 }

@@ -487,3 +487,67 @@ async fn watch_follows_its_connections_namespace() -> nlink::Result<()> {
         }
     }
 }
+
+/// #509: `check_connectivity` took the first route in the dump that
+/// contained the destination — usually the default — and counted a
+/// blackhole as a route. It now asks the kernel, as `ip route get` does.
+#[tokio::test]
+async fn check_connectivity_asks_the_kernel_which_route() -> nlink::Result<()> {
+    use std::net::{IpAddr, Ipv4Addr};
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("diag-route")?;
+    ns.exec("ip", &["link", "add", "d0", "type", "dummy"])?;
+    ns.exec("ip", &["link", "set", "d0", "up"])?;
+    ns.exec("ip", &["addr", "add", "10.1.0.1/24", "dev", "d0"])?;
+    ns.exec("ip", &["route", "add", "default", "via", "10.1.0.254"])?;
+    ns.exec("ip", &["route", "add", "10.50.0.0/16", "via", "10.1.0.2"])?;
+    ns.exec("ip", &["route", "add", "blackhole", "10.99.0.0/16"])?;
+    let diag = Diagnostics::new(ns.connection()?);
+
+    let specific = diag
+        .check_connectivity(IpAddr::V4(Ipv4Addr::new(10, 50, 0, 1)))
+        .await?;
+    assert_eq!(
+        specific.gateway,
+        Some(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 2))),
+        "the /16, not the default route: {specific:?}"
+    );
+    let blackholed = diag
+        .check_connectivity(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)))
+        .await?;
+    assert!(blackholed.route.is_none(), "{blackholed:?}");
+    assert!(
+        blackholed
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::NoRoute
+                && i.details.as_deref() == Some("a blackhole route matches it")),
+        "{blackholed:?}"
+    );
+    Ok(())
+}
+
+/// #509: a lab namespace with no default route on purpose can switch the
+/// warning off.
+#[tokio::test]
+async fn the_no_default_route_warning_can_be_switched_off() -> nlink::Result<()> {
+    require_root!();
+    let ns = TestNamespace::new("diag-nodefault")?;
+    let warned = |report: &nlink::netlink::diagnostics::DiagnosticReport| {
+        report
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::NoDefaultRoute)
+    };
+    let diag = Diagnostics::new(ns.connection()?);
+    assert!(warned(&diag.scan().await?), "on by default");
+    let config = DiagnosticsConfig {
+        warn_no_default_route: false,
+        ..Default::default()
+    };
+    let quiet = Diagnostics::with_config(ns.connection()?, config);
+    assert!(!warned(&quiet.scan().await?));
+    Ok(())
+}
