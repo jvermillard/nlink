@@ -105,6 +105,18 @@ All notable changes to this project will be documented in this file.
   - `ResultExt::context` adds context to a `Result`'s error, so a call
     site no longer needs `map_err`.
 
+- **A config diff against a snapshot, and an apply that verifies (#518,
+  part 2).**
+  - `Snapshot::read(&conn)` reads what a diff needs, including what a
+    recreate would destroy. `NetworkConfig::diff_snapshot(&snapshot,
+    opts)` diffs against it with no kernel read, so a plan, its dry run
+    and a comparison of two candidate configs can see one state.
+    `compute_diff_with_options` is now a snapshot read and a pure diff.
+  - `ApplyOptions::with_verify(true)` diffs again after the apply and
+    fails with `Error::NotConverged { remaining }` if anything is left:
+    a change the kernel did not take as expected, or a concurrent
+    change. `ErrorKind::NotConverged` goes with it.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

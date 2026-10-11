@@ -579,22 +579,124 @@ pub async fn compute_diff_with_options(
     opts: &DiffOptions,
 ) -> Result<ConfigDiff> {
     config.validate()?;
-    let mut diff = ConfigDiff::default();
+    let snapshot = Snapshot::read_for(conn, config).await?;
+    diff_snapshot(config, &snapshot, opts)
+}
 
-    // Fetch current state
-    let current_links = conn.get_links().await?;
-    let current_addresses = conn.get_addresses().await?;
-    let current_routes = conn.get_routes().await?;
-    let current_qdiscs = conn.get_qdiscs().await?;
+/// The kernel state a [`ConfigDiff`] is computed from (#518): the links,
+/// addresses, routes and qdiscs, and what a recreate would destroy with a
+/// link (FDB entries, neighbours, nexthop objects, TC classes and filters).
+///
+/// Read it once with [`Snapshot::read`], then diff any number of configs
+/// against it with [`NetworkConfig::diff_snapshot`], without another
+/// kernel read. A plan, its dry run and a comparison of two candidate
+/// configs then all see the same state.
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// use nlink::netlink::config::{DiffOptions, NetworkConfig, Snapshot};
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+///
+/// let snapshot = Snapshot::read(&conn).await?;
+/// let a = NetworkConfig::new().link("d0", |l| l.dummy().mtu(1400));
+/// let b = NetworkConfig::new().link("d0", |l| l.dummy().mtu(9000));
+/// let (da, db) = (
+///     a.diff_snapshot(&snapshot, DiffOptions::default())?,
+///     b.diff_snapshot(&snapshot, DiffOptions::default())?,
+/// );
+/// println!("a: {da}\nb: {db}");
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    links: Vec<LinkMessage>,
+    addresses: Vec<AddressMessage>,
+    routes: Vec<RouteMessage>,
+    qdiscs: Vec<TcMessage>,
+    /// What a recreate destroys: read by [`read`](Self::read), and by
+    /// `read_for` only when its config recreates a link.
+    extras: Option<kind::LinkExtras>,
+}
+
+impl Snapshot {
+    /// Read what a diff of any config needs, including what a recreate
+    /// would destroy.
+    pub async fn read(conn: &Connection<Route>) -> Result<Self> {
+        let mut snapshot = Self::read_base(conn).await?;
+        snapshot.extras = Some(kind::LinkExtras::read(conn, &snapshot.qdiscs).await?);
+        Ok(snapshot)
+    }
+
+    /// What a diff of `config` needs: what a recreate destroys is read
+    /// only when the config recreates a link (#426).
+    pub(crate) async fn read_for(conn: &Connection<Route>, config: &NetworkConfig) -> Result<Self> {
+        let mut snapshot = Self::read_base(conn).await?;
+        if kind::recreates_any(config, &snapshot.links) {
+            snapshot.extras = Some(kind::LinkExtras::read(conn, &snapshot.qdiscs).await?);
+        }
+        Ok(snapshot)
+    }
+
+    async fn read_base(conn: &Connection<Route>) -> Result<Self> {
+        Ok(Self {
+            links: conn.get_links().await?,
+            addresses: conn.get_addresses().await?,
+            routes: conn.get_routes().await?,
+            qdiscs: conn.get_qdiscs().await?,
+            extras: None,
+        })
+    }
+
+    /// The links it holds.
+    pub fn links(&self) -> &[LinkMessage] {
+        &self.links
+    }
+
+    /// The addresses it holds.
+    pub fn addresses(&self) -> &[AddressMessage] {
+        &self.addresses
+    }
+
+    /// The routes it holds.
+    pub fn routes(&self) -> &[RouteMessage] {
+        &self.routes
+    }
+
+    /// The qdiscs it holds.
+    pub fn qdiscs(&self) -> &[TcMessage] {
+        &self.qdiscs
+    }
+}
+
+/// The diff of `config` against `snapshot`, with no kernel read (#518).
+/// The caller has validated `config`.
+pub(crate) fn diff_snapshot(
+    config: &NetworkConfig,
+    snapshot: &Snapshot,
+    opts: &DiffOptions,
+) -> Result<ConfigDiff> {
+    let mut diff = ConfigDiff::default();
+    let current_links = snapshot.links.clone();
+    let current_addresses = snapshot.addresses.clone();
+    let current_routes = snapshot.routes.clone();
+    let current_qdiscs = snapshot.qdiscs.clone();
 
     // Kind parameters (#417): what changes in place, and which links have
     // to be deleted and created again. A recreate also destroys FDB
     // entries, neighbours and nexthop objects, which no declaration can
-    // describe, so those are read too — only when there is one (#426).
-    let extras = if kind::recreates_any(config, &current_links) {
-        kind::LinkExtras::read(conn, &current_qdiscs).await?
-    } else {
-        kind::LinkExtras::default()
+    // describe, so the snapshot holds those too when it needs them (#426).
+    let no_extras = kind::LinkExtras::default();
+    let extras = match &snapshot.extras {
+        Some(extras) => extras,
+        None if kind::recreates_any(config, &current_links) => {
+            return Err(crate::Error::InvalidMessage(
+                "this snapshot was read without what a recreate destroys, and the config \
+                 recreates a link; read it with Snapshot::read"
+                    .into(),
+            ));
+        }
+        None => &no_extras,
     };
     let plan = kind::plan(
         config,
@@ -603,7 +705,7 @@ pub async fn compute_diff_with_options(
         &current_addresses,
         &current_routes,
         &current_qdiscs,
-        &extras,
+        extras,
     );
     diff.links_to_recreate = plan.recreate.clone();
     // The rest of the diff compares against the state the apply's
