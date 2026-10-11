@@ -1179,6 +1179,16 @@ All notable changes to this project will be documented in this file.
   burst behind an 8 kbit HTB class and changes both leaves under it; the
   transition test reads `flows` back with `tc`.
 
+- **A sub-second sfq `perturb` turned perturbation off (#597).**
+  `QdiscBuilder::perturb(Duration)` stored whole seconds by truncation.
+  Since sfq reads a period of 0 as "never rehash", 500 ms installed no
+  perturbation at all, and the diff converged on that. A fraction now
+  rounds up, as WireGuard's keepalive does since #529: 500 ms installs
+  1 s, and 1500 ms installs 2 s. `Duration::ZERO` is still off. A period
+  past `i32::MAX` seconds, the kernel field's range, is a `build()` error
+  from the builder and a `validate()` error from JSON, where it used to
+  saturate silently.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it

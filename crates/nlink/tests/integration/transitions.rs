@@ -469,11 +469,13 @@ async fn qdisc_fields_change_in_place() -> nlink::Result<()> {
             vec![
                 q(|q| q.sfq().perturb(Duration::from_secs(10)).quantum(1514)),
                 q(|q| q.sfq().perturb(Duration::from_secs(20)).quantum(3028)),
+                // Half a second is 1 s, not 0, which is "off" (#597).
+                q(|q| q.sfq().perturb(Duration::from_millis(500)).quantum(3028)),
             ],
         )
         .check(expect_qdisc(
             "sfq",
-            &[("perturb", "20"), ("quantum", "3028")],
+            &[("perturb", "1"), ("quantum", "3028")],
         )),
         case(
             "prio-bands-and-priomap",
