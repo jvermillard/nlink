@@ -280,3 +280,113 @@ async fn declared_objects_converge_and_keep_their_state() -> nlink::Result<()> {
     })
     .await
 }
+
+// ============================================================================
+// #483 — what a recreate has to move out of the way
+// ============================================================================
+
+/// `ip t` with an output chain, an object map `m` of `object_type` holding
+/// `127.0.0.1 -> target`, and a rule that uses the map.
+fn object_map(
+    object_type: ObjectType,
+    target: &'static str,
+    extra: impl Fn(
+        nlink::netlink::nftables::config::DeclaredTableBuilder,
+    ) -> nlink::netlink::nftables::config::DeclaredTableBuilder
+    + 'static,
+    interval: bool,
+) -> NftablesConfig {
+    NftablesConfig::new().table("t", Family::Ip, move |t| {
+        extra(t.chain("out", |c| {
+            c.hook(Hook::Output)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        }))
+        .set("m", move |s| {
+            let s = s
+                .map(SetDataType::Object(object_type))
+                .element(SetElement::ipv4(Ipv4Addr::LOCALHOST).object(target));
+            if interval { s.interval() } else { s }
+        })
+        .rule_keyed("out", "per-ip", |r| {
+            r.match_l4proto(17)
+                .objref_from_map(PacketField::Ip4Daddr, "m")
+        })
+    })
+}
+
+/// An object map recreated under a rule that uses it (`counter name ip
+/// daddr map @m`), and a limit recreated while an object map's element
+/// names it: both were EBUSY on every apply. The rule was not seen as
+/// bound to the map, and nothing released the element's hold on the
+/// object (#483).
+#[tokio::test]
+async fn object_maps_and_their_objects_recreate() -> nlink::Result<()> {
+    use crate::common::converge::{assert_converges, case};
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_limit");
+
+    let counted = |interval: bool| {
+        object_map(
+            ObjectType::Counter,
+            "c",
+            |t| t.object("c", ObjectConfig::Counter),
+            interval,
+        )
+    };
+    let limited = |rate: u64| {
+        object_map(
+            ObjectType::Limit,
+            "l",
+            move |t| {
+                t.object(
+                    "l",
+                    ObjectConfig::Limit(LimitExpr::packets(rate, LimitUnit::Second).burst(0)),
+                )
+            },
+            false,
+        )
+    };
+    let cases = vec![
+        case(
+            "map-recreated-under-its-rule",
+            vec![counted(false), counted(true)],
+        ),
+        case("object-recreated-in-a-map", vec![limited(10), limited(20)]),
+    ];
+    assert_converges("nft-objmap-rec", cases).await
+}
+
+/// Element changes to a constant set a rule is bound to are EBUSY, so the
+/// set is recreated with the rule moved out of the way (#483).
+#[tokio::test]
+async fn a_bound_constant_set_takes_new_elements() -> nlink::Result<()> {
+    use crate::common::converge::{assert_converges, case};
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let constant = |last: &'static [u8]| {
+        NftablesConfig::new().table("t", Family::Ip, move |t| {
+            t.chain("out", |c| {
+                c.hook(Hook::Output)
+                    .priority(Priority::Filter)
+                    .chain_type(ChainType::Filter)
+            })
+            .set("k", move |s| {
+                last.iter().fold(
+                    s.key_type(nlink::netlink::nftables::types::SetKeyType::Ipv4Addr)
+                        .constant(),
+                    |s, l| s.ipv4(Ipv4Addr::new(127, 0, 0, *l)),
+                )
+            })
+            .rule_keyed("out", "k", |r| {
+                r.match_in_set(PacketField::Ip4Daddr, "k").counter()
+            })
+        })
+    };
+    let cases = vec![case(
+        "constant-set",
+        vec![constant(&[1]), constant(&[1, 2])],
+    )];
+    assert_converges("nft-const-set", cases).await
+}

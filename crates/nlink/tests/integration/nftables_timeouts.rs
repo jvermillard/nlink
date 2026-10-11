@@ -252,3 +252,43 @@ async fn a_resize_keeps_the_timers_it_does_not_declare() -> nlink::Result<()> {
     })
     .await
 }
+
+/// In exact mode, an undeclared element that times out between the diff
+/// and the apply does not fail the batch: the kernel would answer ENOENT
+/// for its delete, so on a kernel that has it the removal is a destroy
+/// (#483).
+#[tokio::test]
+async fn an_element_that_expires_before_the_apply_does_not_fail_it() -> nlink::Result<()> {
+    use nlink::netlink::nftables::config::SetElementMode;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+    if !nlink::netlink::nftables::connection::kernel_has_destroy() {
+        eprintln!("skipping: the kernel has no NFT_MSG_DESTROYSETELEM (6.3+)");
+        return Ok(());
+    }
+
+    let ns = TestNamespace::new("nft-to-expire")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
+            t.set("s", |s| {
+                s.key_type(SetKeyType::Ipv4Addr)
+                    .per_element_timeouts()
+                    .element_mode(SetElementMode::Exact)
+                    .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+            })
+        });
+        cfg.diff(&conn).await?.apply(&conn).await?;
+        ns.exec(
+            "nft",
+            &["add", "element", "ip", "t", "s", "{ 10.0.0.9 timeout 1s }"],
+        )?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.set_elements_to_remove.len(), 1, "{diff}");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        diff.apply(&conn).await?;
+        assert!(cfg.diff(&conn).await?.is_empty());
+        Ok(())
+    })
+    .await
+}

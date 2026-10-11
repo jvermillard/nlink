@@ -525,10 +525,7 @@ impl DeclaredSet {
     pub(crate) fn wire_elements(&self) -> Vec<SetElement> {
         use crate::netlink::nftables::interval;
         if self.merges_ranges() {
-            interval::canonicalize(self.elements.iter().map(interval::range_of).collect())
-                .iter()
-                .map(interval::element_of)
-                .collect()
+            interval::canonicalize_elements(&self.elements)
         } else {
             self.elements.clone()
         }

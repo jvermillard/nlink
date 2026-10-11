@@ -46,6 +46,27 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables set and object edge cases that failed every apply, or
+  dropped what was declared (#483).**
+  - A rule using an object map (`counter name ip daddr map @m`) was not
+    seen as bound to it, so recreating the map was `EBUSY`. It now moves
+    out of the way like a `lookup` does.
+  - A recreated object that an object map's element names (a limit whose
+    rate changed) was `EBUSY`. Those elements now let go before the delete
+    and come back after the add.
+  - An interval set's declared ranges were rebuilt without their own
+    timeouts, so a range with a timeout never timed out. Ranges now keep
+    them; touching ranges with different timeouts stay separate.
+  - In ensure mode, a declared range that overlapped one added at runtime
+    was refused by the kernel on every apply. It now goes in as the parts
+    not already covered.
+  - In exact mode, an element of a timeout set that expired between the
+    diff and the apply failed the whole batch with `ENOENT`. On 6.3+ the
+    removal is `NFT_MSG_DESTROYSETELEM` (new
+    `Transaction::destroy_set_elements`, and `kernel_has_destroy()`).
+  - Element changes to a constant set a rule is bound to were `EBUSY`.
+    The set is recreated instead, with its rules moved.
+
 - **A flowtable with a device could not be created, and table-flag and
   flowtable changes never applied (#479).**
   - **Flowtable devices:** each device was wrapped in an `NFTA_LIST_ELEM`

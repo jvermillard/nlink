@@ -943,6 +943,9 @@ fn references_set(rule: &RuleInfo, set: &str) -> bool {
     use crate::netlink::attr::{AttrIter, get};
     rule.expressions().iter().any(|e| match e {
         RuleExpr::Lookup { set: s, .. } | RuleExpr::Dynset { set: s, .. } => s == set,
+        // `counter name ip saddr map @m`: the rule is bound to the object
+        // map, and a DELSET of it is EBUSY (#483).
+        RuleExpr::Objref(super::super::expr::ObjrefExpr::Map { map, .. }) => map == set,
         RuleExpr::Unknown { name, data } if name == "lookup" || name == "dynset" => {
             AttrIter::new(data)
                 .any(|(attr, payload)| attr == 1 && get::string(payload).ok() == Some(set))
@@ -1177,20 +1180,40 @@ fn element_changes(
     use super::super::interval;
     let ensure = declared.element_mode() == SetElementMode::Ensure;
     if declared.merges_ranges() {
-        let wanted: Vec<interval::Range> = declared
-            .wire_elements()
-            .iter()
-            .map(interval::range_of)
-            .collect();
+        // The declared elements, merged, with their timeouts (#483).
+        let wanted_elements = declared.wire_elements();
+        let wanted: Vec<interval::Range> = wanted_elements.iter().map(interval::range_of).collect();
         let held: Vec<interval::Range> = current.iter().map(interval::range_of).collect();
-        if interval::canonicalize(held.clone()) == wanted {
+        if interval::canonicalize(held.clone()) == interval::canonicalize(wanted.clone()) {
             return (Vec::new(), Vec::new());
         }
-        let to_add = wanted
-            .iter()
-            .filter(|r| !held.contains(r))
-            .map(interval::element_of)
-            .collect();
+        let to_add = if ensure {
+            // Ensure keeps what the kernel holds, so a declared range that
+            // overlaps one added at runtime goes in as the parts it does not
+            // cover: the kernel refuses an overlapping range, which made
+            // every apply fail (#483).
+            let held = interval::canonicalize(held.clone());
+            wanted_elements
+                .iter()
+                .flat_map(|e| {
+                    interval::subtract(&interval::range_of(e), &held)
+                        .into_iter()
+                        .map(|piece| {
+                            let piece = interval::element_of(&piece);
+                            match e.timeout() {
+                                Some(t) => piece.with_timeout(t),
+                                None => piece,
+                            }
+                        })
+                })
+                .collect()
+        } else {
+            wanted_elements
+                .iter()
+                .filter(|e| !held.contains(&interval::range_of(e)))
+                .cloned()
+                .collect()
+        };
         let to_remove = if ensure {
             Vec::new()
         } else {
@@ -1803,9 +1826,23 @@ impl NftablesConfig {
                         set_update(s, current),
                     ));
                 }
+                // An object map whose elements name an object this diff
+                // recreates: the elements hold the object, and its DELOBJ is
+                // EBUSY until they let go (#483).
+                let holds_recreated = |e: &SetElement| match e.data() {
+                    Some(super::super::types::SetElementData::Object(name)) => {
+                        recreated_objects.iter().any(|(n, _)| n == name)
+                    }
+                    _ => false,
+                };
+                let object_map = matches!(
+                    s.data_type(),
+                    Some(super::super::types::SetDataType::Object(_))
+                );
                 if current_set_names.contains(s.name())
                     && s.element_mode() == SetElementMode::Ensure
                     && s.elements().is_empty()
+                    && !(object_map && !recreated_objects.is_empty())
                 {
                     // Nothing declared and nothing to remove: no need to
                     // read what the packet path has put there.
@@ -1816,7 +1853,44 @@ impl NftablesConfig {
                     let current_elems = conn
                         .list_set_elements(declared.name(), s.name(), declared.family())
                         .await?;
-                    let (to_add, to_remove) = element_changes(s, &current_elems);
+                    let (mut to_add, mut to_remove) = element_changes(s, &current_elems);
+                    // A constant set cannot take element changes while a
+                    // rule is bound to it (EBUSY): recreate it, its rules
+                    // moved out of the way (#483).
+                    if s.wire_flags().contains(SetFlags::CONSTANT)
+                        && !(to_add.is_empty() && to_remove.is_empty())
+                    {
+                        recreated.insert(s.name());
+                        diff.sets_to_delete.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.name().to_string(),
+                        ));
+                        diff.sets_to_add.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.clone(),
+                        ));
+                        if !s.elements().is_empty() {
+                            diff.set_elements_to_add.push(SetElementsChange {
+                                set: s.to_set(declared.name(), declared.family()),
+                                elements: s.wire_elements(),
+                            });
+                        }
+                        continue;
+                    }
+                    // Elements that hold a recreated object let go of it
+                    // first and come back after it.
+                    for held in current_elems.iter().filter(|e| holds_recreated(e)) {
+                        let same = |e: &SetElement| e.identity() == held.identity();
+                        if !to_remove.iter().any(same) {
+                            to_remove.push(held.clone());
+                        }
+                        if !to_add.iter().any(same) {
+                            let declared_one = s.elements().iter().find(|e| same(e));
+                            to_add.push(declared_one.unwrap_or(held).clone());
+                        }
+                    }
                     if !to_add.is_empty() {
                         diff.set_elements_to_add.push(SetElementsChange {
                             set: s.to_set(declared.name(), declared.family()),

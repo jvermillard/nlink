@@ -94,6 +94,9 @@ pub const NFT_MSG_DELSET: u8 = 11;
 pub const NFT_MSG_NEWSETELEM: u8 = 12;
 pub const NFT_MSG_GETSETELEM: u8 = 13;
 pub const NFT_MSG_DELSETELEM: u8 = 14;
+/// Delete set elements, and take one that is already gone as deleted
+/// (`NFT_MSG_DESTROYSETELEM`, kernel 6.3+).
+pub const NFT_MSG_DESTROYSETELEM: u8 = 30;
 pub const NFT_MSG_NEWGEN: u8 = 15;
 pub const NFT_MSG_GETGEN: u8 = 16;
 pub const NFT_MSG_NEWOBJ: u8 = 18;
@@ -578,6 +581,7 @@ mod table_flag_tests {
         assert_eq!(NFT_MSG_NEWFLOWTABLE, 22);
         assert_eq!(NFT_MSG_GETFLOWTABLE, 23);
         assert_eq!(NFT_MSG_DELFLOWTABLE, 24);
+        assert_eq!(NFT_MSG_DESTROYSETELEM, 30);
         assert_eq!(NFT_FLOWTABLE_HW_OFFLOAD, 0x1);
         assert_eq!(NFT_FLOWTABLE_COUNTER, 0x2);
         assert_eq!(NF_NETDEV_INGRESS, 0);
