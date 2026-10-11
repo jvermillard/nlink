@@ -133,6 +133,7 @@ impl ApplyOptions {
 
 /// Result of applying configuration.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 #[must_use = "Inspect `.is_success()`, `.errors`, or `.summary_text()` to learn the outcome"]
@@ -163,6 +164,7 @@ impl ApplyResult {
 
 /// An error that occurred during configuration application.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug)]
 pub struct ApplyError {
@@ -173,6 +175,7 @@ pub struct ApplyError {
     /// (the `Error` type is internally varied and not
     /// shape-stable).
     #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_error_as_display"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub error: Error,
 }
 

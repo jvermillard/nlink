@@ -390,7 +390,7 @@ pub enum Error {
 }
 
 /// Structured validation error information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationErrorInfo {
     /// Field that failed validation.
     pub field: String,

@@ -9,6 +9,7 @@ use crate::netlink::tc_handle::TcHandle;
 
 /// nftables address family.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -59,6 +60,7 @@ impl Family {
 /// family. Use [`Hook::is_valid_for_family`] to validate at
 /// build time.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -149,6 +151,7 @@ impl Hook {
 
 /// Chain type string for the kernel.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -184,6 +187,7 @@ impl ChainType {
 
 /// Chain priority (determines ordering).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -213,6 +217,7 @@ impl Priority {
 
 /// Default policy for a base chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -247,6 +252,7 @@ impl Policy {
 /// log messages and `AsRef<str>` so it slots into existing
 /// `&str`-shaped APIs.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChainName(String);
@@ -431,6 +437,7 @@ impl std::str::FromStr for TableName {
 /// (The 0.20.1 `Verdict::Jump(String)` / `Verdict::Goto(String)`
 /// variants were removed in 0.21.)
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Verdict {
@@ -537,6 +544,7 @@ impl std::ops::BitOrAssign for CtState {
 
 /// Rate limit unit.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LimitUnit {
@@ -1033,7 +1041,7 @@ impl NatAddr {
 }
 
 /// NAT expression data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NatExpr {
     pub nat_type: NatType,
@@ -1352,7 +1360,7 @@ pub struct ChainInfo {
 ///
 /// The builder automatically generates nftables expression sequences
 /// from high-level match/action methods.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "builders do nothing unless used"]
 pub struct Rule {
     pub(crate) table: String,
@@ -2734,6 +2742,7 @@ pub struct RuleInfo {
 /// `tcp`, `udp`, `icmp`) and `Concat(Vec<_>)` (composite key
 /// used in rules like `ip saddr . tcp dport`).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -2953,6 +2962,7 @@ impl PacketField {
 /// Set flags — `NFTA_SET_FLAGS`, the `NFT_SET_*` bits, in the shape of
 /// [`CtState`] and [`TcpFlags`]. Combine with `|`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SetFlags(pub u32);
 
@@ -2997,6 +3007,7 @@ impl std::ops::BitOrAssign for SetFlags {
 
 /// What a map maps its keys to.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -3044,6 +3055,7 @@ impl SetDataType {
 
 /// Set builder.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
 pub struct Set {
@@ -3233,6 +3245,7 @@ pub(crate) fn wire_flags(key_type: &SetKeyType, flags: SetFlags) -> SetFlags {
 /// elements, for one), which is why the element operations take the
 /// [`Set`] rather than its name.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SetElement {
     key: Vec<u8>,
@@ -3248,6 +3261,7 @@ pub struct SetElement {
 
 /// What a map element maps its key to.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SetElementData {

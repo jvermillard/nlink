@@ -562,6 +562,7 @@ impl NftablesDiff {
 ///     .backoff(Duration::from_millis(50));
 /// ```
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -602,6 +603,7 @@ impl ReconcileOptions {
 /// Outcome of [`NftablesDiff::apply_reconcile`]. `attempts == 1`
 /// means the first apply succeeded — no contention encountered.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
