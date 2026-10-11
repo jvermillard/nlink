@@ -49,6 +49,10 @@ use super::{
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
+/// `FIB_RULE_INVERT` (`linux/fib_rules.h`): the rule matches what its
+/// selectors do not.
+pub(crate) const FIB_RULE_INVERT: u32 = 0x2;
+
 /// Builder for routing rules.
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -71,6 +75,9 @@ pub struct RuleBuilder {
     ipproto: Option<u8>,
     sport: Option<(u16, u16)>,
     dport: Option<(u16, u16)>,
+    protocol: Option<u8>,
+    invert: bool,
+    suppress_prefixlen: Option<u32>,
 }
 
 impl RuleBuilder {
@@ -92,6 +99,9 @@ impl RuleBuilder {
             ipproto: None,
             sport: None,
             dport: None,
+            protocol: None,
+            invert: false,
+            suppress_prefixlen: None,
         }
     }
 
@@ -221,6 +231,31 @@ impl RuleBuilder {
         self
     }
 
+    /// The routing protocol the rule carries (`FRA_PROTOCOL`, `ip rule …
+    /// protocol`): who installed it. Part of a rule's identity — the
+    /// kernel keeps a rule with another protocol as another rule, and a
+    /// delete that names one removes only that one (#516). Unset, the
+    /// kernel stores 0 (`unspec`), as `ip rule add` does.
+    pub fn protocol(mut self, protocol: u8) -> Self {
+        self.protocol = Some(protocol);
+        self
+    }
+
+    /// Match what the selectors do not (`ip rule add not …`,
+    /// `FIB_RULE_INVERT`).
+    pub fn invert(mut self) -> Self {
+        self.invert = true;
+        self
+    }
+
+    /// Ignore a table lookup whose route has this prefix length or less
+    /// (`suppress_prefixlength`): `0` skips the table's default route, as
+    /// `wg-quick` does with `table main suppress_prefixlength 0`.
+    pub fn suppress_prefixlen(mut self, len: u32) -> Self {
+        self.suppress_prefixlen = Some(len);
+        self
+    }
+
     /// Set the IP protocol to match (6=TCP, 17=UDP, etc.).
     pub fn ipproto(mut self, proto: u8) -> Self {
         self.ipproto = Some(proto);
@@ -296,6 +331,9 @@ impl RuleBuilder {
             (self.action.map_or(0, |a| a as u8), self.table.unwrap_or(0))
         };
         hdr.action = action;
+        if self.invert {
+            hdr.flags |= FIB_RULE_INVERT;
+        }
         hdr.table = if table <= 255 {
             table as u8
         } else {
@@ -354,6 +392,14 @@ impl RuleBuilder {
         // Add table if > 255
         if table > 255 {
             builder.append_attr_u32(FraAttr::Table as u16, table);
+        }
+
+        if let Some(protocol) = self.protocol {
+            builder.append_attr(FraAttr::Protocol as u16, &[protocol]);
+        }
+
+        if let Some(len) = self.suppress_prefixlen {
+            builder.append_attr_u32(FraAttr::SuppressPrefixlen as u16, len);
         }
 
         // Add IP protocol

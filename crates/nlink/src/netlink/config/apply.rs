@@ -415,6 +415,8 @@ fn step_operation(step: &Step) -> String {
         Step::DeleteNeighbour(n) => format!("remove {n}"),
         Step::SetFdb { after, .. } => format!("set {after}"),
         Step::DeleteFdb(e) => format!("remove {e}"),
+        Step::AddRule(r) => format!("add {r}"),
+        Step::DeleteRule(r) => format!("remove {r}"),
         Step::DeleteQdisc(q) => format!("delete qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::ReplaceQdisc(q) => format!("replace qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::AddQdisc(q) => format!("add qdisc {} on {}", q.qdisc_type.kind(), q.dev),
@@ -502,6 +504,52 @@ fn neighbour_config(n: &super::DeclaredNeighbour) -> crate::netlink::neigh::Neig
         _ if n.proxy => c.proxy(),
         Some(mac) => c.permanent().lladdr(mac),
         None => c.permanent(),
+    }
+}
+
+/// The kernel rule a declared rule is, with `protocol` (#516).
+fn rule_config(r: &super::DeclaredRule, protocol: u8) -> crate::netlink::rule::RuleBuilder {
+    use crate::netlink::rule::RuleBuilder;
+    let mut b = if r.is_ipv6() { RuleBuilder::v6() } else { RuleBuilder::v4() }
+        .priority(r.priority)
+        .protocol(protocol);
+    if let Some((a, l)) = r.from {
+        b = b.from_addr(a, l);
+    }
+    if let Some((a, l)) = r.to {
+        b = b.to_addr(a, l);
+    }
+    if let Some(iif) = &r.iif {
+        b = b.iif(iif);
+    }
+    if let Some(oif) = &r.oif {
+        b = b.oif(oif);
+    }
+    match (r.fwmark, r.fwmask) {
+        (Some(m), Some(mask)) => b = b.fwmark_mask(m, mask),
+        (Some(m), None) => b = b.fwmark(m),
+        _ => {}
+    }
+    if let Some(p) = r.ipproto {
+        b = b.ipproto(p);
+    }
+    if let Some((a, z)) = r.sport {
+        b = b.sport(a, z);
+    }
+    if let Some((a, z)) = r.dport {
+        b = b.dport(a, z);
+    }
+    if r.invert {
+        b = b.invert();
+    }
+    if let Some(len) = r.suppress_prefixlen {
+        b = b.suppress_prefixlen(len);
+    }
+    match r.action {
+        super::RuleAction::Table(t) => b.table(t),
+        super::RuleAction::Blackhole => b.blackhole(),
+        super::RuleAction::Unreachable => b.unreachable(),
+        super::RuleAction::Prohibit => b.prohibit(),
     }
 }
 
@@ -670,6 +718,23 @@ async fn run_step(
             Err(e2) if e2.is_not_found() => Outcome::Unchanged(Some(format!("{e} already absent"))),
             Err(e2) => return Err(e2),
         },
+        Step::AddRule(r) => {
+            let protocol = u8::from(plan.routes_protocol.unwrap_or(RouteProtocol::Boot));
+            match conn.add_rule(rule_config(r, protocol)).await {
+                Ok(()) => Outcome::Changed(format!("Added {r}"), 1),
+                // There already: the same rule, with this protocol.
+                Err(e) if e.is_already_exists() => Outcome::Unchanged(Some(format!("{r} already present"))),
+                Err(e) => return Err(e),
+            }
+        }
+        Step::DeleteRule(r) => {
+            let protocol = u8::from(plan.routes_protocol.unwrap_or(RouteProtocol::Boot));
+            match conn.del_rule(rule_config(r, protocol)).await {
+                Ok(()) => Outcome::Changed(format!("Removed {r}"), 1),
+                Err(e) if e.is_not_found() => Outcome::Unchanged(Some(format!("{r} already absent"))),
+                Err(e) => return Err(e),
+            }
+        }
         Step::ChangeAddress(addr) => {
             change_address(conn, addr).await?;
             Outcome::Changed(

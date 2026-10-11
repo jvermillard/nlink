@@ -1120,6 +1120,50 @@ All notable changes to this project will be documented in this file.
       It keeps a stranger's entry and a flood entry's other remote, and
       fails if the delete drops the remote's `dst`.
 
+- **Declared policy routing rules (#516, row 9).**
+  - **Builder.** `NetworkConfig::rule(priority, |r| …)` declares a rule.
+    - **Selectors:** `from`, `to`, `iif`, `oif`, `fwmark` or
+      `fwmark_masked`, `ipproto`, `sport`, `dport`, `invert` (`not`),
+      `suppress_prefixlen`, and `ipv6()` for a rule with no address.
+    - **Actions:** a table lookup (main by default), `blackhole`,
+      `unreachable` or `prohibit`.
+  - **Ownership.** A declared rule carries the config's `route_protocol`
+    (`boot` by default), and only a rule with it is the config's.
+    - The kernel keeps an identical rule with another protocol as a
+      separate rule. `ip rule add` leaves the protocol `unspec`.
+    - A delete that names the protocol removes only that rule.
+    - So a config neither takes another tool's identical rule for its own
+      nor removes it.
+  - **Diff and plan.**
+    - `ConfigDiff::rules_to_add` and `rules_to_remove` hold the rules,
+      and the JSON schema gains both keys.
+    - The plan holds them as `Step::AddRule` and `Step::DeleteRule`,
+      which invert. A rule is added after the routes of the table it
+      looks up.
+    - Rules name their devices, so a recreated link keeps its rules.
+  - **Removal.** A rule leaves through `PlanOptions::previous`; `purge`
+    never removes a rule.
+  - **Validation errors:**
+    - a prefix longer than its family's;
+    - addresses of two families;
+    - table 0;
+    - a mark mask without a mark;
+    - a backwards port range;
+    - a rule declared twice.
+  - **Imperative.** `RuleBuilder::protocol`, `invert` (`ip rule … not`) and
+    `suppress_prefixlen`, and `RuleMessage::is_invert`.
+  - **Test harness.** `assert_transition_with_previous` applies each step
+    with the step before as its previous config.
+  - **Tests.**
+    - A transition test changes a rule's table and another's prefix,
+      drops one, adds an IPv6 rule with a masked mark, then recreates the
+      device a rule names. It checks `ip -j -d rule` at each step, with
+      another tool's identical rule ahead of the config's the whole time.
+      It passes on iproute2 6.15 and 6.1.
+    - It fails if the delete leaves out the protocol (the other tool's
+      rule goes), and if live rules are matched without it (the config's
+      rule is never added).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

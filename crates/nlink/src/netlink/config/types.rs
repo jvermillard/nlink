@@ -33,6 +33,9 @@ pub struct NetworkConfig {
     /// Bridge FDB entries and VXLAN remotes (#516).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) fdb: Vec<DeclaredFdb>,
+    /// Policy routing rules (#516).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) rules: Vec<DeclaredRule>,
     /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
     /// yet: a filter's actions have no document form.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -175,6 +178,36 @@ impl NetworkConfig {
             }
             if self.neighbours[..i].iter().any(|o| o.same_entry(n)) {
                 errors.push(ValidationErrorInfo::new(at(), "declared twice"));
+            }
+        }
+        for (i, r) in self.rules.iter().enumerate() {
+            let at = || format!("rules.{}", r.priority);
+            let mut bad = |why: String| errors.push(ValidationErrorInfo::new(at(), why));
+            for (what, cidr) in [("from", r.from), ("to", r.to)] {
+                let Some((addr, len)) = cidr else { continue };
+                let max = if addr.is_ipv6() { 128 } else { 32 };
+                if len > max {
+                    bad(format!("{what} {addr}/{len}: the prefix is at most {max} bits"));
+                }
+                if addr.is_ipv6() != r.is_ipv6() {
+                    bad(format!("{what} {addr} is not in the rule's family"));
+                }
+            }
+            if r.action == RuleAction::Table(0) {
+                bad("table 0 is unspecified; declare 254 for main".into());
+            }
+            if r.fwmask.is_some() && r.fwmark.is_none() {
+                bad("a mark mask without a mark".into());
+            }
+            for (what, range) in [("sport", r.sport), ("dport", r.dport)] {
+                if let Some((a, b)) = range
+                    && a > b
+                {
+                    bad(format!("{what} {a}-{b} runs backwards"));
+                }
+            }
+            if self.rules[..i].contains(r) {
+                bad("declared twice".into());
             }
         }
         for (i, e) in self.fdb.iter().enumerate() {
@@ -576,8 +609,8 @@ impl NetworkConfig {
     }
 
     /// `true` when the config declares nothing: no links, addresses,
-    /// routes, qdiscs, TC trees, neighbours or FDB entries, and no builder
-    /// mistake waiting for [`validate`](Self::validate) (#531).
+    /// routes, qdiscs, TC trees, neighbours, FDB entries or rules, and no
+    /// builder mistake waiting for [`validate`](Self::validate) (#531).
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
             && self.addresses.is_empty()
@@ -586,6 +619,7 @@ impl NetworkConfig {
             && self.tc.is_empty()
             && self.neighbours.is_empty()
             && self.fdb.is_empty()
+            && self.rules.is_empty()
             && self.invalid.is_empty()
     }
 
@@ -811,6 +845,53 @@ impl NetworkConfig {
         self
     }
 
+    /// Declare a policy routing rule at `priority` (#516), as `ip rule add
+    /// pref <priority> …` does. Without an action it looks the main table
+    /// up.
+    ///
+    /// The rule carries the config's
+    /// [`route_protocol`](Self::route_protocol) (`boot` by default) and
+    /// only a rule with it is the config's: the kernel keeps an identical
+    /// rule another tool added — `ip rule add` leaves the protocol
+    /// `unspec` — as a rule of its own, and a delete that names the
+    /// protocol removes only this one. A rule goes when it leaves the
+    /// config, through [`PlanOptions::previous`](super::PlanOptions::previous);
+    /// a purge leaves rules alone. Rules name devices, so a recreated link
+    /// keeps its rules.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use std::net::Ipv4Addr;
+    ///
+    /// let config = NetworkConfig::new()
+    ///     .rule(100, |r| r.from(Ipv4Addr::new(10, 0, 0, 0), 8).table(100))
+    ///     .rule(110, |r| r.invert().fwmark(0xca6c).table(51820))
+    ///     .rule(120, |r| r.table(254).suppress_prefixlen(0));
+    /// config.validate().unwrap();
+    /// ```
+    pub fn rule(mut self, priority: u32, f: impl FnOnce(PolicyRuleBuilder) -> PolicyRuleBuilder) -> Self {
+        let built = f(PolicyRuleBuilder {
+            rule: DeclaredRule {
+                priority,
+                ipv6: false,
+                from: None,
+                to: None,
+                iif: None,
+                oif: None,
+                fwmark: None,
+                fwmask: None,
+                ipproto: None,
+                sport: None,
+                dport: None,
+                invert: false,
+                suppress_prefixlen: None,
+                action: RuleAction::Table(254),
+            },
+        });
+        self.rules.push(built.rule);
+        self
+    }
+
     /// Declare an FDB entry for `mac` on `dev` (#516).
     ///
     /// By default it is a static entry in the bridge `dev` is a port of,
@@ -977,6 +1058,11 @@ impl NetworkConfig {
     /// Get the configured FDB entries.
     pub fn fdb_entries(&self) -> &[DeclaredFdb] {
         &self.fdb
+    }
+
+    /// Get the configured policy routing rules.
+    pub fn rules(&self) -> &[DeclaredRule] {
+        &self.rules
     }
 }
 
@@ -2876,6 +2962,239 @@ impl std::fmt::Display for DeclaredNeighbour {
             )?;
         }
         write!(f, " dev {}", self.dev)
+    }
+}
+
+/// A declared policy routing rule (#516). See [`NetworkConfig::rule`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredRule {
+    /// Its place in the rule list (`pref`). Required: the kernel would
+    /// pick one, and a rule is known by it.
+    pub priority: u32,
+    /// An IPv6 rule; implied by an IPv6 `from` or `to`.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub ipv6: bool,
+    /// The source prefix, as `10.0.0.0/8`.
+    #[cfg_attr(feature = "serde", serde(default, with = "cidr_serde", skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub from: Option<(IpAddr, u8)>,
+    /// The destination prefix.
+    #[cfg_attr(feature = "serde", serde(default, with = "cidr_serde", skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub to: Option<(IpAddr, u8)>,
+    /// The input device.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub iif: Option<String>,
+    /// The output device.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub oif: Option<String>,
+    /// The firewall mark.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub fwmark: Option<u32>,
+    /// The mask the mark is compared under; the kernel's is all ones.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub fwmask: Option<u32>,
+    /// The IP protocol.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub ipproto: Option<u8>,
+    /// The source port range, `[first, last]`.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub sport: Option<(u16, u16)>,
+    /// The destination port range.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub dport: Option<(u16, u16)>,
+    /// Match what the selectors do not (`not`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub invert: bool,
+    /// Ignore a lookup whose route's prefix is this long or shorter
+    /// (`suppress_prefixlength`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub suppress_prefixlen: Option<u32>,
+    /// What it does.
+    pub action: RuleAction,
+}
+
+/// What a declared rule does (#516).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuleAction {
+    /// Look this table up.
+    Table(u32),
+    /// Drop silently.
+    Blackhole,
+    /// Drop with ICMP unreachable.
+    Unreachable,
+    /// Drop with ICMP prohibited.
+    Prohibit,
+}
+
+impl DeclaredRule {
+    /// Whether it is an IPv6 rule: declared one, or by an address.
+    pub fn is_ipv6(&self) -> bool {
+        self.ipv6 || [self.from, self.to].iter().flatten().any(|(a, _)| a.is_ipv6())
+    }
+}
+
+impl std::fmt::Display for DeclaredRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rule {}", self.priority)?;
+        if self.is_ipv6() && self.from.is_none() && self.to.is_none() {
+            f.write_str(" (ipv6)")?;
+        }
+        if self.invert {
+            f.write_str(" not")?;
+        }
+        if let Some((a, l)) = self.from {
+            write!(f, " from {a}/{l}")?;
+        }
+        if let Some((a, l)) = self.to {
+            write!(f, " to {a}/{l}")?;
+        }
+        if let Some(m) = self.fwmark {
+            write!(f, " fwmark {m:#x}")?;
+            if let Some(mask) = self.fwmask {
+                write!(f, "/{mask:#x}")?;
+            }
+        }
+        if let Some(iif) = &self.iif {
+            write!(f, " iif {iif}")?;
+        }
+        if let Some(oif) = &self.oif {
+            write!(f, " oif {oif}")?;
+        }
+        if let Some(p) = self.ipproto {
+            write!(f, " ipproto {p}")?;
+        }
+        for (what, range) in [("sport", self.sport), ("dport", self.dport)] {
+            match range {
+                Some((a, b)) if a == b => write!(f, " {what} {a}")?,
+                Some((a, b)) => write!(f, " {what} {a}-{b}")?,
+                None => {}
+            }
+        }
+        match self.action {
+            RuleAction::Table(t) => write!(f, " lookup {t}")?,
+            RuleAction::Blackhole => f.write_str(" blackhole")?,
+            RuleAction::Unreachable => f.write_str(" unreachable")?,
+            RuleAction::Prohibit => f.write_str(" prohibit")?,
+        }
+        if let Some(len) = self.suppress_prefixlen {
+            write!(f, " suppress_prefixlength {len}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Builds a declared policy routing rule; see [`NetworkConfig::rule`].
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct PolicyRuleBuilder {
+    rule: DeclaredRule,
+}
+
+impl PolicyRuleBuilder {
+    /// An IPv6 rule; implied by an IPv6 address.
+    pub fn ipv6(mut self) -> Self {
+        self.rule.ipv6 = true;
+        self
+    }
+
+    /// Match the source prefix.
+    pub fn from(mut self, addr: impl Into<IpAddr>, prefix_len: u8) -> Self {
+        self.rule.from = Some((addr.into(), prefix_len));
+        self
+    }
+
+    /// Match the destination prefix.
+    pub fn to(mut self, addr: impl Into<IpAddr>, prefix_len: u8) -> Self {
+        self.rule.to = Some((addr.into(), prefix_len));
+        self
+    }
+
+    /// Match the input device.
+    pub fn iif(mut self, dev: &str) -> Self {
+        self.rule.iif = Some(dev.to_string());
+        self
+    }
+
+    /// Match the output device.
+    pub fn oif(mut self, dev: &str) -> Self {
+        self.rule.oif = Some(dev.to_string());
+        self
+    }
+
+    /// Match the firewall mark.
+    pub fn fwmark(mut self, mark: u32) -> Self {
+        self.rule.fwmark = Some(mark);
+        self
+    }
+
+    /// Match the firewall mark under `mask`.
+    pub fn fwmark_masked(mut self, mark: u32, mask: u32) -> Self {
+        self.rule.fwmark = Some(mark);
+        self.rule.fwmask = Some(mask);
+        self
+    }
+
+    /// Match the IP protocol.
+    pub fn ipproto(mut self, proto: u8) -> Self {
+        self.rule.ipproto = Some(proto);
+        self
+    }
+
+    /// Match a source port range.
+    pub fn sport(mut self, first: u16, last: u16) -> Self {
+        self.rule.sport = Some((first, last));
+        self
+    }
+
+    /// Match a destination port range.
+    pub fn dport(mut self, first: u16, last: u16) -> Self {
+        self.rule.dport = Some((first, last));
+        self
+    }
+
+    /// Match what the selectors do not.
+    pub fn invert(mut self) -> Self {
+        self.rule.invert = true;
+        self
+    }
+
+    /// Ignore a lookup whose route's prefix is `len` long or shorter.
+    pub fn suppress_prefixlen(mut self, len: u32) -> Self {
+        self.rule.suppress_prefixlen = Some(len);
+        self
+    }
+
+    /// Look `table` up.
+    pub fn table(mut self, table: u32) -> Self {
+        self.rule.action = RuleAction::Table(table);
+        self
+    }
+
+    /// Drop silently.
+    pub fn blackhole(mut self) -> Self {
+        self.rule.action = RuleAction::Blackhole;
+        self
+    }
+
+    /// Drop with ICMP unreachable.
+    pub fn unreachable(mut self) -> Self {
+        self.rule.action = RuleAction::Unreachable;
+        self
+    }
+
+    /// Drop with ICMP prohibited.
+    pub fn prohibit(mut self) -> Self {
+        self.rule.action = RuleAction::Prohibit;
+        self
     }
 }
 
@@ -5563,6 +5882,59 @@ mod serde_roundtrip_tests {
     }
 
     #[test]
+    fn rules_roundtrip_display_and_validate() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let cfg = NetworkConfig::new()
+            .rule(100, |r| r.from(Ipv4Addr::new(10, 0, 0, 0), 8).table(100))
+            .rule(110, |r| r.invert().fwmark_masked(0x10, 0xff).iif("eth0").table(200))
+            .rule(120, |r| r.table(254).suppress_prefixlen(0))
+            .rule(130, |r| r.ipproto(6).dport(80, 89).sport(1024, 1024).prohibit())
+            .rule(140, |r| r.ipv6().blackhole())
+            .rule(100, |r| r.to("fd00::".parse::<Ipv6Addr>().unwrap(), 64).table(100));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#"{"priority":100,"from":"10.0.0.0/8","action":{"table":100}}"#,
+            r#"{"priority":140,"ipv6":true,"action":"blackhole"}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        let shown: Vec<String> = cfg.rules().iter().map(|r| r.to_string()).collect();
+        assert_eq!(
+            shown,
+            [
+                "rule 100 from 10.0.0.0/8 lookup 100",
+                "rule 110 not fwmark 0x10/0xff iif eth0 lookup 200",
+                "rule 120 lookup 254 suppress_prefixlength 0",
+                "rule 130 ipproto 6 sport 1024 dport 80-89 prohibit",
+                "rule 140 (ipv6) blackhole",
+                "rule 100 to fd00::/64 lookup 100",
+            ]
+        );
+        assert!(cfg.rules()[5].is_ipv6() && !cfg.rules()[0].is_ipv6());
+        for (cfg, says) in [
+            (NetworkConfig::new().rule(1, |r| r.from(Ipv4Addr::LOCALHOST, 33)), "at most 32 bits"),
+            (
+                NetworkConfig::new().rule(1, |r| r.from(Ipv4Addr::LOCALHOST, 8).to(Ipv6Addr::LOCALHOST, 8)),
+                "not in the rule's family",
+            ),
+            (NetworkConfig::new().rule(1, |r| r.table(0)), "table 0 is unspecified"),
+            (NetworkConfig::new().rule(1, |r| r.dport(90, 80)), "runs backwards"),
+            (NetworkConfig::new().rule(1, |r| r).rule(1, |r| r), "declared twice"),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        // Two rules at one priority are fine: the kernel keeps both.
+        NetworkConfig::new()
+            .rule(1, |r| r.fwmark(1).table(100))
+            .rule(1, |r| r.fwmark(2).table(101))
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
     fn fdb_roundtrips_and_validates() {
         use std::net::Ipv4Addr;
         let ip = |h: u8| IpAddr::V4(Ipv4Addr::new(10, 0, 0, h));
@@ -6088,6 +6460,42 @@ mod serde_roundtrip_tests {
         let cfg = NetworkConfig::new().link("d0", |l| l.dummy());
         let json = cfg.to_json_string().unwrap();
         assert!(json.contains(r#""link-type":"dummy""#), "{json}");
+    }
+}
+
+/// Serde adapter for an optional prefix — `10.0.0.0/8` — as
+/// [`DeclaredRule::from`] has one.
+#[cfg(feature = "serde")]
+mod cidr_serde {
+    use std::net::IpAddr;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(v: &Option<(IpAddr, u8)>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some((addr, len)) => s.serialize_some(&format!("{addr}/{len}")),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<(IpAddr, u8)>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let (addr, len) = text
+            .split_once('/')
+            .ok_or_else(|| serde::de::Error::custom(format!("`{text}` is not a prefix: no `/len`")))?;
+        let addr: IpAddr = addr
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("`{addr}` is not an address")))?;
+        let len: u8 = len
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("`{len}` is not a prefix length")))?;
+        let max = if addr.is_ipv6() { 128 } else { 32 };
+        if len > max {
+            return Err(serde::de::Error::custom(format!("{text}: the prefix is at most {max} bits")));
+        }
+        Ok(Some((addr, len)))
     }
 }
 
