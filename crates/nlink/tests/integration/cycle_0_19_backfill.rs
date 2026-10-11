@@ -232,7 +232,7 @@ async fn plan_200_stack_apply_network_only_layer() -> Result<()> {
             report.network.as_ref().is_some_and(|r| r.changes_made == 1),
             "network layer should report 1 change"
         );
-        assert!(report.nftables_change_count.is_none());
+        assert!(report.nftables.is_none());
         assert!(report.wireguard.is_none());
 
         // Re-applying the same Stack must be a no-op.
@@ -277,7 +277,8 @@ async fn a_stack_dry_run_touches_nothing() -> Result<()> {
                 ApplyOptions::default().with_dry_run(true),
             )
             .await?;
-        let diff = report.dry_run.as_ref().expect("a dry run carries the diff");
+        assert!(report.dry_run);
+        let diff = report.planned.as_ref().expect("a dry run carries the plan");
         assert!(diff.change_count() >= 3, "link, table, device: {diff:?}");
         let network = diff.network.as_ref().expect("the network layer's diff");
         assert!(network.links_missing.is_empty(), "{network}");

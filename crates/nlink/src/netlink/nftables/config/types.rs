@@ -18,6 +18,8 @@ use super::super::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NftablesConfig {
     pub(crate) tables: Vec<DeclaredTable>,
+    /// Tables declared absent: deleted if the kernel has them (#519).
+    pub(crate) absent: Vec<(Family, String)>,
 }
 
 impl NftablesConfig {
@@ -45,9 +47,34 @@ impl NftablesConfig {
         &self.tables
     }
 
-    /// Is this config empty?
+    /// Declare that table `name` must not exist (#519): the diff deletes
+    /// it, with everything in it, if the kernel has it, and an empty
+    /// declaration is what "I own this table and want it gone" looks like.
+    /// A table both declared and declared absent fails validation.
+    ///
+    /// Without it an owner had to delete the table itself: a config that
+    /// declares nothing declares no table, and
+    /// [`NftDiffOptions::purge_tables`](super::NftDiffOptions::purge_tables)
+    /// deletes every undeclared table, everyone's.
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::{Family, config::NftablesConfig};
+    /// let cfg = NftablesConfig::new().absent_table("lab-fw", Family::Inet);
+    /// assert!(!cfg.is_empty());
+    /// ```
+    pub fn absent_table(mut self, name: impl Into<String>, family: Family) -> Self {
+        self.absent.push((family, name.into()));
+        self
+    }
+
+    /// The tables declared absent.
+    pub fn absent_tables(&self) -> &[(Family, String)] {
+        &self.absent
+    }
+
+    /// Is this config empty — no table declared, present or absent?
     pub fn is_empty(&self) -> bool {
-        self.tables.is_empty()
+        self.tables.is_empty() && self.absent.is_empty()
     }
 }
 

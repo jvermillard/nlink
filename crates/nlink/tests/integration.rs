@@ -306,6 +306,10 @@ mod recipes_echo;
 #[path = "integration/tc_tree.rs"]
 mod tc_tree;
 
+// `Stack::plan_in` → `StackPlan::apply`: one diff of every layer (#519).
+#[path = "integration/stack_plan.rs"]
+mod stack_plan;
+
 // The helpers in `common/` checked against themselves, including where
 // each must fail: a helper that cannot fail turns every test built on it
 // into a pass.

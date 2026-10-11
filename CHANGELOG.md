@@ -175,6 +175,50 @@ All notable changes to this project will be documented in this file.
 
     The first and second fail on the code before their fixes.
 
+- **`Stack` plans once and applies that plan (#519, parts 2 and 3).**
+  `Stack::plan_in(ns, PlanOptions) -> StackPlan` diffs every set layer
+  once. `StackPlan` prints as the dry run and serializes.
+  `StackPlan::apply(ns, ExecOptions) -> StackReport` applies exactly it, in
+  this order: WireGuard links, network, firewall, then WireGuard keys and
+  peers.
+  - **One diff.** `Stack::apply*` used to run a pre-flight diff of every
+    layer, throw it away, and let each layer diff again as it applied: a
+    second full dump, and a window for the kernel to change in between.
+  - **Re-planning.** A layer planned while a WireGuard link it names did
+    not exist is planned again once step 0 has created it. Before, a
+    network declaration on the tunnel, such as its MTU, could take a
+    second apply.
+  - **Verify.** `exec.verify` plans every layer again and fails with
+    `Error::StackNotConverged`.
+  - **Retry.** `Stack::apply_reconcile_in` plans and applies again on
+    `EBUSY`, `EAGAIN`, an interrupted dump, or an nftables commit refused
+    because the ruleset moved since the plan.
+  - **`WireguardConfigDiff::apply`** is new, like the other layers' diff
+    applies.
+  - **Renames:**
+    - `StackDiff` is now `StackPlan` and `StackApplyReport` is now
+      `StackReport` (deprecated aliases);
+    - the `diff*` methods are deprecated for `plan*`;
+    - `nftables_change_count` is now `nftables`;
+    - a dry run's plan is in `planned`;
+    - `Stack` is `#[non_exhaustive]`.
+  - **`NftablesConfig::absent_table(name, family)`.** A table declared
+    absent is deleted, with its contents, whenever the kernel has it. An
+    owner no longer special-cases "I own this table and want it gone".
+    Declaring a table both present and absent fails validation.
+
+  Root tests:
+  - a plan applied as planned converges under `verify`;
+  - an address added after a purging plan is not swept up by that plan,
+    and `verify` finds it;
+  - a stale firewall plan is refused with `ERESTART` while the stack
+    reconcile goes through;
+  - a WireGuard link's MTU, declared in the network layer, lands in the
+    same apply (host root only);
+  - an absent table goes and stays gone, and other tables are untouched.
+
+  The WireGuard test fails without the re-plan.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

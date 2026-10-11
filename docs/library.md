@@ -775,19 +775,19 @@ want to inspect or merge it rather than emit text.
 ### The Stack facade — all three layers in one bundle
 
 `nlink::facade::Stack` bundles `NetworkConfig` + `NftablesConfig` +
-`WireguardConfig` and applies them in dependency order (WireGuard
-links → network → firewall → WireGuard keys/peers), with a pre-flight
-`diff()` across every set layer before the network layer mutates
-anything. Since 0.24 (#169): `apply_in` / `diff_in` take a
-`NamespaceSpec` (named / path / PID — container support),
-`StackDiff::change_count()` / `StackApplyReport::change_count()`
-aggregate the per-layer counts, and a declared-but-absent WireGuard
-device is created automatically. The links are bootstrapped (created
-and brought up) *first*, so the network layer can address the tunnel
-and route via a peer's tunnel address (#330). `apply_in_with` /
-`diff_in_with` carry `ApplyOptions` / `PlanOptions` to the network
-layer — `ApplyOptions::default().with_purge(true)` is how a reconcile
-removes addresses and routes that left the declaration.
+`WireguardConfig`. `plan_in` diffs every set layer once and returns a
+`StackPlan` — printable as the dry run, serializable — and
+`StackPlan::apply` applies exactly that plan in dependency order:
+WireGuard links → network → firewall → WireGuard keys and peers (#519).
+The links are bootstrapped (created and brought up) *first*, so the
+network layer can address the tunnel and route via a peer's tunnel
+address (#330); a layer planned before one of them existed is planned
+again once it does. The plan takes `PlanOptions` (purge, `previous`,
+recreate policy, ownership), the apply `ExecOptions` (dry run,
+continue on error, verify — which plans every layer again afterwards).
+`apply_reconcile_in` plans and applies again when a concurrent change
+interferes. `apply_in` / `plan_in` take a `NamespaceSpec` (named /
+path / PID — container support, #169).
 
 ```rust,no_run
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -796,20 +796,24 @@ removes addresses and routes that left the declaration.
 # use nlink::netlink::genl::wireguard::WireguardConfig;
 # let (net_cfg, fw_cfg, wg_cfg) = (NetworkConfig::new(), NftablesConfig::new(), WireguardConfig::new());
 # let container_pid = 1234;
+use nlink::ExecOptions;
 use nlink::facade::Stack;
 use nlink::netlink::NamespaceSpec;
+use nlink::netlink::config::{ApplyOptions, PlanOptions};
 
 let stack = Stack::new()
     .network(net_cfg)
     .nftables(fw_cfg)
     .wireguard(wg_cfg);
 
-let diff = stack.diff().await?;                    // pre-flight, read-only
-println!("{} pending change(s)", diff.change_count());
-let report = stack.apply().await?;                 // host netns
+let ns = NamespaceSpec::Named("lab");
+let plan = stack.plan_in(ns.clone(), PlanOptions::default().purge(true)).await?;
+println!("{plan}");                                // the dry run
+let report = plan.apply(ns, ExecOptions::new().with_verify(true)).await?;
+
+let report = stack.apply().await?;                 // host netns, plan + apply
 let report = stack.apply_in(NamespaceSpec::Pid(container_pid)).await?;
 assert!(stack.apply().await?.is_noop());           // converged
-use nlink::netlink::config::ApplyOptions;
 let report = stack                                 // reconcile: purge what left the config
     .apply_in_with(NamespaceSpec::Named("lab"), ApplyOptions::default().with_purge(true))
     .await?;

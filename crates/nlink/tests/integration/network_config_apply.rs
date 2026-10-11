@@ -771,7 +771,7 @@ async fn purge_address_devs_reaches_reconcile_and_stack() -> Result<()> {
             .apply_in_with(NamespaceSpec::Named(ns.name()), opts().with_dry_run(true))
             .await?;
         let diff = report
-            .dry_run
+            .planned
             .as_ref()
             .and_then(|d| d.network.as_ref())
             .expect("the network layer's diff");

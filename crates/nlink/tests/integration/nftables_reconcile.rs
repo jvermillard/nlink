@@ -1937,3 +1937,33 @@ async fn one_commit_moves_the_generation_by_one() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A table declared absent is deleted with what is in it, the next diff is
+/// empty, and no other table is touched (#519). Declared and absent at
+/// once is a validation error.
+#[tokio::test]
+async fn an_absent_table_is_deleted_and_stays_gone() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-absent")?;
+        let nft = ns.connection_for::<Nftables>()?;
+        cfg_with_n_rules(2).diff(&nft).await?.apply(&nft).await?;
+        nft.add_table("theirs", Family::Inet).await?;
+
+        let gone = NftablesConfig::new().absent_table("filter_rec", Family::Inet);
+        let diff = gone.diff(&nft).await?;
+        assert_eq!(diff.tables_to_delete, [(Family::Inet, "filter_rec".to_string())], "{diff}");
+        diff.apply(&nft).await?;
+        let tables: Vec<String> = nft.list_tables().await?.into_iter().map(|t| t.name).collect();
+        assert_eq!(tables, ["theirs"], "only the absent table goes");
+        assert!(gone.diff(&nft).await?.is_empty(), "absent stays absent");
+
+        let both = cfg_with_n_rules(1).absent_table("filter_rec", Family::Inet);
+        let err = both.diff(&nft).await.expect_err("declared and absent");
+        assert!(err.to_string().contains("declared and declared absent"), "{err}");
+        Ok(())
+    })
+    .await
+}

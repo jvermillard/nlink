@@ -53,7 +53,9 @@ async fn main() -> nlink::Result<()> {
         // nftables layer needs CAP_NET_ADMIN even to dump, so
         // diff-only mode inspects the network half.)
         let net_only = Stack::new().network(desired().network.unwrap());
-        let diff = net_only.diff().await?;
+        let diff = net_only
+            .plan(nlink::netlink::config::PlanOptions::default())
+            .await?;
         println!(
             "network layer drift: {} pending change(s)",
             diff.change_count()
