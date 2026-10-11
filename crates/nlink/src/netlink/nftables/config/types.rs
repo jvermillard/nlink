@@ -212,8 +212,11 @@ impl DeclaredTableBuilder {
     }
 
     /// Declare a rule with an explicit `handle_key` for diff
-    /// identity. Rules with the same key are matched across diffs;
-    /// rules without a key are re-applied on every diff.
+    /// identity. Rules with the same key are matched across diffs, so
+    /// a keyed rule whose body changes is replaced in place. A rule
+    /// declared with [`rule`](Self::rule) gets a key derived from its
+    /// chain, body and comment (#389): it converges too, but a change to
+    /// its body is a delete and an add.
     pub fn rule_keyed<F>(
         mut self,
         chain: impl AsRef<str>,
@@ -401,10 +404,12 @@ impl DeclaredChainBuilder {
         self
     }
 
-    /// Bind a [`Family::Netdev`] base chain to a specific
-    /// interface (`type filter hook ingress device eth0 priority -150`).
-    /// **Required** for netdev hooks; ignored on other
-    /// families. Mirrors the imperative [`Chain::device`](crate::netlink::nftables::types::Chain::device)
+    /// Bind a base chain to a specific interface (`type filter hook
+    /// ingress device eth0 priority -150`). **Required** for the
+    /// [`Family::Netdev`] hooks and for `Hook::InetIngress`, which
+    /// [`validate`](super::NftablesConfig::validate) checks; a recent kernel
+    /// refuses it on any other hook (`EOPNOTSUPP`). Mirrors the imperative
+    /// [`Chain::device`](crate::netlink::nftables::types::Chain::device)
     /// setter.
     pub fn device(mut self, dev: impl Into<String>) -> Self {
         self.device = Some(dev.into());
@@ -748,11 +753,11 @@ impl DeclaredSetBuilder {
 /// body. Optional `handle_key` for stable diff identity across
 /// reapplies.
 ///
-/// Without a `handle_key`, the rule is treated as anonymous: every
-/// diff sees it as "not in current state" and re-installs it. This
-/// is harmless for write-only rulesets but churns kernel state on
-/// every reconcile. For declarative configs that get re-applied,
-/// supply a `handle_key` via `DeclaredTableBuilder::rule_keyed`.
+/// Without a `handle_key`, the diff derives one from the rule's chain,
+/// body and comment (#389), so the rule converges like a keyed one; but
+/// a change to its body gives it a new key, which is a delete and an add
+/// rather than an in-place replace. Give a rule that will change a key
+/// with `DeclaredTableBuilder::rule_keyed`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -763,9 +768,9 @@ pub struct DeclaredRule {
     pub(crate) handle_key: Option<String>,
     // Plan 189: skip the expression body in JSON output —
     // the Expr tree is wire-format detail. Consumers can
-    // call `body()` programmatically for the Rust value or
-    // `Display`-render it for human-readable text. See
-    // §"Plan 189" of the migration guide.
+    // call `body()` programmatically for the Rust value (it has
+    // `Debug`, not `Display`). See §"Plan 189" of the migration
+    // guide.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) body: Rule,
 }

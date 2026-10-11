@@ -1,9 +1,10 @@
 //! Nftables multicast event types + parser.
 //!
 //! The kernel emits `NFT_MSG_NEW*` / `NFT_MSG_DEL*` notifications
-//! on `NFNLGRP_NFTABLES` (group 7) whenever a table, chain, rule,
-//! or flowtable is created or destroyed — by **any** writer on the
-//! host, not just the current process. Subscribers see the full
+//! on `NFNLGRP_NFTABLES` (group 7) whenever a table, chain, rule, set,
+//! set element, object or flowtable is created or destroyed — by **any**
+//! writer in the namespace, not just the current process — and an
+//! `NFT_MSG_NEWGEN` closing each committed batch. Subscribers see the full
 //! ruleset mutation history in real time. Use cases include
 //! reconcile-on-drift in declarative managers (Plan 157), audit
 //! pipelines, and live introspection in `nft monitor`-style tools.
@@ -31,11 +32,12 @@ use super::{
 use crate::netlink::attr::{AttrIter, get};
 
 /// `NFNLGRP_NFTABLES` (7) — the single multicast group on which
-/// the kernel announces table/chain/rule/flowtable mutations.
+/// the kernel announces ruleset mutations and new generations.
 ///
 /// All nftables events flow through this one group; the per-event
-/// "kind" (new vs del, table vs chain vs rule vs flowtable) is
-/// encoded in the `nlmsg_type` byte. Compare with conntrack which
+/// "kind" (new vs del, table vs chain vs rule vs set vs element vs
+/// object vs flowtable, or a generation) is encoded in the `nlmsg_type`
+/// byte. Compare with conntrack which
 /// uses one group per event kind.
 pub const NFNLGRP_NFTABLES: u32 = 7;
 
@@ -52,7 +54,9 @@ pub const NFNLGRP_NFTABLES: u32 = 7;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NftablesGroup {
-    /// `NFNLGRP_NFTABLES` — table/chain/rule/flowtable mutations.
+    /// `NFNLGRP_NFTABLES` — every ruleset mutation, and the
+    /// `NFT_MSG_NEWGEN` that closes each committed batch. A drift view
+    /// that wants only the ruleset filters [`NftablesEvent::NewGen`] out.
     All,
 }
 
@@ -182,8 +186,7 @@ pub(crate) fn parse_gen(attrs: &[u8]) -> Option<GenInfo> {
 
 /// Build an [`NftablesEvent`] from the netlink message type byte +
 /// the body (post-nlmsghdr). Returns `None` for messages we don't
-/// recognise (e.g. set/setelem/gen messages, error frames, other
-/// subsystems).
+/// recognise (error frames, other subsystems) or cannot parse.
 ///
 /// The body is `nfgenmsg (4 bytes) || attribute payload`. The
 /// nfgenmsg's first byte is the address family, which we feed into

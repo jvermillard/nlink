@@ -827,8 +827,9 @@ impl Connection<Nftables> {
     /// undeclared ones); also useful standalone to read a set's
     /// contents.
     ///
-    /// The key and the element flags are read; map data and timeouts are
-    /// not decoded yet. For an interval set the wire elements are paired
+    /// Each element carries its key, flags, map data (a value, verdict or
+    /// object name), timeout and time left. For an interval set the wire
+    /// elements are paired
     /// back into ranges ([`SetElement::key_end`]) — which takes one more
     /// round-trip to learn the set's flags.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_set_elements"))]
@@ -1678,10 +1679,10 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
 /// Parse the element keys out of one `NFT_MSG_GETSETELEM` dump
 /// message, appending each as a [`SetElement`] to `out`.
 ///
-/// Walks `NFTA_SET_ELEM_LIST_ELEMENTS` → per-element `NFTA_LIST_ELEM`
-/// → `NFTA_SET_ELEM_KEY` → `NFTA_DATA_VALUE` (the raw key bytes).
-/// Map data (`NFTA_SET_ELEM_DATA`) is ignored — [`SetElement`] is
-/// key-only. Per parser-robustness rule 3, malformed nests are
+/// Walks `NFTA_SET_ELEM_LIST_ELEMENTS` → per-element `NFTA_LIST_ELEM`,
+/// and reads each element's key (and range end), flags, map data
+/// (`NFTA_SET_ELEM_DATA` or `NFTA_SET_ELEM_OBJREF`), timeout and
+/// expiration. Per parser-robustness rule 3, malformed nests are
 /// silently skipped (no element pushed) rather than aborting the
 /// whole dump.
 pub(crate) fn parse_set_elements(data: &[u8], out: &mut Vec<SetElement>) {
@@ -2176,11 +2177,10 @@ impl Transaction {
     /// Add a set creation to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::add_set`](Connection).
     ///
-    /// The per-transaction `NFTA_SET_ID` is set to the message's
-    /// sequence number so it's unique within the batch (the kernel
-    /// uses it to disambiguate sets created in the same
-    /// transaction; element adds reference the set by name, so they
-    /// don't need it).
+    /// The per-transaction `NFTA_SET_ID` comes from a counter in the
+    /// transaction, so it is unique within the batch (the kernel uses it
+    /// to disambiguate sets created in the same transaction; element adds
+    /// reference the set by name, so they don't need it).
     pub fn add_set(self, set: Set) -> Self {
         self.push_newset(set, NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL)
     }

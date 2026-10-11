@@ -46,6 +46,30 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Documentation that contradicted the code (#511).** About 35
+  statements, each checked against the source. Those that later fixes in
+  this cycle had made true, or had already rewritten, are left as they
+  are. The rest are corrected, among them:
+  - the `NetworkConfig` supported-resources list and its purge
+    descriptions;
+  - the nftables event docs, which said sets, elements, objects and
+    `NewGen` were dropped;
+  - rule identity without a key (#389);
+  - `list_set_elements` decoding;
+  - `NFTA_SET_ID`, `InetProto`'s length, and `apply()`'s one
+    non-atomic batch;
+  - chain devices on non-netdev hooks;
+  - `wait_link_up`;
+  - the mutex-mode stream lock;
+  - `execute_in` and `/proc/thread-self/net`;
+  - the reflector example, which printed an empty cache;
+  - which namespaces get non-net uevents;
+  - examples that stopped at the first `ENOBUFS`;
+  - the WireGuard key-readback docs and `WgPeerFlags::UpdateOnly`.
+
+  Newly documented: what a `log` statement needs in a network namespace
+  (`nf_log_all_netns`, `nf_log_syslog`).
+
 - **`RateLimiter` touched what it did not own, and its ceiling was out of
   reach (#490).**
   - **`remove()`** deleted whatever root and ingress qdiscs were there,

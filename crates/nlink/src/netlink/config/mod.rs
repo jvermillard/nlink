@@ -43,10 +43,12 @@
 //!
 //! # Supported Resources
 //!
-//! - Links (interfaces): dummy, veth, bridge, vlan, vxlan, macvlan, bond
+//! - Links (interfaces): dummy, veth, bridge, vlan, vxlan, macvlan, bond,
+//!   ifb, vrf, netkit, ovpn, and existing devices declared without a kind
 //! - Addresses: IPv4 and IPv6
-//! - Routes: IPv4 and IPv6, with gateway, device, or multipath
-//! - Qdiscs: netem, htb, fq_codel, tbf, etc.
+//! - Routes: IPv4 and IPv6, unicast (with a gateway, a device, or both),
+//!   blackhole, unreachable and prohibit, in any table; not multipath
+//! - Qdiscs: netem, htb, fq_codel, tbf, sfq, prio, ingress, clsact
 
 mod apply;
 mod diff;
@@ -90,11 +92,12 @@ impl NetworkConfig {
 
     /// Compute the diff with explicit [`DiffOptions`].
     ///
-    /// The only option today is [`DiffOptions::purge`]: with it on,
-    /// the returned diff additionally carries
-    /// [`ConfigDiff::addresses_to_remove`] /
-    /// [`ConfigDiff::routes_to_remove`] for undeclared kernel
-    /// resources (conservatively scoped — see [`DiffOptions::purge`]).
+    /// With [`DiffOptions::purge`] on, the returned diff additionally
+    /// carries [`ConfigDiff::addresses_to_remove`] /
+    /// [`ConfigDiff::routes_to_remove`] for undeclared kernel resources
+    /// (conservatively scoped — see [`DiffOptions::purge`]), and
+    /// [`DiffOptions::purge_tables`] / [`DiffOptions::purge_address_devs`]
+    /// widen that scope.
     /// The default ([`Self::diff`]) never populates the removal
     /// collections, so it can only ever *add* state.
     ///
@@ -151,7 +154,9 @@ impl NetworkConfig {
     ///
     /// - `dry_run`: Compute diff but don't make any changes
     /// - `continue_on_error`: Keep going if some operations fail
-    /// - `purge`: Remove resources not in the config
+    /// - `purge`: also remove undeclared addresses and routes, in the scope
+    ///   [`DiffOptions::purge`] sets out. Links and qdiscs are never
+    ///   removed.
     ///
     /// # Example
     ///

@@ -1244,9 +1244,15 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
 ///
 /// The closure runs on the **calling** thread; if the restore afterwards
 /// fails, that thread stays in the target namespace (see [`enter`]'s
-/// warning). When the closure is `Send + 'static`, prefer spawning a
+/// warning), and the restore's error is returned — the closure's result
+/// is lost. When the closure is `Send + 'static`, prefer spawning a
 /// scoped thread that enters the namespace and exits without restoring —
 /// the pattern the [`get_sysctl`]-family helpers use internally (#185).
+///
+/// Reading the namespace's `/proc` files: `/proc/net` is a link to
+/// `/proc/self/net`, which follows the thread-group leader, so in a
+/// multithreaded program it shows the **main thread's** namespace. Read
+/// `/proc/thread-self/net` instead.
 ///
 /// # Example
 ///
@@ -1256,7 +1262,7 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
 ///
 /// let result = namespace::execute_in("myns", || {
 ///     // Code here runs in "myns" namespace
-///     std::fs::read_to_string("/proc/net/dev")
+///     std::fs::read_to_string("/proc/thread-self/net/dev")
 /// })??;
 /// // Back in original namespace
 /// # Ok(())
@@ -1274,7 +1280,8 @@ where
 
 /// Execute a function in a network namespace specified by path.
 ///
-/// See [`execute_in`] for details.
+/// See [`execute_in`] for details, including what a failed restore does
+/// with the closure's result.
 pub fn execute_in_path<F, T, P: AsRef<Path>>(path: P, f: F) -> Result<T>
 where
     F: FnOnce() -> T,

@@ -38,7 +38,7 @@
 //!
 //! use nlink::NetworkEvent;
 //! use nlink::netlink::reflector::{ReflectExt, Store, StoreOp};
-//! use nlink::netlink::resync::ConnectionFactory;
+//! use nlink::netlink::resync::{ConnectionFactory, ResyncMarker, ResyncedEvent};
 //! use tokio_stream::StreamExt;
 //!
 //! let factory: ConnectionFactory<nlink::Route> =
@@ -46,16 +46,24 @@
 //! let store: Store<u32, NetworkEvent> = Store::new();
 //! let reader = store.clone();
 //!
-//! // Drive the reflector in the background…
-//! let watch = conn.into_events_with_resync(factory).await?.reflect(store, |ev| {
+//! let mut watch = conn.into_events_with_resync(factory).await?.reflect(store, |ev| {
 //!     match ev {
 //!         NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
 //!         NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
 //!         _ => StoreOp::Ignore,
 //!     }
 //! });
+//!
+//! // The stream opens with the state as it is, closed by `ResyncEnd`
+//! // (#503); the cache is empty until it has been read.
+//! while let Some(item) = watch.next().await {
+//!     if matches!(item?, ResyncedEvent::Marker(ResyncMarker::ResyncEnd)) {
+//!         break;
+//!     }
+//! }
+//!
+//! // Drive the reflector in the background…
 //! tokio::spawn(async move {
-//!     let mut watch = watch;
 //!     while let Some(item) = watch.next().await {
 //!         let _ = item; // pass-through; handle/log if you like
 //!     }

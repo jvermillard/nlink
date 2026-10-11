@@ -1296,12 +1296,11 @@ impl Chain {
         self
     }
 
-    /// Bind a `Family::Netdev` base chain to a specific
-    /// interface (`type filter hook ingress device eth0
-    /// priority -150`). **Required** for netdev hooks
-    /// (`Hook::Ingress`/`Egress` with `Family::Netdev`) —
-    /// without this the kernel rejects the chain. Ignored on
-    /// non-netdev families.
+    /// Bind a base chain to a specific interface (`type filter hook
+    /// ingress device eth0 priority -150`). **Required** for the netdev
+    /// hooks ([`Hook::NetdevIngress`]/[`Hook::NetdevEgress`]) and for
+    /// [`Hook::InetIngress`] — without it the kernel rejects the chain.
+    /// On any other hook a recent kernel refuses it (`EOPNOTSUPP`).
     pub fn device(mut self, dev: impl Into<String>) -> Self {
         self.device = Some(dev.into());
         self
@@ -1839,6 +1838,13 @@ impl Rule {
 
     /// Log packet with optional prefix. For an `nflog` group, push a
     /// [`LogExpr`](super::expr::LogExpr) with [`expr`](Self::expr).
+    ///
+    /// Two things every namespace user meets. To syslog, a `log` in any
+    /// namespace but the initial one writes **nothing** unless the host sets
+    /// `net.netfilter.nf_log_all_netns=1` (`nf_log_allowed()`); an `nflog`
+    /// group has no such limit. And the logger is the `nf_log_syslog` module:
+    /// where it cannot be loaded, the rule — and the whole batch with it —
+    /// fails with `ENOENT`.
     pub fn log(mut self, prefix: Option<&str>) -> Self {
         let mut log = super::expr::LogExpr::new();
         if let Some(prefix) = prefix {
@@ -2748,8 +2754,9 @@ pub enum SetKeyType {
     ClassId,
     /// Mark value (4 bytes).
     Mark,
-    /// IP protocol number — single u8 padded to 4 bytes
-    /// (`tcp` = 6, `udp` = 17, `icmp` = 1). Plan 198 §2.1.
+    /// IP protocol number — a single byte (`tcp` = 6, `udp` = 17,
+    /// `icmp` = 1); padded to 4 only as a field of a concatenation.
+    /// Plan 198 §2.1.
     InetProto,
     /// Concatenated key — packs multiple component keys
     /// end-to-end with 4-byte alignment between. Common in

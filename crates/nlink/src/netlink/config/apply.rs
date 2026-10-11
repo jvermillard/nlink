@@ -104,8 +104,8 @@ impl ApplyOptions {
 
     /// Toggle purge (full-reconcile removals). With purge on, `apply`
     /// computes the diff with [`DiffOptions::purge`] so undeclared
-    /// global addresses and `static`/`boot` main-table routes are
-    /// removed in addition to the additive changes. See
+    /// global addresses and `static`/`boot` routes in the tables the
+    /// config owns are removed in addition to the additive changes. See
     /// [`DiffOptions::purge`] for the exact safety scope.
     pub fn with_purge(mut self, on: bool) -> Self {
         self.purge = on;
