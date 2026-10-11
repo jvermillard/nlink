@@ -1332,3 +1332,63 @@ async fn link_attributes_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// IPv4 devconf, the IPv6 address generation mode and the token changed
+/// A→B on a veth (#516): set over netlink, before the link comes up, and
+/// read back from `/proc/sys`, `ip -d link` and `ip token`. A dummy is
+/// `NOARP`, which the kernel refuses a token on.
+#[tokio::test]
+async fn devconf_changes_in_place() -> nlink::Result<()> {
+    use nlink::netlink::devconf::{AddrGenMode, Ipv4Devconf};
+    use std::net::Ipv6Addr;
+    require_root!();
+    nlink::require_modules!("veth");
+
+    let step = |rp: u32, fwd: u32, arp_ignore: u32, mode: AddrGenMode, token: &str| {
+        let token: Ipv6Addr = token.parse().unwrap();
+        NetworkConfig::new()
+            .link("v0", move |l| {
+                l.veth("v1")
+                    .ipv4_conf(Ipv4Devconf::RpFilter, rp)
+                    .ipv4_conf(Ipv4Devconf::Forwarding, fwd)
+                    .ipv4_conf(Ipv4Devconf::ArpIgnore, arp_ignore)
+                    .addr_gen_mode(mode)
+                    .ipv6_token(token)
+                    .up()
+            })
+            .link("v1", |l| l.up())
+    };
+    let steps = [
+        step(1, 1, 1, AddrGenMode::None, "::1:2"),
+        step(0, 0, 2, AddrGenMode::Eui64, "::3:4"),
+    ];
+    let want = [("1", "1", "1", "none", "::1:2"), ("0", "0", "2", "eui64", "::3:4")];
+    let ns = TestNamespace::new("tr-devconf")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let conf = |name: &str| {
+            ns.exec("cat", &[&format!("/proc/sys/net/ipv4/conf/v0/{name}")])
+                .map(|s| s.trim().to_string())
+                .map_err(|e| e.to_string())
+        };
+        let link = &ip_json(&ns, &["-d", "link", "show", "v0"])?[0];
+        let tokens = ns
+            .exec("ip", &["-j", "token", "get", "dev", "v0"])
+            .map_err(|e| e.to_string())?;
+        let tokens: serde_json::Value = serde_json::from_str(&tokens).map_err(|e| e.to_string())?;
+        let token: Option<Ipv6Addr> = tokens[0]["token"].as_str().and_then(|t| t.parse().ok());
+        let (rp, fwd, ign, mode, want_token) = want[i];
+        let have = (
+            conf("rp_filter")?,
+            conf("forwarding")?,
+            conf("arp_ignore")?,
+            link["inet6_addr_gen_mode"].as_str().unwrap_or("").to_string(),
+            token,
+        );
+        let want = (rp.into(), fwd.into(), ign.into(), mode.to_string(), want_token.parse().ok());
+        if have != want {
+            return Err(format!("step {}: want {want:?}, have {have:?}", i + 1));
+        }
+        Ok(())
+    })
+    .await
+}

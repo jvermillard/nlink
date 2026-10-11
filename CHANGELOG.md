@@ -755,6 +755,34 @@ All notable changes to this project will be documented in this file.
     converges, as checked through `ip -j -d link` on iproute2 6.15 and
     6.1. It fails with the attributes unset.
 
+- **Per-link IPv4 devconf, IPv6 address generation mode and token,
+  declared and set over netlink (#516, row 4).**
+  - **Builder.** `LinkBuilder::ipv4_conf(Ipv4Devconf, value)` sets
+    `/proc/sys/net/ipv4/conf/<dev>/<name>` through `RTM_SETLINK`
+    (`IFLA_AF_SPEC`/`AF_INET`/`IFLA_INET_CONF`). `addr_gen_mode` and
+    `ipv6_token` are the IPv6 ones the kernel takes over netlink. All
+    three go in before the link comes up, where `addrgenmode` needs them;
+    nlink-lab's per-interface sysctl on a declared VLAN used to fail,
+    running before the link existed.
+  - **JSON form.** `"ipv4-conf": {"rp_filter": 2}`, `"addr-gen-mode":
+    "none"`, `"ipv6-token": "::1:2"`.
+  - **Validation.** An unknown setting name and a token whose upper 64
+    bits aren't zero are validation errors.
+  - **New module.** `nlink::netlink::devconf` has `Ipv4Devconf` (all 33
+    `IPV4_DEVCONF_*`, by sysctl name) and `AddrGenMode`. Both are checked
+    by the UAPI audit.
+  - **Reading back.** `LinkMessage` reads `IFLA_AF_SPEC`'s inet parts:
+    `ipv4_devconf(..)`, `ipv6_devconf_raw(id)`, `addr_gen_mode()` and
+    `ipv6_token()`.
+  - **Setters.** `set_ipv4_devconf_by_index`, `set_addr_gen_mode_by_index`
+    and `set_ipv6_token_by_index`.
+  - **Undo.** A link change's inverse restores the old values; `::`
+    clears a token.
+  - **Test.** A transition test changes `rp_filter`, `forwarding`,
+    `arp_ignore`, the mode and the token A→B on a veth. It is read back
+    from `/proc/sys`, `ip -d link` and `ip token`, on iproute2 6.15 and
+    6.1, and fails with the devconf never written.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

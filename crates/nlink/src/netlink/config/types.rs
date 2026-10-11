@@ -185,6 +185,22 @@ impl NetworkConfig {
                     ));
                 }
             }
+            for name in l.attrs.ipv4_conf.keys() {
+                if crate::netlink::devconf::Ipv4Devconf::from_name(name).is_none() {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        format!("ipv4-conf: no IPv4 device setting is called {name:?}"),
+                    ));
+                }
+            }
+            if let Some(token) = l.attrs.ipv6_token
+                && token.octets()[..8] != [0; 8]
+            {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    format!("ipv6-token {token}: an interface identifier has its upper 64 bits zero"),
+                ));
+            }
             for altname in l.attrs.altnames.iter().flatten() {
                 let bad = altname.is_empty()
                     || altname.len() > 127
@@ -775,6 +791,19 @@ pub(crate) struct LinkAttrs {
     /// The alternative names: exactly these, when declared.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) altnames: Option<Vec<String>>,
+    /// IPv4 per-device settings by sysctl name (`rp_filter`, `forwarding`,
+    /// …), set over netlink before the link comes up.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")
+    )]
+    pub(crate) ipv4_conf: std::collections::BTreeMap<String, u32>,
+    /// How the kernel makes the IPv6 link-local address.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) addr_gen_mode: Option<crate::netlink::devconf::AddrGenMode>,
+    /// The IPv6 interface identifier token (`ip token`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) ipv6_token: Option<std::net::Ipv6Addr>,
 }
 
 impl LinkAttrs {
@@ -1606,6 +1635,37 @@ impl LinkBuilder {
             .altnames
             .get_or_insert_with(Vec::new)
             .push(altname.to_string());
+        self
+    }
+
+    /// An IPv4 per-device setting (`/proc/sys/net/ipv4/conf/<dev>/<name>`),
+    /// set over netlink before the link comes up (#516).
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use nlink::netlink::devconf::Ipv4Devconf;
+    /// let cfg = NetworkConfig::new()
+    ///     .link("v0", |l| l.ipv4_conf(Ipv4Devconf::RpFilter, 2).ipv4_conf(Ipv4Devconf::Forwarding, 1));
+    /// cfg.validate().unwrap();
+    /// ```
+    pub fn ipv4_conf(mut self, setting: crate::netlink::devconf::Ipv4Devconf, value: u32) -> Self {
+        self.attrs.ipv4_conf.insert(setting.name().to_string(), value);
+        self
+    }
+
+    /// How the kernel makes the link's IPv6 link-local address
+    /// (`addrgenmode`). Set before the link comes up, when it applies.
+    pub fn addr_gen_mode(mut self, mode: crate::netlink::devconf::AddrGenMode) -> Self {
+        self.attrs.addr_gen_mode = Some(mode);
+        self
+    }
+
+    /// The IPv6 interface identifier SLAAC uses in place of the
+    /// MAC-derived one (`ip token set ::1:2/64`): its upper 64 bits zero.
+    /// The kernel takes it only on a device that does neighbour discovery
+    /// and accepts router advertisements: not a dummy (`NOARP`).
+    pub fn ipv6_token(mut self, token: std::net::Ipv6Addr) -> Self {
+        self.attrs.ipv6_token = Some(token);
         self
     }
 
@@ -4182,6 +4242,47 @@ mod serde_roundtrip_tests {
         ] {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(says), "{says}: {err}");
+        }
+    }
+
+    #[test]
+    fn devconf_roundtrips_and_validates() {
+        use crate::netlink::devconf::{AddrGenMode, Ipv4Devconf};
+        let cfg = NetworkConfig::new().link("v0", |l| {
+            l.veth("v1")
+                .ipv4_conf(Ipv4Devconf::RpFilter, 2)
+                .ipv4_conf(Ipv4Devconf::NoPolicy, 1)
+                .addr_gen_mode(AddrGenMode::StablePrivacy)
+                .ipv6_token("::1:2".parse().unwrap())
+        });
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""ipv4-conf":{"disable_policy":1,"rp_filter":2}"#,
+            r#""addr-gen-mode":"stable_secret""#,
+            r#""ipv6-token":"::1:2""#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        let err = NetworkConfig::new()
+            .link("v0", |l| l.ipv6_token("2001:db8::1".parse().unwrap()))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("upper 64 bits zero"), "{err}");
+        for (doc, says) in [
+            (
+                r#"{"links":[{"name":"v0","link-type":"physical","ipv4-conf":{"rp_filtre":1}}]}"#,
+                "no IPv4 device setting is called \"rp_filtre\"",
+            ),
+            (
+                r#"{"links":[{"name":"v0","link-type":"physical","addr-gen-mode":"eui48"}]}"#,
+                "unknown addrgenmode",
+            ),
+        ] {
+            let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();
+            assert!(err.contains(says), "{doc}: {err}");
         }
     }
 

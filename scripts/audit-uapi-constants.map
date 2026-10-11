@@ -13,6 +13,11 @@
 IflaAttr = IFLA
     TxqLen -> TXQLEN
 IflaInfo = IFLA_INFO
+Ipv4Devconf = IPV4_DEVCONF
+    ArpFilter -> ARPFILTER
+    NoXfrm -> NOXFRM
+    NoPolicy -> NOPOLICY
+AddrGenMode = IN6_ADDR_GEN_MODE
 IfaAttr = IFA
 RtaAttr = RTA
 RouteScope = RT_SCOPE

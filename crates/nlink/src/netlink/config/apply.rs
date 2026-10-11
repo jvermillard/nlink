@@ -1038,7 +1038,10 @@ async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChan
         || changes.set_promisc.is_some()
         || changes.set_protodown.is_some()
         || !changes.add_altnames.is_empty()
-        || !changes.del_altnames.is_empty();
+        || !changes.del_altnames.is_empty()
+        || !changes.set_ipv4_conf.is_empty()
+        || changes.set_addr_gen_mode.is_some()
+        || changes.set_ipv6_token.is_some();
     if !has_any {
         return Ok(());
     }
@@ -1076,6 +1079,16 @@ async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChan
     }
     for altname in &changes.add_altnames {
         conn.add_link_altname_by_index(ifindex, altname).await?;
+    }
+    if !changes.set_ipv4_conf.is_empty() {
+        conn.set_ipv4_devconf_by_index(ifindex, &changes.set_ipv4_conf)
+            .await?;
+    }
+    if let Some(mode) = changes.set_addr_gen_mode {
+        conn.set_addr_gen_mode_by_index(ifindex, mode).await?;
+    }
+    if let Some(token) = changes.set_ipv6_token {
+        conn.set_ipv6_token_by_index(ifindex, token).await?;
     }
     Ok(())
 }

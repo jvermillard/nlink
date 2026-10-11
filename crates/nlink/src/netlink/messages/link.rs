@@ -32,6 +32,7 @@ mod attr_ids {
     pub const IFLA_MAX_MTU: u16 = 51;
     pub const IFLA_PERM_ADDRESS: u16 = 54;
     pub const IFLA_PROTO_DOWN: u16 = 39;
+    pub const IFLA_AF_SPEC: u16 = 26;
     pub const IFLA_PROP_LIST: u16 = 52;
     pub const IFLA_ALT_IFNAME: u16 = 53;
     // Plan 190 §2.3c — GSO/GRO/TSO caps.
@@ -121,6 +122,9 @@ pub struct LinkMessage {
     pub(crate) proto_down: Option<bool>,
     /// Alternative names (IFLA_PROP_LIST / IFLA_ALT_IFNAME).
     pub(crate) altnames: Vec<String>,
+    /// The IPv4 and IPv6 parts of IFLA_AF_SPEC: devconf, address
+    /// generation mode, token (#516).
+    pub(crate) inet: Option<crate::netlink::devconf::InetAfSpec>,
 }
 
 /// Link type information from IFLA_LINKINFO.
@@ -362,6 +366,33 @@ impl LinkMessage {
     /// The link's alternative names (`ip link property add … altname`).
     pub fn altnames(&self) -> &[String] {
         &self.altnames
+    }
+
+    /// An IPv4 per-device setting (`/proc/sys/net/ipv4/conf/<dev>/<name>`),
+    /// from the dump's `IFLA_AF_SPEC` (#516). `None` for a device with no
+    /// IPv4 configuration, or a kernel that did not report it.
+    pub fn ipv4_devconf(&self, d: crate::netlink::devconf::Ipv4Devconf) -> Option<u32> {
+        self.inet.as_ref()?.ipv4(d)
+    }
+
+    /// An IPv6 per-device setting by its `DEVCONF_*` id
+    /// (`linux/ipv6.h`), from the dump's `IFLA_AF_SPEC`.
+    pub fn ipv6_devconf_raw(&self, id: usize) -> Option<i32> {
+        self.inet.as_ref()?.ipv6_conf.as_ref()?.get(id).copied()
+    }
+
+    /// How the kernel makes the link's IPv6 link-local address.
+    pub fn addr_gen_mode(&self) -> Option<crate::netlink::devconf::AddrGenMode> {
+        crate::netlink::devconf::AddrGenMode::from_u8(self.inet.as_ref()?.addr_gen_mode?)
+    }
+
+    /// The link's IPv6 interface identifier token (`ip token`); `None`
+    /// when unset (`::`).
+    pub fn ipv6_token(&self) -> Option<std::net::Ipv6Addr> {
+        self.inet
+            .as_ref()?
+            .ipv6_token
+            .filter(|t| !t.is_unspecified())
     }
 
     /// Get the master device index.
@@ -706,6 +737,11 @@ impl FromNetlink for LinkMessage {
                 }
                 // Plan 190 §2.3c — GSO/GRO/TSO cap parsing.
                 // accept-larger-than-expected per CLAUDE.md §"Parser robustness" rule 1.
+                // A bridge-family dump's AF_SPEC holds IFLA_BRIDGE_*, whose
+                // ids overlap AF_INET's.
+                attr_ids::IFLA_AF_SPEC if msg.header.ifi_family != libc::AF_BRIDGE as u8 => {
+                    msg.inet = Some(crate::netlink::devconf::InetAfSpec::parse(attr_data));
+                }
                 attr_ids::IFLA_PROTO_DOWN if !attr_data.is_empty() => {
                     msg.proto_down = Some(attr_data[0] != 0);
                 }
