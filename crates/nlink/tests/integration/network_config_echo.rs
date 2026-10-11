@@ -322,6 +322,64 @@ async fn a_declared_link_that_does_not_exist_is_reported() -> nlink::Result<()> 
     Ok(())
 }
 
+/// Blockers are typed, and a recreate that goes through is reported with
+/// what it lost (#513).
+#[tokio::test]
+async fn a_recreate_is_reported_and_its_blockers_are_typed() -> nlink::Result<()> {
+    use nlink::netlink::config::Blocker;
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let ns = TestNamespace::new("nce-typed")?;
+    let conn = ns.connection()?;
+    let vlan = |id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v1", |l| l.vlan("d0", id).up())
+    };
+    let first = vlan(10).apply(&conn).await?;
+    assert!(first.recreated.is_empty());
+
+    // An address the config does not declare blocks the recreate.
+    ns.exec("ip", &["addr", "add", "10.70.0.1/24", "dev", "v1"])?;
+    let diff = vlan(20).diff(&conn).await?;
+    let refused = diff
+        .links_to_recreate
+        .iter()
+        .find(|r| r.name == "v1")
+        .expect("v1 is recreated");
+    assert!(
+        refused.blocked_by.iter().any(|b| matches!(
+            b,
+            Blocker::Address { dev, address, prefix_len: 24 }
+                if dev == "v1" && address.to_string() == "10.70.0.1"
+        )),
+        "{refused}"
+    );
+
+    // Without it, the recreate goes through and says what it lost.
+    ns.exec("ip", &["addr", "del", "10.70.0.1/24", "dev", "v1"])?;
+    conn.set_link_alias("v1", "uplink").await?;
+    let applied = vlan(20).apply(&conn).await?;
+    let done = applied
+        .recreated
+        .iter()
+        .find(|r| r.name == "v1")
+        .expect("the result reports the recreate");
+    assert!(done.reason.contains("vlan id 10 -> 20"), "{done}");
+    assert!(
+        done.resets.iter().any(|r| r.contains("alias")),
+        "{:?}",
+        done.resets
+    );
+    assert!(
+        done.resets.iter().any(|r| r.contains("MAC address")),
+        "{:?}",
+        done.resets
+    );
+    Ok(())
+}
+
 /// A parent or master a declared link names, which the config does not
 /// declare and which does not exist, is reported with the missing links.
 /// The apply used to create what came before it and then fail (#518).

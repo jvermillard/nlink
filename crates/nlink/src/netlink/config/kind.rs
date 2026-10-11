@@ -116,10 +116,264 @@ pub struct LinkRecreate {
     /// link it is stacked on.
     pub reason: String,
     /// What deleting the link would destroy that the config does not
-    /// declare, and so cannot restore. Non-empty means the apply refuses,
-    /// with [`Error::NotSupported`](crate::Error::NotSupported), rather than
+    /// declare, and so cannot restore, or why it cannot be recreated at
+    /// all. Non-empty means the apply refuses, with
+    /// [`Error::NotSupported`](crate::Error::NotSupported), rather than
     /// recreate the link; nothing else in the diff depends on it then.
-    pub blocked_by: Vec<String>,
+    /// Typed since 0.32 (#513); each blocker's `Display` is the text the
+    /// list held before.
+    pub blocked_by: Vec<Blocker>,
+    /// What the recreated link loses that the config does not declare and
+    /// the kernel does not keep: its alias, and a MAC address the kernel
+    /// picks again (#513). Its sysctls (`net.ipv4.conf.<link>.*`,
+    /// `net.ipv6.conf.<link>.*`) return to their defaults too.
+    pub resets: Vec<String>,
+}
+
+/// One reason a link cannot be recreated (#513): something deleting it
+/// would destroy that the config does not declare, or a link that cannot
+/// be recreated at all.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "kind",
+        rename_all = "kebab-case",
+        rename_all_fields = "kebab-case"
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Blocker {
+    /// An address the config does not declare, on the link or on one the
+    /// kernel deletes or flushes with it.
+    Address {
+        /// The device it is on.
+        dev: String,
+        /// The address.
+        address: IpAddr,
+        /// Its prefix length.
+        prefix_len: u8,
+    },
+    /// A route the config does not declare through the link.
+    Route {
+        /// The device it goes through.
+        dev: String,
+        /// Its destination.
+        destination: IpAddr,
+        /// Its prefix length.
+        prefix_len: u8,
+        /// Its table.
+        table: u32,
+        /// The nexthop object it uses, if any.
+        nhid: Option<u32>,
+        /// How it goes through the device, when not as its output
+        /// device (`"via a nexthop object on"`, …).
+        through: Option<String>,
+    },
+    /// A qdisc the config does not declare, or one under a class, which
+    /// it cannot declare.
+    Qdisc {
+        /// The device it is on.
+        dev: String,
+        /// Its kind.
+        qdisc: String,
+        /// Its handle and parent, for one under a class.
+        under: Option<(crate::TcHandle, crate::TcHandle)>,
+    },
+    /// A class someone made (HTB, HFSC, DRR, QFQ, CBQ).
+    Class {
+        /// The device it is on.
+        dev: String,
+        /// Its qdisc's kind.
+        qdisc: String,
+        /// Its handle.
+        handle: crate::TcHandle,
+    },
+    /// A filter.
+    Filter {
+        /// The device it is on.
+        dev: String,
+        /// Its kind.
+        filter: String,
+        /// Its priority.
+        priority: u16,
+        /// Its parent.
+        parent: crate::TcHandle,
+    },
+    /// An FDB entry a user or a controller made.
+    Fdb {
+        /// How `bridge fdb` would name it.
+        entry: String,
+        /// The link it sends through, when it is on another device: it
+        /// would point at the deleted link's old ifindex.
+        via: Option<String>,
+    },
+    /// A permanent or externally learned neighbour.
+    Neighbour {
+        /// The device it is on.
+        dev: String,
+        /// Its address.
+        destination: IpAddr,
+        /// Permanent rather than externally learned.
+        permanent: bool,
+    },
+    /// A proxy neighbour.
+    ProxyNeighbour {
+        /// The device it is on.
+        dev: String,
+        /// Its address.
+        destination: IpAddr,
+    },
+    /// A nexthop object.
+    Nexthop {
+        /// The device it is on.
+        dev: String,
+        /// Its id.
+        id: u32,
+        /// Its gateway, if any.
+        via: Option<IpAddr>,
+    },
+    /// A link stacked on the recreated one, which the kernel deletes with
+    /// it, and which the config does not create.
+    StackedLink {
+        /// The link.
+        name: String,
+        /// Its kind.
+        link_kind: String,
+        /// The link it is on.
+        lower: String,
+        /// The config declares it, but as an existing device, not one to
+        /// create.
+        declared_existing: bool,
+    },
+    /// A port the kernel releases when its master is deleted.
+    Port {
+        /// The port.
+        name: String,
+        /// Its master.
+        master: String,
+    },
+    /// A veth's or vxcan's peer in another namespace, which the kernel
+    /// deletes with it and nothing here can declare.
+    ForeignNetnsPeer {
+        /// The link whose peer it is.
+        link: String,
+        /// The peer's namespace, as this one numbers it.
+        netnsid: i32,
+    },
+    /// The link cannot be recreated at all: a device with no link kind,
+    /// a pair whose peer a recreate would delete, ….
+    Unsupported {
+        /// Why.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for Blocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Address {
+                dev,
+                address,
+                prefix_len,
+            } => write!(f, "address {address}/{prefix_len} on {dev}"),
+            Self::Route {
+                dev,
+                destination,
+                prefix_len,
+                table,
+                nhid,
+                through,
+            } => {
+                let nhid = nhid.map(|id| format!(" nhid {id}")).unwrap_or_default();
+                match through {
+                    None => write!(
+                        f,
+                        "route {destination}/{prefix_len}{nhid} dev {dev} table {table}"
+                    ),
+                    Some(how) => {
+                        write!(
+                            f,
+                            "route {destination}/{prefix_len}{nhid} table {table}, {how} {dev}"
+                        )
+                    }
+                }
+            }
+            Self::Qdisc { dev, qdisc, under } => match under {
+                None => write!(f, "qdisc {qdisc} on {dev}"),
+                Some((handle, parent)) => {
+                    write!(f, "qdisc {qdisc} {handle} on {dev} (under {parent})")
+                }
+            },
+            Self::Class { dev, qdisc, handle } => write!(f, "class {qdisc} {handle} on {dev}"),
+            Self::Filter {
+                dev,
+                filter,
+                priority,
+                parent,
+            } => write!(
+                f,
+                "filter {filter} pref {priority} on {dev} (parent {parent})"
+            ),
+            Self::Fdb { entry, via } => match via {
+                None => f.write_str(entry),
+                Some(link) => write!(
+                    f,
+                    "{entry} via {link}, which would point at the deleted {link}"
+                ),
+            },
+            Self::Neighbour {
+                dev,
+                destination,
+                permanent,
+            } => {
+                let what = if *permanent {
+                    "permanent"
+                } else {
+                    "externally learned"
+                };
+                write!(f, "neighbour {destination} dev {dev} ({what})")
+            }
+            Self::ProxyNeighbour { dev, destination } => {
+                write!(f, "proxy neighbour {destination} dev {dev}")
+            }
+            Self::Nexthop { dev, id, via } => {
+                let via = via.map(|g| format!(" via {g}")).unwrap_or_default();
+                write!(f, "nexthop id {id}{via} dev {dev}")
+            }
+            Self::StackedLink {
+                name,
+                link_kind,
+                lower,
+                declared_existing,
+            } => {
+                write!(
+                    f,
+                    "link {name} ({link_kind} on {lower}), which the kernel deletes with it"
+                )?;
+                if *declared_existing {
+                    f.write_str(
+                        " and the config declares as an existing device, not one to create",
+                    )?;
+                }
+                Ok(())
+            }
+            Self::Port { name, master } => {
+                write!(
+                    f,
+                    "link {name}, a port of {master}, which the kernel releases"
+                )
+            }
+            Self::ForeignNetnsPeer { link, netnsid } => write!(
+                f,
+                "the peer of {link}, in another namespace (netnsid {netnsid}), which the kernel \
+                 deletes with it"
+            ),
+            Self::Unsupported { reason } => f.write_str(reason),
+        }
+    }
 }
 
 impl LinkRecreate {
@@ -141,7 +395,11 @@ impl std::fmt::Display for LinkRecreate {
                  declare: {})",
                 self.name,
                 self.reason,
-                self.blocked_by.join(", ")
+                self.blocked_by
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         }
     }
@@ -782,17 +1040,19 @@ fn route_through(
         .then_some("with a multipath nexthop on")
 }
 
-fn route_label(r: &RouteMessage, name: &str, how: &str) -> String {
-    let dst = r.destination.unwrap_or(if r.is_ipv4() {
+fn route_label(r: &RouteMessage, name: &str, how: &str) -> Blocker {
+    let destination = r.destination.unwrap_or(if r.is_ipv4() {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     } else {
         IpAddr::V6(Ipv6Addr::UNSPECIFIED)
     });
-    let nhid = r.nh_id().map(|id| format!(" nhid {id}")).unwrap_or_default();
-    if how.is_empty() {
-        format!("route {dst}/{}{nhid} dev {name} table {}", r.dst_len(), r.table_id())
-    } else {
-        format!("route {dst}/{}{nhid} table {}, {how} {name}", r.dst_len(), r.table_id())
+    Blocker::Route {
+        dev: name.to_string(),
+        destination,
+        prefix_len: r.dst_len(),
+        table: r.table_id(),
+        nhid: r.nh_id(),
+        through: (!how.is_empty()).then(|| how.to_string()),
     }
 }
 
@@ -871,12 +1131,7 @@ fn fdb_label(e: &NeighborMessage, names: &HashMap<u32, &str>) -> String {
 
 /// What deleting or flushing one link destroys that cannot be declared:
 /// its user-made neighbours and proxy entries, and its nexthop objects.
-fn undeclarable_on(
-    ifindex: u32,
-    name: &str,
-    extras: &LinkExtras,
-    blocked_by: &mut Vec<String>,
-) {
+fn undeclarable_on(ifindex: u32, name: &str, extras: &LinkExtras, blocked_by: &mut Vec<Blocker>) {
     for n in extras.neighbours.iter().filter(|n| n.ifindex() == ifindex) {
         let permanent = n.header.ndm_state & nud::PERMANENT != 0;
         let ext_learned = n.header.ndm_flags & ntf::EXT_LEARNED != 0;
@@ -884,17 +1139,26 @@ fn undeclarable_on(
             continue;
         }
         let Some(dst) = n.destination() else { continue };
-        let what = if permanent { "permanent" } else { "externally learned" };
-        blocked_by.push(format!("neighbour {dst} dev {name} ({what})"));
+        blocked_by.push(Blocker::Neighbour {
+            dev: name.to_string(),
+            destination: *dst,
+            permanent,
+        });
     }
     for p in extras.proxies.iter().filter(|p| p.ifindex() == ifindex) {
         if let Some(dst) = p.destination() {
-            blocked_by.push(format!("proxy neighbour {dst} dev {name}"));
+            blocked_by.push(Blocker::ProxyNeighbour {
+                dev: name.to_string(),
+                destination: *dst,
+            });
         }
     }
     for nh in extras.nexthops.iter().filter(|nh| nh.ifindex() == Some(ifindex)) {
-        let via = nh.gateway().map(|g| format!(" via {g}")).unwrap_or_default();
-        blocked_by.push(format!("nexthop id {}{via} dev {name}", nh.id()));
+        blocked_by.push(Blocker::Nexthop {
+            dev: name.to_string(),
+            id: nh.id(),
+            via: nh.gateway(),
+        });
     }
 }
 
@@ -1007,7 +1271,10 @@ pub(crate) fn plan(
         }
         let members: HashSet<u32> = seen;
 
-        let mut blocked_by = refuse;
+        let mut blocked_by: Vec<Blocker> = refuse
+            .into_iter()
+            .map(|reason| Blocker::Unsupported { reason })
+            .collect();
         for (l, lower) in &closure {
             let name = name_of(l.ifindex());
             // A veth's (or vxcan's) peer in another namespace is not in the
@@ -1016,23 +1283,22 @@ pub(crate) fn plan(
             if matches!(l.kind(), Some("veth" | "vxcan"))
                 && let Some(netnsid) = l.link_netnsid
             {
-                blocked_by.push(format!(
-                    "the peer of {name}, in another namespace (netnsid {netnsid}), which the \
-                     kernel deletes with it"
-                ));
+                blocked_by.push(Blocker::ForeignNetnsPeer {
+                    link: name.to_string(),
+                    netnsid,
+                });
             }
             if let Some(lower) = lower {
                 let kind = l.kind().unwrap_or("link");
+                let stacked = |declared_existing| Blocker::StackedLink {
+                    name: name.to_string(),
+                    link_kind: kind.to_string(),
+                    lower: name_of(*lower).to_string(),
+                    declared_existing,
+                };
                 match declared.get(name) {
-                    None => blocked_by.push(format!(
-                        "link {name} ({kind} on {}), which the kernel deletes with it",
-                        name_of(*lower)
-                    )),
-                    Some(d) if d.link_type.kind().is_none() => blocked_by.push(format!(
-                        "link {name} ({kind} on {}), which the kernel deletes with it and \
-                         the config declares as an existing device, not one to create",
-                        name_of(*lower)
-                    )),
+                    None => blocked_by.push(stacked(false)),
+                    Some(d) if d.link_type.kind().is_none() => blocked_by.push(stacked(true)),
                     Some(_) => {}
                 }
             }
@@ -1045,7 +1311,11 @@ pub(crate) fn plan(
                     d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
                 });
                 if !is_declared {
-                    blocked_by.push(format!("address {addr}/{} on {name}", a.prefix_len()));
+                    blocked_by.push(Blocker::Address {
+                        dev: name.to_string(),
+                        address: addr,
+                        prefix_len: a.prefix_len(),
+                    });
                 }
             }
             for r in routes {
@@ -1074,12 +1344,11 @@ pub(crate) fn plan(
                     // or ingress qdisc can be declared, so a declared root
                     // never covers one: it was ignored, and the recreate
                     // took it (#472).
-                    blocked_by.push(format!(
-                        "qdisc {} {} on {name} (under {})",
-                        q.kind().unwrap_or("?"),
-                        q.handle(),
-                        q.parent()
-                    ));
+                    blocked_by.push(Blocker::Qdisc {
+                        dev: name.to_string(),
+                        qdisc: q.kind().unwrap_or("?").to_string(),
+                        under: Some((q.handle(), q.parent())),
+                    });
                     continue;
                 };
                 let is_declared = config
@@ -1087,10 +1356,11 @@ pub(crate) fn plan(
                     .iter()
                     .any(|d| d.dev == name && d.effective_parent() == parent);
                 if !is_declared {
-                    blocked_by.push(format!(
-                        "qdisc {} on {name}",
-                        q.kind().unwrap_or("?")
-                    ));
+                    blocked_by.push(Blocker::Qdisc {
+                        dev: name.to_string(),
+                        qdisc: q.kind().unwrap_or("?").to_string(),
+                        under: None,
+                    });
                 }
             }
             // Classes users make, and every filter — a `RateLimiter`'s tree,
@@ -1102,19 +1372,19 @@ pub(crate) fn plan(
                 c.ifindex() == l.ifindex()
                     && matches!(c.kind(), Some("htb" | "hfsc" | "drr" | "qfq" | "cbq"))
             }) {
-                blocked_by.push(format!(
-                    "class {} {} on {name}",
-                    c.kind().unwrap_or("?"),
-                    c.handle()
-                ));
+                blocked_by.push(Blocker::Class {
+                    dev: name.to_string(),
+                    qdisc: c.kind().unwrap_or("?").to_string(),
+                    handle: c.handle(),
+                });
             }
             for f in extras.filters.iter().filter(|f| f.ifindex() == l.ifindex()) {
-                blocked_by.push(format!(
-                    "filter {} pref {} on {name} (parent {})",
-                    f.kind().unwrap_or("?"),
-                    f.priority(),
-                    f.parent()
-                ));
+                blocked_by.push(Blocker::Filter {
+                    dev: name.to_string(),
+                    filter: f.kind().unwrap_or("?").to_string(),
+                    priority: f.priority(),
+                    parent: f.parent(),
+                });
             }
             // The link's FDB entries, and — for a bridge — every entry in
             // its database, whichever port it is on.
@@ -1122,7 +1392,10 @@ pub(crate) fn plan(
                 e.ifindex() == l.ifindex() || e.master() == Some(l.ifindex())
             }) {
                 if fdb_entry_is_users(e, &by_index, &link_macs) {
-                    blocked_by.push(fdb_label(e, &names));
+                    blocked_by.push(Blocker::Fdb {
+                        entry: fdb_label(e, &names),
+                        via: None,
+                    });
                 }
             }
             // Entries on another device that send *through* this one — a
@@ -1135,10 +1408,10 @@ pub(crate) fn plan(
                 e.ifindex_attr == Some(l.ifindex()) && !members.contains(&e.ifindex())
             }) {
                 if fdb_entry_is_users(e, &by_index, &link_macs) {
-                    blocked_by.push(format!(
-                        "{} via {name}, which would point at the deleted {name}",
-                        fdb_label(e, &names)
-                    ));
+                    blocked_by.push(Blocker::Fdb {
+                        entry: fdb_label(e, &names),
+                        via: Some(name.to_string()),
+                    });
                 }
             }
             undeclarable_on(l.ifindex(), name, extras, &mut blocked_by);
@@ -1157,10 +1430,10 @@ pub(crate) fn plan(
         for (master, port) in &ports {
             let port_name = name_of(port.ifindex());
             if !declared.contains_key(port_name) {
-                blocked_by.push(format!(
-                    "link {port_name}, a port of {}, which the kernel releases",
-                    name_of(master.ifindex())
-                ));
+                blocked_by.push(Blocker::Port {
+                    name: port_name.to_string(),
+                    master: name_of(master.ifindex()).to_string(),
+                });
             }
         }
         // The ports a bond closes or a VRF unlinks on the way out, and the
@@ -1192,7 +1465,11 @@ pub(crate) fn plan(
                     d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
                 });
                 if !is_declared {
-                    blocked_by.push(format!("address {addr}/{} on {name}", a.prefix_len()));
+                    blocked_by.push(Blocker::Address {
+                        dev: name.to_string(),
+                        address: addr,
+                        prefix_len: a.prefix_len(),
+                    });
                 }
             }
             for r in routes {
@@ -1219,6 +1496,7 @@ pub(crate) fn plan(
                 name: name_of(seed.ifindex()).to_string(),
                 reason,
                 blocked_by,
+                resets: Vec::new(),
             });
             continue;
         }
@@ -1235,10 +1513,23 @@ pub(crate) fn plan(
                     format!("it is stacked on {}, which is recreated", name_of(*lower))
                 }
             };
+            let mut resets = Vec::new();
+            if let Some(alias) = l.alias() {
+                resets.push(format!("alias {alias:?}"));
+            }
+            if declared.get(name).is_none_or(|d| d.address.is_none())
+                && let Some(mac) = l.address().filter(|m| m.len() == 6)
+            {
+                resets.push(format!(
+                    "MAC address {} (the kernel picks a new one)",
+                    mac_str(mac)
+                ));
+            }
             plan.recreate.push(LinkRecreate {
                 name: name.to_string(),
                 reason,
                 blocked_by: Vec::new(),
+                resets,
             });
         }
         for (master, port) in &ports {
@@ -1539,12 +1830,121 @@ mod tests {
         assert_eq!(got, HashSet::from([2, 3, 4]));
     }
 
+    /// Each blocker shows the text the untyped list held (#513).
+    #[test]
+    fn blockers_show_what_they_used_to_say() {
+        use crate::TcHandle;
+        let cases = [
+            (
+                Blocker::Route {
+                    dev: "v1".into(),
+                    destination: "10.1.0.0".parse().unwrap(),
+                    prefix_len: 16,
+                    table: 254,
+                    nhid: None,
+                    through: None,
+                },
+                "route 10.1.0.0/16 dev v1 table 254",
+            ),
+            (
+                Blocker::Route {
+                    dev: "v1".into(),
+                    destination: "10.1.0.0".parse().unwrap(),
+                    prefix_len: 16,
+                    table: 254,
+                    nhid: Some(7),
+                    through: Some("via a nexthop on".into()),
+                },
+                "route 10.1.0.0/16 nhid 7 table 254, via a nexthop on v1",
+            ),
+            (
+                Blocker::Qdisc {
+                    dev: "d0".into(),
+                    qdisc: "netem".into(),
+                    under: Some((TcHandle::new(0x10, 0), TcHandle::new(1, 1))),
+                },
+                "qdisc netem 10: on d0 (under 1:1)",
+            ),
+            (
+                Blocker::Filter {
+                    dev: "d0".into(),
+                    filter: "flower".into(),
+                    priority: 100,
+                    parent: TcHandle::major_only(1),
+                },
+                "filter flower pref 100 on d0 (parent 1:)",
+            ),
+            (
+                Blocker::Neighbour {
+                    dev: "d0".into(),
+                    destination: "10.0.0.2".parse().unwrap(),
+                    permanent: false,
+                },
+                "neighbour 10.0.0.2 dev d0 (externally learned)",
+            ),
+            (
+                Blocker::Nexthop {
+                    dev: "d0".into(),
+                    id: 3,
+                    via: Some("10.0.0.1".parse().unwrap()),
+                },
+                "nexthop id 3 via 10.0.0.1 dev d0",
+            ),
+            (
+                Blocker::StackedLink {
+                    name: "v1".into(),
+                    link_kind: "vlan".into(),
+                    lower: "d0".into(),
+                    declared_existing: true,
+                },
+                "link v1 (vlan on d0), which the kernel deletes with it and the config declares \
+                 as an existing device, not one to create",
+            ),
+            (
+                Blocker::Port {
+                    name: "d1".into(),
+                    master: "br0".into(),
+                },
+                "link d1, a port of br0, which the kernel releases",
+            ),
+            (
+                Blocker::Fdb {
+                    entry: "fdb entry 02:00:00:00:00:01 dev vx0".into(),
+                    via: Some("d0".into()),
+                },
+                "fdb entry 02:00:00:00:00:01 dev vx0 via d0, which would point at the deleted d0",
+            ),
+        ];
+        for (blocker, text) in cases {
+            assert_eq!(blocker.to_string(), text);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_blocker_serializes_with_its_kind() {
+        let b = Blocker::Address {
+            dev: "v1".into(),
+            address: "10.0.0.9".parse().unwrap(),
+            prefix_len: 24,
+        };
+        assert_eq!(
+            serde_json::to_value(&b).unwrap(),
+            serde_json::json!({"kind": "address", "dev": "v1", "address": "10.0.0.9", "prefix-len": 24})
+        );
+    }
+
     #[test]
     fn a_refused_recreate_says_what_it_would_destroy() {
         let r = LinkRecreate {
             name: "vx0".into(),
             reason: "vxlan vni 100 -> 200".into(),
-            blocked_by: vec!["address 10.0.0.9/24 on vx0".into()],
+            blocked_by: vec![Blocker::Address {
+                dev: "vx0".into(),
+                address: "10.0.0.9".parse().unwrap(),
+                prefix_len: 24,
+            }],
+            resets: Vec::new(),
         };
         assert!(r.is_refused());
         let shown = r.to_string();

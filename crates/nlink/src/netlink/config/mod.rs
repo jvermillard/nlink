@@ -62,7 +62,7 @@ mod types;
 // was in the JSON ABI while being unnameable in Rust.
 pub use apply::{ApplyError, ApplyOptions, ApplyResult};
 pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict, Snapshot};
-pub use kind::LinkRecreate;
+pub use kind::{Blocker, LinkRecreate};
 pub use types::*;
 
 use super::{connection::Connection, error::Result, protocol::Route};
