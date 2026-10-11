@@ -26,6 +26,11 @@ pub struct NetworkConfig {
     pub(crate) routes: Vec<DeclaredRoute>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) qdiscs: Vec<DeclaredQdisc>,
+    /// The `rtm_protocol` declared routes are installed with, and the one
+    /// the diff treats as the config's own; `None` is `boot` (#512). See
+    /// [`route_protocol`](Self::route_protocol).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) route_protocol: Option<u8>,
     /// Mistakes a builder made that it could not return, reported by
     /// [`validate`](Self::validate) — which `diff` and `apply` run — rather
     /// than turned into a silently different config (#476).
@@ -356,6 +361,54 @@ impl NetworkConfig {
             && self.routes.is_empty()
             && self.qdiscs.is_empty()
             && self.invalid.is_empty()
+    }
+
+    /// Install the declared routes with routing protocol `protocol`
+    /// (`rtm_protocol`, what `ip route` shows as `proto`), and treat the
+    /// routes with it as the config's own (#512).
+    ///
+    /// The default, `boot`, is what `ip route add` uses, so the diff takes
+    /// any `boot` or `static` route as one it may replace or purge — another
+    /// tool's included. With a number of its own (`RouteProtocol::Other`,
+    /// for instance 250, an unused `RTPROT_*`), the config owns exactly its
+    /// routes: a purge removes only those, and a declared route never
+    /// replaces a route with another protocol in its place, which the diff
+    /// refuses (`routes_refused`) instead. A route identical to the
+    /// declared one, whoever added it, already carries it.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use nlink::netlink::types::route::RouteProtocol;
+    ///
+    /// let cfg = NetworkConfig::new().route_protocol(RouteProtocol::Other(250));
+    /// assert_eq!(cfg.routes_protocol(), RouteProtocol::Other(250));
+    /// ```
+    pub fn route_protocol(mut self, protocol: crate::netlink::types::route::RouteProtocol) -> Self {
+        self.route_protocol = Some(protocol.number());
+        self
+    }
+
+    /// The protocol declared routes are installed with: `boot` unless
+    /// [`route_protocol`](Self::route_protocol) says otherwise.
+    pub fn routes_protocol(&self) -> crate::netlink::types::route::RouteProtocol {
+        self.route_protocol.map_or(
+            crate::netlink::types::route::RouteProtocol::Boot,
+            crate::netlink::types::route::RouteProtocol::from,
+        )
+    }
+
+    /// Whether a route with protocol `protocol` is the config's own: its
+    /// [`routes_protocol`](Self::routes_protocol), and with the default
+    /// `boot`, `static` as well.
+    pub(crate) fn owns_route_protocol(
+        &self,
+        protocol: crate::netlink::types::route::RouteProtocol,
+    ) -> bool {
+        use crate::netlink::types::route::RouteProtocol;
+        match self.route_protocol {
+            None => matches!(protocol, RouteProtocol::Static | RouteProtocol::Boot),
+            Some(own) => protocol.number() == own,
+        }
     }
 
     /// Add a link (interface) configuration.

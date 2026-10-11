@@ -1000,3 +1000,61 @@ async fn a_removal_over_undeclared_state_is_refused() -> Result<()> {
     })
     .await
 }
+
+/// With a protocol of its own, a config installs its routes with it, and a
+/// purge removes only its own routes; a route at a declared key that some
+/// other tool added is refused, not replaced (#512).
+#[tokio::test]
+async fn a_route_protocol_of_its_own_makes_the_config_own_exactly_its_routes() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        use nlink::netlink::types::route::RouteProtocol;
+
+        let ns = TestNamespace::new("rt-proto")?;
+        let conn = conn_in_ns(&ns)?;
+        let own = |dst: &str| -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .route_protocol(RouteProtocol::Other(250))
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.93.0.1/24")?
+                .route(dst, |r| r.dev("d0"))?)
+        };
+        assert!(own("10.93.1.0/24")?.apply(&conn).await?.is_success());
+        let shown = ns.exec("ip", &["-j", "route", "show", "10.93.1.0/24"])?;
+        assert!(shown.contains("\"protocol\":\"250\""), "{shown}");
+
+        // Someone else's route, `ip route add`'s default `boot`: not the
+        // config's, so a purge leaves it, and declaring its key is refused.
+        ns.exec("ip", &["route", "add", "10.93.2.0/24", "dev", "d0"])?;
+        let purge = ApplyOptions::default().with_purge(true);
+        let applied = own("10.93.3.0/24")?
+            .apply_with_options(&conn, purge)
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let routes = ns.exec("ip", &["route", "show", "dev", "d0"])?;
+        assert!(
+            routes.contains("10.93.2.0/24"),
+            "a purge removed another tool's route: {routes}"
+        );
+        assert!(
+            !routes.contains("10.93.1.0/24"),
+            "a purge kept the config's own old route: {routes}"
+        );
+        assert!(routes.contains("10.93.3.0/24"), "{routes}");
+        // A route identical to the declared one carries it; a different
+        // route at the declared key and metric is someone else's, and the
+        // replace that would take its place is refused.
+        let blackhole = NetworkConfig::new()
+            .route_protocol(RouteProtocol::Other(250))
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.93.0.1/24")?
+            .route("10.93.2.0/24", |r| r.blackhole())?;
+        let diff = blackhole.diff(&conn).await?;
+        assert_eq!(diff.routes_refused.len(), 1, "{diff}");
+        assert!(diff.to_string().contains("proto boot"), "{diff}");
+        Ok(())
+    })
+    .await
+}

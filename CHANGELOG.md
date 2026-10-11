@@ -41,6 +41,19 @@ All notable changes to this project will be documented in this file.
     picks again.
   - `TcHandle` derives `JsonSchema` under `schemars`.
 
+- **A config can own its routes by protocol (#512, part 3).**
+  - `NetworkConfig::route_protocol(p)` installs the declared routes with
+    `rtm_protocol` `p`. The default, `boot`, is what `ip route add` uses.
+    With a number of its own, the config owns exactly its routes. A purge
+    removes only routes with that protocol, and never another tool's
+    `boot`/`static` route. A declared route never replaces a different
+    route of another protocol in its place: the diff refuses it in
+    `routes_refused`. An identical route already carries the declaration.
+  - `RouteProtocol::Other(u8)` keeps the numbers nlink has no name for,
+    which read back as `Unspec`. It comes with `number()`,
+    `From<RouteProtocol> for u8`, and a `Display` that prints the name,
+    or the number for `Other`. `as u8` no longer compiles.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

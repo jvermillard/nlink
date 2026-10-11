@@ -1291,7 +1291,7 @@ pub(crate) fn plan(
         opts.purge && address_scope.contains(name) && purgeable_address(a)
     };
     let route_tables = opts.purge_table_scope(config);
-    let purged_route = |r: &RouteMessage| opts.purge && purgeable_route(r, &route_tables);
+    let purged_route = |r: &RouteMessage| opts.purge && purgeable_route(r, &route_tables, config);
 
     let mut seeds = Vec::new();
     for link in &config.links {

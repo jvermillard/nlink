@@ -251,6 +251,11 @@ pub enum RouteProtocol {
     Ospf = 188,
     Rip = 189,
     Eigrp = 192,
+    /// A number nlink has no name for: a routing daemon's own, or the one
+    /// a `NetworkConfig` installs its routes with (#512). Never one of the
+    /// numbers above, which `From<u8>` names; it read back as `Unspec`
+    /// before 0.32.
+    Other(u8),
 }
 
 impl From<u8> for RouteProtocol {
@@ -278,13 +283,59 @@ impl From<u8> for RouteProtocol {
             188 => Self::Ospf,
             189 => Self::Rip,
             192 => Self::Eigrp,
-            _ => Self::Unspec,
+            other => Self::Other(other),
+        }
+    }
+}
+
+impl From<RouteProtocol> for u8 {
+    fn from(p: RouteProtocol) -> u8 {
+        p.number()
+    }
+}
+
+impl std::fmt::Display for RouteProtocol {
+    /// The name `ip route` prints, or the number for one without a name.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Other(n) => write!(f, "{n}"),
+            named => f.write_str(named.name()),
         }
     }
 }
 
 impl RouteProtocol {
-    /// Get the name of this protocol.
+    /// The `RTPROT_*` number.
+    pub fn number(self) -> u8 {
+        match self {
+            Self::Unspec => 0,
+            Self::Redirect => 1,
+            Self::Kernel => 2,
+            Self::Boot => 3,
+            Self::Static => 4,
+            Self::Gated => 8,
+            Self::Ra => 9,
+            Self::Mrt => 10,
+            Self::Zebra => 11,
+            Self::Bird => 12,
+            Self::Dnrouted => 13,
+            Self::Xorp => 14,
+            Self::Ntk => 15,
+            Self::Dhcp => 16,
+            Self::Mrouted => 17,
+            Self::Keepalived => 18,
+            Self::Babel => 42,
+            Self::Bgp => 186,
+            Self::Isis => 187,
+            Self::Ospf => 188,
+            Self::Rip => 189,
+            Self::Eigrp => 192,
+            Self::Other(n) => n,
+        }
+    }
+
+    /// Get the name of this protocol; `"unknown"` for
+    /// [`Other`](Self::Other), whose `Display` is its number.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Unspec => "unspec",
@@ -309,6 +360,7 @@ impl RouteProtocol {
             Self::Ospf => "ospf",
             Self::Rip => "rip",
             Self::Eigrp => "eigrp",
+            Self::Other(_) => "unknown",
         }
     }
 }
@@ -383,4 +435,23 @@ pub mod rtm_flags {
     pub const OFFLOAD: u32 = 0x4000;
     pub const TRAP: u32 = 0x8000;
     pub const OFFLOAD_FAILED: u32 = 0x20000000;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every protocol number round-trips; one nlink has no name for is
+    /// `Other` and prints as its number. It read back as `Unspec` (#512).
+    #[test]
+    fn every_protocol_number_round_trips() {
+        for n in 0..=u8::MAX {
+            assert_eq!(RouteProtocol::from(n).number(), n);
+            assert_eq!(u8::from(RouteProtocol::from(n)), n);
+        }
+        assert_eq!(RouteProtocol::from(3), RouteProtocol::Boot);
+        assert_eq!(RouteProtocol::from(250), RouteProtocol::Other(250));
+        assert_eq!(RouteProtocol::Other(250).to_string(), "250");
+        assert_eq!(RouteProtocol::Bgp.to_string(), "bgp");
+    }
 }

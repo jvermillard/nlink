@@ -753,7 +753,7 @@ impl RouteConfig for Ipv4Route {
             .with_family(AF_INET)
             .with_dst_len(self.prefix_len)
             .with_table(table_u8)
-            .with_protocol(self.protocol as u8)
+            .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
             .with_type(self.route_type as u8);
 
@@ -886,7 +886,7 @@ impl RouteConfig for Ipv4Route {
             .with_family(AF_INET)
             .with_dst_len(self.prefix_len)
             .with_table(table_u8)
-            .with_protocol(self.protocol as u8)
+            .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
             .with_type(self.route_type as u8);
 
@@ -1215,7 +1215,7 @@ impl RouteConfig for Ipv6Route {
             .with_family(AF_INET6)
             .with_dst_len(self.prefix_len)
             .with_table(table_u8)
-            .with_protocol(self.protocol as u8)
+            .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
             .with_type(self.route_type as u8);
 
@@ -1335,7 +1335,7 @@ impl RouteConfig for Ipv6Route {
             .with_family(AF_INET6)
             .with_dst_len(self.prefix_len)
             .with_table(table_u8)
-            .with_protocol(self.protocol as u8)
+            .with_protocol(self.protocol.number())
             .with_scope(scope as u8)
             .with_type(self.route_type as u8);
 
