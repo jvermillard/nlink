@@ -111,6 +111,9 @@ mod sockdiag_correctness;
 #[path = "integration/neigh.rs"]
 mod neigh;
 
+#[path = "integration/fdb.rs"]
+mod fdb;
+
 // Plan 166 backfill — root-gated tests for the headline 0.16 features.
 // Each module gates on `require_root!()` so this all early-returns
 // when run as a regular user.

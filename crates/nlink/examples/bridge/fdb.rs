@@ -47,6 +47,8 @@ async fn main() -> nlink::Result<()> {
                             }
                             if entry.is_permanent() {
                                 print!("permanent ");
+                            } else if entry.is_static() {
+                                print!("static ");
                             }
                             if entry.is_self() {
                                 print!("self ");
@@ -96,13 +98,13 @@ async fn main() -> nlink::Result<()> {
     // Parse MAC address
     let mac = FdbEntryBuilder::parse_mac("aa:bb:cc:dd:ee:ff")?;
 
-    // Add permanent static entry
+    // Add a static entry: frames for the MAC leave through veth0
     conn.add_fdb(
         FdbEntryBuilder::new(mac)
             .dev("veth0")      // Bridge port
             .master("br0")     // Bridge interface
             .vlan(100)         // Optional VLAN
-            .permanent()       // Static entry
+            .static_()         // Static; .permanent() is a local entry
     ).await?;
 "#
     );
@@ -117,6 +119,7 @@ async fn main() -> nlink::Result<()> {
         FdbEntryBuilder::new([0x00; 6])  // All-zeros for BUM
             .dev("vxlan0")
             .dst(Ipv4Addr::new(192, 168, 1, 100).into())
+            .self_()                     // The VXLAN device's own table
     ).await?;
 
     // Add specific MAC -> VTEP mapping
@@ -125,6 +128,7 @@ async fn main() -> nlink::Result<()> {
         FdbEntryBuilder::new(mac)
             .dev("vxlan0")
             .dst(Ipv4Addr::new(192, 168, 1, 101).into())
+            .self_()
     ).await?;
 "#
     );
@@ -150,7 +154,7 @@ async fn main() -> nlink::Result<()> {
         FdbEntryBuilder::new(mac)
             .dev("veth0")
             .master("br0")
-            .permanent()
+            .static_()
     ).await?;
 "#
     );
@@ -158,7 +162,7 @@ async fn main() -> nlink::Result<()> {
     println!("--- Flush FDB entries ---");
     println!(
         r#"
-    // Flush all dynamic entries (keeps permanent)
+    // Flush all dynamic entries (keeps static and permanent ones)
     conn.flush_fdb("br0").await?;
 "#
     );

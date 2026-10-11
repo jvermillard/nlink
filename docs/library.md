@@ -1165,24 +1165,26 @@ for entry in &entries {
         entry.mac_str(), entry.vlan(), entry.state());
 }
 
-// Add static FDB entry
+// Add a static FDB entry: frames for the MAC leave through veth0.
+// (`.permanent()`, the default, is a local entry: the bridge's own MAC.)
 let mac = FdbEntryBuilder::parse_mac("aa:bb:cc:dd:ee:ff")?;
 conn.add_fdb(
     FdbEntryBuilder::new(mac)
         .dev("veth0")
         .master("br0")
         .vlan(100)
-        .permanent()
+        .static_()
 ).await?;
 
-// VXLAN FDB for remote VTEP
+// VXLAN FDB for remote VTEP, in the device's own table
 conn.add_fdb(
     FdbEntryBuilder::new([0x00; 6])  // All-zeros for BUM traffic
         .dev("vxlan0")
         .dst(Ipv4Addr::new(192, 168, 1, 100).into())
+        .self_()
 ).await?;
 
-// Flush dynamic entries
+// Flush dynamic entries (static and permanent ones stay)
 conn.flush_fdb("br0").await?;
 # Ok(())
 # }

@@ -69,9 +69,14 @@ struct FdbAddArgs {
     #[arg(long)]
     vni: Option<u32>,
 
-    /// Permanent (static) entry
+    /// Permanent entry: on a bridge, a local one (the MAC is the bridge's
+    /// own). The default, as with `bridge fdb add`
     #[arg(long)]
     permanent: bool,
+
+    /// Static entry: forwarded to its port, never aged
+    #[arg(long = "static")]
+    static_entry: bool,
 
     /// Dynamic (ageable) entry — the kernel default, explicit for clarity
     #[arg(long)]
@@ -196,6 +201,8 @@ fn print_fdb_text(
         // State
         if entry.is_permanent() {
             line.push_str(" permanent");
+        } else if entry.is_static() {
+            line.push_str(" static");
         }
 
         // Flags
@@ -254,6 +261,8 @@ fn print_fdb_json(
 
             obj["state"] = serde_json::json!(if entry.is_permanent() {
                 "permanent"
+            } else if entry.is_static() {
+                "static"
             } else {
                 "dynamic"
             });
@@ -302,13 +311,16 @@ async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> R
         builder = builder.vni(vni);
     }
 
-    if args.permanent && args.dynamic {
+    if [args.permanent, args.static_entry, args.dynamic].iter().filter(|s| **s).count() > 1 {
         return Err(Error::InvalidMessage(
-            "bridge fdb: --permanent and --dynamic are mutually exclusive".into(),
+            "bridge fdb: --permanent, --static and --dynamic are mutually exclusive".into(),
         ));
     }
     if args.permanent {
         builder = builder.permanent();
+    }
+    if args.static_entry {
+        builder = builder.static_();
     }
     if args.dynamic {
         builder = builder.dynamic();

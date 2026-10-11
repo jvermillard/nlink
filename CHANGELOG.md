@@ -376,6 +376,30 @@ All notable changes to this project will be documented in this file.
   else. Both now use big-endian. A root test checks both through
   `ip -d -j link` and `ip macsec show`, and fails without the fix.
 
+- **`flush_fdb` keeps static entries (#663).** It promised to flush only
+  dynamic entries, and it deleted static ones too.
+  - The cause: `FdbEntry::is_dynamic()` was `!is_permanent()`, and a
+    static entry (`NUD_NOARP`, `bridge fdb add … static`) is not
+    permanent, so it counted as dynamic.
+  - `FdbEntry::is_static()` is new, and `is_dynamic()` now means neither
+    static nor permanent.
+  - The `nlink-bridge` bin shows static entries as `static`.
+  - A root test adds a static, a permanent and a dynamic entry with
+    `bridge fdb`, then flushes. It fails without the fix.
+- **`FdbEntryBuilder` documented a local entry as a static one (#663).**
+  - **`permanent()` is a local entry on a bridge.** `permanent()`, the
+    default, sends `NUD_PERMANENT`. On a bridge that is a *local* entry:
+    the MAC is the bridge's own, and frames for it go up the bridge's
+    stack, not out of the port. It is what `bridge fdb add` makes too.
+    The docs called it static, and so did the module, builder,
+    `docs/library.md` and example code.
+  - **`static_()` is new.** `FdbEntryBuilder::static_()` sends
+    `NUD_NOARP`: a forwarding entry that never ages. `nlink-bridge fdb
+    add --static` uses it.
+  - **The VXLAN remote examples failed.** They had no `.self_()`, and a
+    VXLAN device that is not a bridge port fails that with `EOPNOTSUPP`.
+    A root test pins it.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
