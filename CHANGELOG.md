@@ -51,6 +51,19 @@ All notable changes to this project will be documented in this file.
   `namespace.rs` became the `namespace/` module; the existing API is
   unchanged.
 
+- **`ErrorKind`, and context that stacks (#526, first part).**
+  - `Error::kind()` classifies every error, kernel or not, in one answer:
+    `NotFound`, `AlreadyExists`, `Busy`, `PermissionDenied`,
+    `NotSupported`, `InvalidArgument`, `TryAgain`, `Restart`,
+    `DumpInterrupted`, `Overrun`, `Timeout`, `Validation`, `Invalid`, and
+    more. It comes with `ErrorKind::from_errno` and `is_retryable()`, and
+    serializes under `serde`. The `is_*` predicates stay and agree with
+    it.
+  - A second `with_context` on a kernel error keeps both, as
+    `"outer: inner"`. It used to drop the second one.
+  - `ResultExt::context` adds context to a `Result`'s error, so a call
+    site no longer needs `map_err`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
