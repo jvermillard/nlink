@@ -63,6 +63,57 @@ use super::{
 // QdiscConfig trait
 // ============================================================================
 
+/// A boxed or borrowed config is a config, so a qdisc kind chosen at run
+/// time can be installed: `conn.replace_qdisc(dev, boxed)` with a
+/// `Box<dyn QdiscConfig>` (#515).
+impl<T: QdiscConfig + ?Sized> QdiscConfig for Box<T> {
+    fn kind(&self) -> &'static str {
+        (**self).kind()
+    }
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        (**self).write_options(builder)
+    }
+    fn has_options(&self) -> bool {
+        (**self).has_options()
+    }
+    fn default_handle(&self) -> Option<u32> {
+        (**self).default_handle()
+    }
+    fn in_place(&self, live: &TcMessage) -> InPlace {
+        (**self).in_place(live)
+    }
+    fn write_change_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        (**self).write_change_options(builder)
+    }
+    fn fixed_parent(&self) -> Option<TcHandle> {
+        (**self).fixed_parent()
+    }
+}
+
+impl<T: QdiscConfig + ?Sized> QdiscConfig for &T {
+    fn kind(&self) -> &'static str {
+        (**self).kind()
+    }
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        (**self).write_options(builder)
+    }
+    fn has_options(&self) -> bool {
+        (**self).has_options()
+    }
+    fn default_handle(&self) -> Option<u32> {
+        (**self).default_handle()
+    }
+    fn in_place(&self, live: &TcMessage) -> InPlace {
+        (**self).in_place(live)
+    }
+    fn write_change_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        (**self).write_change_options(builder)
+    }
+    fn fixed_parent(&self) -> Option<TcHandle> {
+        (**self).fixed_parent()
+    }
+}
+
 /// How a live qdisc takes a replace by one of the same kind; see
 /// [`QdiscConfig::in_place`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

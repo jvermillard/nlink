@@ -240,6 +240,18 @@ All notable changes to this project will be documented in this file.
     the diff removes whatever root is installed (`qdiscs_to_remove`), and
     the kernel puts its default back.
 
+- **`block`/`unblock`, and boxed qdisc configs (#515, part 1).**
+  - `Connection::block(dev, Direction)` drops everything a device
+    receives or sends. It adds a clsact if the device has none, then a
+    `matchall` + `gact drop` filter at priority 1 on that side. The root
+    qdisc and its tree are left alone. Replacing the root with a 100 %-loss
+    netem, nlink-lab's way to partition a lab, destroyed a prio, TBF or
+    HTB setup. `unblock` deletes that filter, and `is_blocked` reports it.
+    A plain `ingress` qdisc refuses, since blocking would replace it.
+  - `QdiscConfig` is implemented for `Box<T>` and `&T`, so
+    `conn.replace_qdisc(dev, Box<dyn QdiscConfig>)` works. nlink-lab
+    carried an enum of every config type to get that.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

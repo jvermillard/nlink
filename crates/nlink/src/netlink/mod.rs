@@ -102,6 +102,7 @@ pub mod filter;
 #[cfg(test)]
 mod fixtures;
 pub mod genl;
+pub mod block;
 pub mod impair;
 mod interface_ref;
 pub mod link;
