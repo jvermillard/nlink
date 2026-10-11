@@ -81,6 +81,10 @@ mod namespace_spawn;
 #[path = "integration/namespace_path.rs"]
 mod namespace_path;
 
+// The owned namespace handle (#520).
+#[path = "integration/netns.rs"]
+mod netns;
+
 // Feature-gated: the privileged integration workflow builds with
 // `lab,sockdiag,namespace_watcher` so the inotify round-trip (#183)
 // runs there.
