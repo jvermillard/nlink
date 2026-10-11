@@ -508,6 +508,33 @@ async fn qdisc_fields_change_in_place() -> nlink::Result<()> {
                 dummy(|l| l).qdisc("d0", |q| q.clsact()),
             ],
         ),
+        // #515: a declared netem is a `NetemConfig`, so what has no builder
+        // setter declares through `spec`, and leaving it out of the next
+        // step takes it off: ECN and the slot go, the overheads go to 0,
+        // and the seed — compared only when set — stays the kernel's.
+        case(
+            "netem-spec",
+            vec![
+                q(|q| {
+                    use nlink::netlink::tc::{NetemConfig, NetemSlot};
+                    q.spec(
+                        NetemConfig::new()
+                            .delay(Duration::from_millis(10))
+                            .rate(nlink::Rate::mbit(1))
+                            .rate_overhead(20, 53, 5)
+                            .ecn(true)
+                            .seed(7)
+                            .slot(NetemSlot::new(
+                                Duration::from_millis(1),
+                                Duration::from_millis(2),
+                            )),
+                    )
+                }),
+                q(|q| {
+                    q.spec(nlink::netlink::tc::NetemConfig::new().delay(Duration::from_millis(10)))
+                }),
+            ],
+        ),
     ];
     assert_converges("tm-qdisc", cases).await
 }

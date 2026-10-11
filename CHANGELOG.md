@@ -116,6 +116,31 @@ All notable changes to this project will be documented in this file.
   to a `u16`, so `f.priority() == 100` still compiles.
   `DEFAULT_FILTER_PROTOCOL` is an `EthProto`.
 
+- **`DeclaredQdiscType` is `QdiscSpec`, and it holds the imperative
+  configs (#515, part 4c).**
+  - A declared netem is `QdiscSpec::Netem(NetemConfig)`, a TBF
+    `QdiscSpec::Tbf(TbfConfig)`, and so on. The declarative and
+    imperative paths share one type per kind: the same defaults, the same
+    comparison, the same fixes. Before, the declarative side had its own
+    fields in raw units, its own lowering per kind, and its own
+    comparison.
+  - `DeclaredQdiscType` remains as a deprecated alias. Its struct-like
+    variants are gone.
+  - **The JSON and YAML form is written in human units:**
+    `{"netem": {"delay": "10ms", "loss": "1%", "rate": "100mbit"}}`.
+    A 0.31 document still reads. Its raw-unit fields are accepted in
+    their old units: `delay_us`, `loss_percent`, `rate_bps` (bytes per
+    second), `burst_bytes`, `limit_bytes`, `perturb_secs`, `target_us`
+    and the rest.
+  - A document is refused when it:
+    - sets a value both ways;
+    - has a percentage outside 0–100;
+    - gives a rate without its unit;
+    - misspells a field.
+  - A TBF declared without a limit now fails validation, so
+    `from_json_str` refuses it. Before, only the apply did.
+  - An undeclared sfq `perturb` now means the kernel's 0, and is compared.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -457,6 +482,21 @@ All notable changes to this project will be documented in this file.
   number in any base `strtoul` reads. `Display` prints the name, or
   `0x` and four hex digits. It replaces the `ETH_P_*` constants
   duplicated in five modules, and `nlink-tc`'s own protocol table.
+
+- **One qdisc spec for both paths (#515).**
+  - `QdiscSpec` implements `QdiscConfig`, so `conn.replace_qdisc(dev,
+    spec)` works.
+  - `spec.matches(&live)` is the declarative diff's comparison, in the
+    kernel's units and quantisation.
+  - `spec.validate()` checks a spec without a kernel.
+  - `From<NetemConfig>` and the other configs convert into a spec.
+  - `QdiscBuilder::spec(config)` declares a whole config, including what
+    the builder has no setter for: netem's slot, seed, ECN and rate
+    overheads.
+  - With `serde`, `Rate`, `Bytes` and `Percent` serialize in tc(8)'s
+    units (`"100mbit"`, `"32kib"`, `"1.5%"`), and
+    `util::serde_units::{duration, option_duration}` does the same for a
+    `Duration` (`"10ms"`). All of them have JSON schemas.
 
 ## [0.31.0] - 2026-10-11
 

@@ -9,6 +9,8 @@ pub mod names;
 pub mod parse;
 pub mod percent;
 pub mod rate;
+#[cfg(feature = "serde")]
+pub mod serde_units;
 pub mod uevent_trigger;
 
 pub use addr::{format_addr, format_prefix, parse_addr, parse_prefix};

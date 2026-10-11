@@ -29,30 +29,7 @@ use super::tc_options::{
 };
 use crate::util::{Percent, Rate};
 
-/// A time `get_time` reads back as exactly `d`: the largest of s, ms and
-/// µs that divides it, then µs with a fraction, else nanoseconds. The
-/// fraction comes before `ns` because iproute2 before 6.3 reads netem's
-/// delay in 64 ns ticks and takes no `ns` (`1499.968us`, not
-/// `1499968ns`).
-fn time(d: Duration) -> String {
-    let ns = d.as_nanos();
-    let mut candidates = Vec::new();
-    for (unit, name) in [(1_000_000_000, "s"), (1_000_000, "ms"), (1_000, "us")] {
-        if ns.is_multiple_of(unit) {
-            candidates.push(format!("{}{name}", ns / unit));
-        }
-    }
-    let fraction = format!("{:03}", ns % 1000);
-    candidates.push(format!(
-        "{}.{}us",
-        ns / 1000,
-        fraction.trim_end_matches('0')
-    ));
-    candidates
-        .into_iter()
-        .find(|text| crate::util::parse::get_time(text).ok() == Some(d))
-        .unwrap_or_else(|| format!("{ns}ns"))
-}
+use crate::util::parse::format_time as time;
 
 fn micros(us: u32) -> String {
     time(Duration::from_micros(u64::from(us)))
