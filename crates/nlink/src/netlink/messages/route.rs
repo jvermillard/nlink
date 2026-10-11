@@ -809,7 +809,7 @@ impl RouteMessageBuilder {
 
     /// Set the route protocol (who installed it).
     pub fn protocol(mut self, protocol: RouteProtocol) -> Self {
-        self.msg.header.rtm_protocol = protocol as u8;
+        self.msg.header.rtm_protocol = protocol.number();
         self
     }
 

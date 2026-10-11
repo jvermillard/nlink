@@ -22,6 +22,7 @@ use crate::netlink::{
     tc::{
         ClsactConfig, IngressConfig,
     },
+    types::route::RouteProtocol,
 };
 
 /// Options for applying configuration.
@@ -622,7 +623,13 @@ pub async fn apply_diff(
             result.summary.push(format!("Would {}", op));
             result.changes_made += 1;
         } else {
-            match add_route(conn, route).await {
+            match add_route(
+                conn,
+                route,
+                diff.routes_protocol.unwrap_or(RouteProtocol::Boot),
+            )
+            .await
+            {
                 Ok(()) => {
                     result.summary.push(format!(
                         "Added route {}/{}",
@@ -1205,10 +1212,14 @@ async fn add_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result
     }
 }
 
-async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()> {
+async fn add_route(
+    conn: &Connection<Route>,
+    route: &DeclaredRoute,
+    protocol: RouteProtocol,
+) -> Result<()> {
     match route.destination {
         IpAddr::V4(dst) => {
-            let mut config = Ipv4Route::from_addr(dst, route.prefix_len);
+            let mut config = Ipv4Route::from_addr(dst, route.prefix_len).protocol(protocol);
 
             // Set gateway
             if let Some(IpAddr::V4(gw)) = route.gateway {
@@ -1242,7 +1253,7 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
             conn.replace_route(config).await
         }
         IpAddr::V6(dst) => {
-            let mut config = Ipv6Route::from_addr(dst, route.prefix_len);
+            let mut config = Ipv6Route::from_addr(dst, route.prefix_len).protocol(protocol);
 
             if let Some(IpAddr::V6(gw)) = route.gateway {
                 config = config.gateway(gw);

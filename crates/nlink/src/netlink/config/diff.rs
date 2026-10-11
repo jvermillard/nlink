@@ -23,7 +23,7 @@ use crate::netlink::{
     tc::{
         ClsactConfig, IngressConfig, QdiscConfig,
     },
-    types::{addr::Scope, route::RouteProtocol, route::RouteType},
+    types::{addr::Scope, route::RouteType},
 };
 
 /// Options controlling [`NetworkConfig::diff_with_options`](crate::netlink::config::NetworkConfig::diff_with_options).
@@ -265,6 +265,11 @@ pub struct ConfigDiff {
     /// MTU step skips them; not counted, shown or serialized (#473).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) mtus_first: Vec<(String, u32)>,
+    /// The protocol the apply installs declared routes with: the config's
+    /// [`routes_protocol`](super::NetworkConfig::routes_protocol) (#512).
+    /// Not shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) routes_protocol: Option<crate::netlink::types::route::RouteProtocol>,
 }
 
 impl ConfigDiff {
@@ -755,6 +760,7 @@ pub(crate) fn diff_snapshot(
     );
     diff.links_to_recreate = plan.recreate.clone();
     diff.links_to_remove = plan.remove.clone();
+    diff.routes_protocol = Some(config.routes_protocol());
     // The rest of the diff compares against the state the apply's
     // recreates leave behind: a recreated link, and everything the kernel
     // deletes with it, absent — so what the config declares on it is
@@ -1462,11 +1468,16 @@ pub(super) fn purgeable_address(a: &AddressMessage) -> bool {
 }
 
 /// Whether a purge whose table scope is `tables` may remove `r` when
-/// nothing declared carries it: an IPv4 or IPv6 `static`/`boot` route of a
-/// type a declaration can describe, in a table the config owns.
-pub(super) fn purgeable_route(r: &RouteMessage, tables: &HashSet<u32>) -> bool {
+/// nothing declared carries it: an IPv4 or IPv6 route with the config's
+/// own protocol (`static`/`boot` by default, #512), of a type a
+/// declaration can describe, in a table the config owns.
+pub(super) fn purgeable_route(
+    r: &RouteMessage,
+    tables: &HashSet<u32>,
+    config: &NetworkConfig,
+) -> bool {
     (r.is_ipv4() || r.is_ipv6())
-        && matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
+        && config.owns_route_protocol(r.protocol())
         && matches!(
             r.route_type(),
             RouteType::Unicast
@@ -1618,15 +1629,16 @@ fn diff_routes(
         }
         // The replace overwrites the first route at the key with the same
         // metric (and, for IPv4, TOS 0: `fib_table_insert`; IPv6:
-        // `fib6_add_rt2node`). nlink adds `proto boot`, and a purge treats
-        // `static`/`boot` as the config's own; anything else in that place
-        // belongs to someone else and is refused, not overwritten (#469).
+        // `fib6_add_rt2node`). nlink adds the config's own protocol (`boot`
+        // unless it says otherwise), and a purge treats that one as the
+        // config's; anything else in that place belongs to someone else and
+        // is refused, not overwritten (#469, #512).
         let slot = kernel_metric(declared);
         let foreign = current_by_key.get(&key).and_then(|kernel_routes| {
             kernel_routes.iter().find(|r| {
                 r.priority().unwrap_or(0) == slot
                     && r.header.rtm_tos == 0
-                    && !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
+                    && !config.owns_route_protocol(r.protocol())
             })
         });
         match foreign {
@@ -1692,9 +1704,7 @@ fn diff_routes(
         });
 
     for r in current {
-        if !(r.is_ipv4() || r.is_ipv6())
-            || !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
-        {
+        if !(r.is_ipv4() || r.is_ipv6()) || !config.owns_route_protocol(r.protocol()) {
             continue;
         }
         let route_type = match r.route_type() {
@@ -1727,7 +1737,7 @@ fn diff_routes(
         let superseded = declared_here
             .iter()
             .any(|d| route_matches_but_metric(d, oif_of(d), r));
-        let purged = purge && purgeable_route(r, &tables);
+        let purged = purge && purgeable_route(r, &tables, config);
         // Declared before, not now: it goes, wherever its table (#512).
         let dropped = previous_by_key
             .get(&(dst, r.dst_len(), r.table_id()))
@@ -1768,7 +1778,7 @@ fn describe_route(r: &RouteMessage, ifindex_to_name: &HashMap<u32, &str>) -> Str
     }
     out.push_str(&format!(
         " proto {} metric {}",
-        r.protocol().name(),
+        r.protocol(),
         r.priority().unwrap_or(0)
     ));
     out
@@ -2102,6 +2112,7 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::netlink::config::types::MacvlanMode;
+    use crate::netlink::types::route::RouteProtocol;
 
     fn declared(name: &str, link_type: DeclaredLinkType) -> DeclaredLink {
         DeclaredLink {
