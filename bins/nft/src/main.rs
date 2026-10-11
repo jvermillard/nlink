@@ -969,7 +969,7 @@ async fn reconcile_file(
             println!("No changes needed; the live ruleset already matches `{path}`.");
         } else {
             println!("Reconcile would make {} change(s):", diff.change_count());
-            print!("{diff}");
+            println!("{diff}");
         }
         return Ok(());
     }

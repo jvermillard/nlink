@@ -13,6 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 nlink = { workspace = true, features = ["output"] }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 clap = { workspace = true }
 tokio-stream = { workspace = true }

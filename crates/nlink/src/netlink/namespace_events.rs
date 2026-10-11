@@ -1,5 +1,9 @@
 //! Netlink-based namespace event subscriber.
 //!
+//! **Deprecated since 0.32.0** (#532): it duplicates `NetworkEvent::NewNsId`
+//! and `NetworkEvent::DelNsId`. Subscribe a connection to
+//! `RtnetlinkGroup::NsId` and match those instead.
+//!
 //! Receives RTM_NEWNSID and RTM_DELNSID events from the kernel.
 //!
 //! # Kernel Version Requirements
@@ -36,6 +40,9 @@
 //! # }
 //! ```
 
+// The module's own items use each other.
+#![allow(deprecated)]
+
 use super::{
     error::Result,
     messages::NsIdMessage,
@@ -44,6 +51,10 @@ use super::{
 };
 
 /// Namespace-related netlink events.
+#[deprecated(
+    since = "0.32.0",
+    note = "subscribe to `RtnetlinkGroup::NsId` and match `NetworkEvent::{NewNsId, DelNsId}` (#532)"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NamespaceNetlinkEvent {
@@ -63,6 +74,10 @@ pub enum NamespaceNetlinkEvent {
     },
 }
 
+#[deprecated(
+    since = "0.32.0",
+    note = "subscribe to `RtnetlinkGroup::NsId` and match `NetworkEvent::{NewNsId, DelNsId}` (#532)"
+)]
 /// Subscribe to namespace netlink events.
 ///
 /// Listens for RTM_NEWNSID and RTM_DELNSID multicast messages.

@@ -70,9 +70,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      # The workspace's rust-version: the oldest stable that builds every
+      # target with every feature, raised only in a minor release (#532).
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98"
+          toolchain: "1.88"
       - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: msrv

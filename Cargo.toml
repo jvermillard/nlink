@@ -17,21 +17,23 @@ members = [
 ]
 
 [workspace.package]
-version = "0.31.0"
+version = "0.32.0"
 edition = "2024"
 # Minimum Supported Rust Version. Tracks current stable: this
 # project is happy to require contributors and downstream
 # consumers stay on a recent toolchain in exchange for using
 # modern language features without contortion. Bump in lockstep
 # with stable; called out in CHANGELOG when it advances.
-rust-version = "1.98"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/p13marc/nlink"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
+# What the library uses, and no more: the binaries add rt-multi-thread
+# for #[tokio::main], and a consumer gets only what it asks for (#532).
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros"] }
 
 # X25519 for WireGuard key pairs (`wireguard-keys` feature)
 x25519-dalek = { version = "3", features = ["static_secrets"] }
@@ -95,4 +97,4 @@ nlink = { path = "crates/nlink" }
 # crates.io; bump in lockstep with the workspace version at cycle
 # cut. **Publish nlink-macros first** when releasing — nlink's
 # publication will fail until the matching version is live.
-nlink-macros = { path = "crates/nlink-macros", version = "0.31.0" }
+nlink-macros = { path = "crates/nlink-macros", version = "0.32.0" }

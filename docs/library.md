@@ -137,7 +137,8 @@ Two complementary approaches for monitoring network namespace lifecycle:
 ```rust,no_run
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{NamespaceWatcher, NamespaceEvent};
-use nlink::netlink::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
+use nlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
+use tokio_stream::StreamExt;
 
 // Option 1: Filesystem-based watching (feature: namespace_watcher)
 // Watches /var/run/netns/ for named namespace creation/deletion
@@ -156,17 +157,15 @@ let (existing, mut watcher) = NamespaceWatcher::list_and_watch().await?;
 println!("Existing: {:?}", existing);
 
 // Option 2: Netlink-based events (always available)
-// Receives RTM_NEWNSID/RTM_DELNSID kernel events
-let mut sub = NamespaceEventSubscriber::new().await?;
+// RTM_NEWNSID/RTM_DELNSID, as events on an ordinary stream
+let conn = Connection::<Route>::new()?;
+conn.subscribe(&[RtnetlinkGroup::NsId])?;
+let mut events = conn.events().await;
 
-while let Some(event) = sub.recv().await? {
-    match event {
-        NamespaceNetlinkEvent::NewNsId { nsid, pid, fd } => {
-            println!("New NSID {}: pid={:?}", nsid, pid);
-        }
-        NamespaceNetlinkEvent::DelNsId { nsid } => {
-            println!("Deleted NSID {}", nsid);
-        }
+while let Some(event) = events.next().await {
+    match event? {
+        NetworkEvent::NewNsId(m) => println!("New NSID {:?}: pid={:?}", m.nsid(), m.pid()),
+        NetworkEvent::DelNsId(m) => println!("Deleted NSID {:?}", m.nsid()),
         _ => {}
     }
 }

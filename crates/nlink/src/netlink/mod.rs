@@ -175,6 +175,7 @@ pub use genl::dpll::Dpll;
 pub use interface_ref::InterfaceRef;
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
 pub use namespace::NamespaceSpec;
+#[allow(deprecated)]
 pub use namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
 #[cfg(feature = "namespace_watcher")]
 pub use namespace_watcher::{

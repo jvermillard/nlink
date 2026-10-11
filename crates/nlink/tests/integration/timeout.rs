@@ -12,7 +12,7 @@ async fn test_default_timeout_is_30s() {
     // `None` — flipped here as part of the 0.17 cycle's
     // "close the hidden hang class" theme.
     let conn = Connection::<Route>::new().unwrap();
-    assert_eq!(conn.get_timeout(), Some(Duration::from_secs(30)));
+    assert_eq!(conn.operation_timeout(), Some(Duration::from_secs(30)));
 }
 
 #[tokio::test]
@@ -20,10 +20,10 @@ async fn test_timeout_is_chainable() {
     let conn = Connection::<Route>::new()
         .unwrap()
         .timeout(Duration::from_secs(5));
-    assert_eq!(conn.get_timeout(), Some(Duration::from_secs(5)));
+    assert_eq!(conn.operation_timeout(), Some(Duration::from_secs(5)));
 
     let conn = conn.no_timeout();
-    assert_eq!(conn.get_timeout(), None);
+    assert_eq!(conn.operation_timeout(), None);
 }
 
 #[tokio::test]

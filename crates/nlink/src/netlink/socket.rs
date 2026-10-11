@@ -122,9 +122,8 @@ impl NetlinkSocket {
     /// no window in which the calling thread (possibly a tokio worker shared
     /// with unrelated tasks) observes the target namespace. A panic during
     /// socket creation kills the worker, not the caller's netns state. The
-    /// pre-#185 implementation `setns`'d the calling thread and could return
-    /// [`Error::NamespaceRestoreFailed`]; that variant is retained for
-    /// compatibility but is no longer produced here.
+    /// pre-#185 implementation `setns`'d the calling thread and could fail to
+    /// restore it; the error that reported that is gone since 0.32.0 (#532).
     ///
     /// The tokio reactor registration (`AsyncFd`) happens afterwards on the
     /// calling thread — epoll registration is not namespace-sensitive, and the

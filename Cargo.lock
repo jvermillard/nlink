@@ -426,15 +426,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "lock_api"
-version = "0.4.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
-dependencies = [
- "scopeguard",
-]
-
-[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -479,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "nlink"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -503,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-bridge"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -517,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-config"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -531,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-devlink"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "clap",
  "nlink",
@@ -542,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-diag"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "clap",
  "nlink",
@@ -553,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ethtool"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "clap",
  "nlink",
@@ -564,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ip"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -581,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-macros"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -591,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-nft"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "clap",
  "nlink",
@@ -601,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ss"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -617,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-tc"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -631,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-wg"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "base64",
  "clap",
@@ -645,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-wifi"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "clap",
  "nlink",
@@ -688,29 +679,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "parking_lot"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
-dependencies = [
- "lock_api",
- "parking_lot_core",
-]
-
-[[package]]
-name = "parking_lot_core"
-version = "0.9.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
-dependencies = [
- "cfg-if",
- "libc",
- "redox_syscall",
- "smallvec",
- "windows-link",
-]
 
 [[package]]
 name = "pin-project-lite"
@@ -868,15 +836,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_syscall"
-version = "0.5.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
-dependencies = [
- "bitflags",
-]
-
-[[package]]
 name = "ref-cast"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -991,12 +950,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scopeguard"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1085,16 +1038,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
-]
-
-[[package]]
-name = "signal-hook-registry"
-version = "1.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
-dependencies = [
- "errno",
- "libc",
 ]
 
 [[package]]
@@ -1222,12 +1165,9 @@ version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
- "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys",
