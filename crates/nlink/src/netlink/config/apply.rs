@@ -411,6 +411,8 @@ fn step_operation(step: &Step) -> String {
             format!("add route {}/{}", after.destination, after.prefix_len)
         }
         Step::DeleteRoute(r) => format!("remove route {}/{}", r.destination, r.prefix_len),
+        Step::SetNeighbour { after, .. } => format!("set {after}"),
+        Step::DeleteNeighbour(n) => format!("remove {n}"),
         Step::DeleteQdisc(q) => format!("delete qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::ReplaceQdisc(q) => format!("replace qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::AddQdisc(q) => format!("add qdisc {} on {}", q.qdisc_type.kind(), q.dev),
@@ -489,6 +491,16 @@ fn dry_run_step(step: &Step, result: &mut ApplyResult) -> Result<Outcome> {
         }
         _ => Outcome::Changed(format!("Would {}", step_operation(step)), 1),
     })
+}
+
+/// The kernel entry a declared neighbour is (#516).
+fn neighbour_config(n: &super::DeclaredNeighbour) -> crate::netlink::neigh::Neighbor {
+    let c = crate::netlink::neigh::Neighbor::new(n.dev.as_str(), n.destination);
+    match n.lladdr {
+        _ if n.proxy => c.proxy(),
+        Some(mac) => c.permanent().lladdr(mac),
+        None => c.permanent(),
+    }
 }
 
 /// Run one step against the kernel.
@@ -612,6 +624,18 @@ async fn run_step(
                     "Address {}/{} on {} already present",
                     addr.address, addr.prefix_len, addr.dev
                 )))
+            }
+            Err(e) => return Err(e),
+        },
+        Step::SetNeighbour { after: n, .. } => {
+            conn.replace_neighbor(neighbour_config(n)).await?;
+            Outcome::Changed(format!("Set {n}"), 1)
+        }
+        Step::DeleteNeighbour(n) => match conn.del_neighbor(neighbour_config(n)).await {
+            Ok(()) => Outcome::Changed(format!("Removed {n}"), 1),
+            // Gone before we got to it: a link change flushed it.
+            Err(e) if e.is_not_found() => {
+                Outcome::Unchanged(Some(format!("{n} already absent")))
             }
             Err(e) => return Err(e),
         },

@@ -998,6 +998,73 @@ async fn the_previous_config_says_what_to_remove() -> Result<()> {
     .await
 }
 
+/// Neighbours the previous config declared and this one does not are
+/// removed; one nothing declared stays, even under a purge (#516). A MAC
+/// change, which flushes the device's neighbours, puts the declared ones
+/// back in the same apply.
+#[tokio::test]
+async fn the_previous_config_removes_its_neighbours() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        use std::net::Ipv4Addr;
+        use std::sync::Arc;
+
+        let ns = TestNamespace::new("prevneigh")?;
+        let conn = conn_in_ns(&ns)?;
+        let ip = |h: u8| Ipv4Addr::new(10, 82, 0, h);
+        let mac = |n: u8| [0x02, 0, 0, 0, 0x82, n];
+        let a = Arc::new(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .neighbour("d0", ip(2), mac(2))
+                .neighbour("d0", ip(3), mac(3))
+                .proxy_neighbour("d0", ip(9)),
+        );
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("ip", &["neigh", "add", "10.82.0.7", "lladdr", "02:00:00:00:82:07", "dev", "d0", "nud", "permanent"])?;
+
+        let b = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .neighbour("d0", ip(2), mac(2));
+        let opts = || PlanOptions::default().purge(true).previous(a.clone());
+        let diff = b.diff_with_options(&conn, opts()).await?;
+        let shown = diff.to_string();
+        assert_eq!(diff.neighbours_to_remove.len(), 2, "{shown}");
+        assert!(diff.neighbours_to_set.is_empty(), "{shown}");
+        assert!(shown.contains("- neighbour 10.82.0.3 lladdr 02:00:00:00:82:03 dev d0"), "{shown}");
+        assert!(shown.contains("- proxy neighbour 10.82.0.9 dev d0"), "{shown}");
+
+        let applied = b
+            .apply_with_options(&conn, ApplyOptions::default().with_purge(true).with_previous(a.clone()))
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(b.diff_with_options(&conn, opts()).await?.is_empty());
+        let neigh = ns.exec("ip", &["neigh", "show", "dev", "d0"])?;
+        assert!(neigh.contains("10.82.0.2 ") && neigh.contains("10.82.0.7 "), "{neigh}");
+        assert!(!neigh.contains("10.82.0.3 "), "{neigh}");
+        let proxies = ns.exec("ip", &["neigh", "show", "proxy", "dev", "d0"])?;
+        assert!(proxies.trim().is_empty(), "{proxies}");
+
+        // A new MAC flushes the device's neighbours; the declared one is
+        // set again in the same apply.
+        let c = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up().address([0x02, 0, 0, 0, 0x82, 0xff]))
+            .neighbour("d0", ip(2), mac(2));
+        let diff = c.diff(&conn).await?;
+        assert!(diff.to_string().contains("+ neighbour 10.82.0.2"), "{diff}");
+        let applied = c.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(c.diff(&conn).await?.is_empty());
+        let neigh = ns.exec("ip", &["neigh", "show", "dev", "d0"])?;
+        assert!(neigh.contains("10.82.0.2 lladdr 02:00:00:00:82:02 PERMANENT"), "{neigh}");
+        Ok(())
+    })
+    .await
+}
+
 /// With the previous config, the links it created and this one does not
 /// are deleted, with what is stacked on them. A kindless link it only
 /// configured stays, and so does a link of the same name another actor

@@ -77,7 +77,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::diff::{PlanOptions, purgeable_address, purgeable_route};
-use super::types::{DeclaredLink, DeclaredLinkType, NetworkConfig, QdiscParent};
+use super::types::{DeclaredLink, DeclaredLinkType, DeclaredNeighbour, NetworkConfig, QdiscParent};
 use crate::netlink::{
     attr::AttrIter,
     connection::Connection,
@@ -1953,9 +1953,22 @@ fn fdb_label(e: &NeighborMessage, names: &HashMap<u32, &str>) -> String {
     s
 }
 
-/// What deleting or flushing one link destroys that cannot be declared:
-/// its user-made neighbours and proxy entries, and its nexthop objects.
-fn undeclarable_on(ifindex: u32, name: &str, extras: &LinkExtras, blocked_by: &mut Vec<Blocker>) {
+/// What deleting or flushing one link destroys that no config declares:
+/// its user-made neighbours and proxy entries, and its nexthop objects. A
+/// neighbour this config or the previous one declares is not: the apply
+/// puts it back, or meant to remove it (#516).
+fn undeclarable_on(
+    ifindex: u32,
+    name: &str,
+    extras: &LinkExtras,
+    declared: &[&DeclaredNeighbour],
+    blocked_by: &mut Vec<Blocker>,
+) {
+    let is_declared = |dst: &IpAddr, proxy: bool| {
+        declared
+            .iter()
+            .any(|n| n.dev == name && n.destination == *dst && n.proxy == proxy)
+    };
     for n in extras.neighbours.iter().filter(|n| n.ifindex() == ifindex) {
         let permanent = n.header.ndm_state & nud::PERMANENT != 0;
         let ext_learned = n.header.ndm_flags & ntf::EXT_LEARNED != 0;
@@ -1963,6 +1976,9 @@ fn undeclarable_on(ifindex: u32, name: &str, extras: &LinkExtras, blocked_by: &m
             continue;
         }
         let Some(dst) = n.destination() else { continue };
+        if permanent && is_declared(dst, false) {
+            continue;
+        }
         blocked_by.push(Blocker::Neighbour {
             dev: name.to_string(),
             destination: *dst,
@@ -1970,7 +1986,9 @@ fn undeclarable_on(ifindex: u32, name: &str, extras: &LinkExtras, blocked_by: &m
         });
     }
     for p in extras.proxies.iter().filter(|p| p.ifindex() == ifindex) {
-        if let Some(dst) = p.destination() {
+        if let Some(dst) = p.destination()
+            && !is_declared(dst, true)
+        {
             blocked_by.push(Blocker::ProxyNeighbour {
                 dev: name.to_string(),
                 destination: *dst,
@@ -2016,6 +2034,11 @@ pub(crate) fn plan(
     let nh_devs = nexthop_devices(&extras.nexthops);
     let declared: HashMap<&str, &DeclaredLink> =
         config.links.iter().map(|l| (l.name.as_str(), l)).collect();
+    let declared_neighbours: Vec<&DeclaredNeighbour> = config
+        .neighbours
+        .iter()
+        .chain(opts.previous.iter().flat_map(|p| p.neighbours.iter()))
+        .collect();
     // What a purging apply deletes anyway does not hold a recreate back:
     // refusing over it made an edit that changes a VLAN id and drops one of
     // its addresses take two applies (#471).
@@ -2297,7 +2320,7 @@ pub(crate) fn plan(
                     });
                 }
             }
-            undeclarable_on(l.ifindex(), name, extras, &mut blocked_by);
+            undeclarable_on(l.ifindex(), name, extras, &declared_neighbours, &mut blocked_by);
         }
 
         // The ports of every deleted master, which the kernel releases.
@@ -2370,7 +2393,7 @@ pub(crate) fn plan(
                     blocked_by.push(route_label(r, name, how));
                 }
             }
-            undeclarable_on(ifindex, name, extras, &mut blocked_by);
+            undeclarable_on(ifindex, name, extras, &declared_neighbours, &mut blocked_by);
         }
 
         // A bridge entry is dumped once per VLAN as well as once without.
