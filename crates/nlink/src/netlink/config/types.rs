@@ -30,6 +30,9 @@ pub struct NetworkConfig {
     /// Permanent and proxy neighbours (#516).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) neighbours: Vec<DeclaredNeighbour>,
+    /// Bridge FDB entries and VXLAN remotes (#516).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) fdb: Vec<DeclaredFdb>,
     /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
     /// yet: a filter's actions have no document form.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -172,6 +175,48 @@ impl NetworkConfig {
             }
             if self.neighbours[..i].iter().any(|o| o.same_entry(n)) {
                 errors.push(ValidationErrorInfo::new(at(), "declared twice"));
+            }
+        }
+        for (i, e) in self.fdb.iter().enumerate() {
+            let at = || format!("fdb.{e}");
+            let mut bad = |why: &str| errors.push(ValidationErrorInfo::new(at(), why.to_string()));
+            if let Some(vlan) = e.vlan
+                && !(1..=4094).contains(&vlan)
+            {
+                bad("a VLAN id is 1 to 4094");
+            }
+            match e.dst {
+                Some(_) if e.vlan.is_some() => bad("a VXLAN remote has no bridge VLAN"),
+                Some(_) if e.local => bad("a VXLAN remote is not a local entry"),
+                Some(dst) if dst.is_unspecified() => bad("a VXLAN remote's address is not unspecified"),
+                // `fdb_add_entry` refuses any other (EINVAL).
+                None if e.floods() => bad("a bridge entry's MAC is a unicast one"),
+                _ => {}
+            }
+            let earlier = &self.fdb[..i];
+            if earlier.iter().any(|o| o.same_entry(e)) {
+                bad("declared twice");
+            } else if e.dst.is_some()
+                && !e.floods()
+                && earlier.iter().any(|o| o.dev == e.dev && o.mac == e.mac && o.dst.is_some())
+            {
+                bad("a unicast MAC has one remote; only an all-zeros or multicast one floods to several");
+            }
+            // A bridge has one entry per MAC and VLAN, whichever port.
+            let master = |dev: &str| {
+                self.links
+                    .iter()
+                    .find(|l| l.name == dev)
+                    .and_then(|l| l.master.name().map(str::to_string))
+            };
+            if e.dst.is_none()
+                && let Some(br) = master(&e.dev)
+                && let Some(o) = earlier.iter().find(|o| {
+                    o.dst.is_none() && o.mac == e.mac && o.vlan == e.vlan && o.dev != e.dev
+                        && master(&o.dev).as_deref() == Some(br.as_str())
+                })
+            {
+                bad(&format!("{br} has one entry per MAC and VLAN, and {} declares it too", o.dev));
             }
         }
         let mut links = HashSet::new();
@@ -531,8 +576,8 @@ impl NetworkConfig {
     }
 
     /// `true` when the config declares nothing: no links, addresses,
-    /// routes, qdiscs, TC trees or neighbours, and no builder mistake
-    /// waiting for [`validate`](Self::validate) (#531).
+    /// routes, qdiscs, TC trees, neighbours or FDB entries, and no builder
+    /// mistake waiting for [`validate`](Self::validate) (#531).
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
             && self.addresses.is_empty()
@@ -540,6 +585,7 @@ impl NetworkConfig {
             && self.qdiscs.is_empty()
             && self.tc.is_empty()
             && self.neighbours.is_empty()
+            && self.fdb.is_empty()
             && self.invalid.is_empty()
     }
 
@@ -765,6 +811,46 @@ impl NetworkConfig {
         self
     }
 
+    /// Declare an FDB entry for `mac` on `dev` (#516).
+    ///
+    /// By default it is a static entry in the bridge `dev` is a port of,
+    /// as `bridge fdb replace <mac> dev <dev> master static` makes: frames
+    /// for the MAC leave through `dev`, and the entry never ages. With
+    /// [`FdbBuilder::local`] it is the bridge's own MAC instead
+    /// (`permanent`). With [`FdbBuilder::dst`] it is a VXLAN remote, in
+    /// the device's own table (`bridge fdb append <mac> dev <dev> dst
+    /// <ip>`); an all-zeros or multicast MAC takes any number of remotes.
+    ///
+    /// A bridge port leaving its bridge loses its entries, and a recreated
+    /// device all of them; the apply that does either puts the declared
+    /// ones back, and a recreate does not count them among what it
+    /// destroys. Entries are removed only through
+    /// [`PlanOptions::previous`](super::PlanOptions::previous), not by a
+    /// purge.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    ///
+    /// let config = NetworkConfig::new()
+    ///     .fdb("veth0", [0x02, 0, 0, 0, 0, 0x01], |e| e.vlan(10))
+    ///     .fdb("vxlan0", [0; 6], |e| e.dst("192.0.2.1".parse().unwrap()))
+    ///     .fdb("vxlan0", [0; 6], |e| e.dst("192.0.2.2".parse().unwrap()));
+    /// config.validate().unwrap();
+    /// ```
+    pub fn fdb(mut self, dev: &str, mac: [u8; 6], f: impl FnOnce(FdbBuilder) -> FdbBuilder) -> Self {
+        let built = f(FdbBuilder {
+            entry: DeclaredFdb {
+                dev: dev.to_string(),
+                mac,
+                vlan: None,
+                dst: None,
+                local: false,
+            },
+        });
+        self.fdb.push(built.entry);
+        self
+    }
+
     /// Add a route.
     ///
     /// The destination should be in CIDR notation (e.g., "10.0.0.0/8" or "0.0.0.0/0").
@@ -886,6 +972,11 @@ impl NetworkConfig {
     /// Get the configured neighbours.
     pub fn neighbours(&self) -> &[DeclaredNeighbour] {
         &self.neighbours
+    }
+
+    /// Get the configured FDB entries.
+    pub fn fdb_entries(&self) -> &[DeclaredFdb] {
+        &self.fdb
     }
 }
 
@@ -2785,6 +2876,94 @@ impl std::fmt::Display for DeclaredNeighbour {
             )?;
         }
         write!(f, " dev {}", self.dev)
+    }
+}
+
+/// A declared FDB entry (#516): a static or local entry in a bridge, or a
+/// VXLAN remote. See [`NetworkConfig::fdb`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredFdb {
+    /// The bridge port, or the VXLAN device.
+    pub dev: String,
+    /// The MAC, as `aa:bb:cc:dd:ee:ff`.
+    #[cfg_attr(feature = "serde", serde(with = "mac_str_serde"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub mac: [u8; 6],
+    /// The bridge VLAN; none is the untagged entry, and on a VLAN-filtering
+    /// bridge one per VLAN of the port as well.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub vlan: Option<u16>,
+    /// A VXLAN remote: the entry goes in the device's own table.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub dst: Option<IpAddr>,
+    /// The bridge's own MAC (`permanent`), rather than one forwarded to the
+    /// port (`static`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub local: bool,
+}
+
+impl DeclaredFdb {
+    /// Whether `other` is the same entry: the same device, MAC, VLAN and
+    /// remote.
+    pub(crate) fn same_entry(&self, other: &DeclaredFdb) -> bool {
+        self.dev == other.dev && self.mac == other.mac && self.vlan == other.vlan && self.dst == other.dst
+    }
+
+    /// An all-zeros or multicast MAC, which a VXLAN device floods to every
+    /// remote it lists.
+    pub(crate) fn floods(&self) -> bool {
+        self.mac == [0; 6] || self.mac[0] & 1 != 0
+    }
+}
+
+impl std::fmt::Display for DeclaredFdb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = self.mac;
+        write!(
+            f,
+            "fdb {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} dev {}",
+            m[0], m[1], m[2], m[3], m[4], m[5], self.dev
+        )?;
+        if let Some(vlan) = self.vlan {
+            write!(f, " vlan {vlan}")?;
+        }
+        match self.dst {
+            Some(dst) => write!(f, " dst {dst}"),
+            None if self.local => f.write_str(" local"),
+            None => f.write_str(" static"),
+        }
+    }
+}
+
+/// Builds a declared FDB entry; see [`NetworkConfig::fdb`].
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct FdbBuilder {
+    entry: DeclaredFdb,
+}
+
+impl FdbBuilder {
+    /// The bridge VLAN.
+    pub fn vlan(mut self, vlan: u16) -> Self {
+        self.entry.vlan = Some(vlan);
+        self
+    }
+
+    /// A VXLAN remote: the entry goes in the device's own table.
+    pub fn dst(mut self, dst: IpAddr) -> Self {
+        self.entry.dst = Some(dst);
+        self
+    }
+
+    /// The bridge's own MAC (`permanent`), delivered up the bridge's stack
+    /// rather than forwarded to the port.
+    pub fn local(mut self) -> Self {
+        self.entry.local = true;
+        self
     }
 }
 
@@ -5384,6 +5563,64 @@ mod serde_roundtrip_tests {
     }
 
     #[test]
+    fn fdb_roundtrips_and_validates() {
+        use std::net::Ipv4Addr;
+        let ip = |h: u8| IpAddr::V4(Ipv4Addr::new(10, 0, 0, h));
+        let cfg = NetworkConfig::new()
+            .link("br0", |l| l.bridge())
+            .link("p0", |l| l.dummy().master("br0"))
+            .link("p1", |l| l.dummy().master("br0"))
+            .fdb("p0", [2, 0, 0, 0, 0, 1], |e| e.vlan(10))
+            .fdb("p0", [2, 0, 0, 0, 0, 2], |e| e.local())
+            .fdb("vx0", [0; 6], |e| e.dst(ip(2)))
+            .fdb("vx0", [0; 6], |e| e.dst(ip(3)));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#"{"dev":"p0","mac":"02:00:00:00:00:01","vlan":10}"#,
+            r#"{"dev":"p0","mac":"02:00:00:00:00:02","local":true}"#,
+            r#"{"dev":"vx0","mac":"00:00:00:00:00:00","dst":"10.0.0.2"}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        assert_eq!(cfg.fdb_entries()[0].to_string(), "fdb 02:00:00:00:00:01 dev p0 vlan 10 static");
+        let one = |f: fn(FdbBuilder) -> FdbBuilder| NetworkConfig::new().fdb("p0", [2, 0, 0, 0, 0, 1], f);
+        let ports = || {
+            NetworkConfig::new()
+                .link("br0", |l| l.bridge())
+                .link("p0", |l| l.dummy().master("br0"))
+                .link("p1", |l| l.dummy().master("br0"))
+        };
+        for (cfg, says) in [
+            (one(|e| e.vlan(4095)), "a VLAN id is 1 to 4094"),
+            (one(|e| e.dst("10.0.0.2".parse().unwrap()).vlan(10)), "a VXLAN remote has no bridge VLAN"),
+            (one(|e| e.dst("10.0.0.2".parse().unwrap()).local()), "a VXLAN remote is not a local entry"),
+            (NetworkConfig::new().fdb("p0", [0; 6], |e| e), "a bridge entry's MAC is a unicast one"),
+            (one(|e| e).fdb("p0", [2, 0, 0, 0, 0, 1], |e| e), "declared twice"),
+            (
+                NetworkConfig::new()
+                    .fdb("vx0", [2, 0, 0, 0, 0, 1], move |e| e.dst(ip(2)))
+                    .fdb("vx0", [2, 0, 0, 0, 0, 1], move |e| e.dst(ip(3))),
+                "a unicast MAC has one remote",
+            ),
+            (
+                ports().fdb("p0", [2, 0, 0, 0, 0, 1], |e| e).fdb("p1", [2, 0, 0, 0, 0, 1], |e| e),
+                "br0 has one entry per MAC and VLAN",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        // The same MAC in two VLANs, or on ports of two bridges, is two entries.
+        ports()
+            .fdb("p0", [2, 0, 0, 0, 0, 1], |e| e.vlan(10))
+            .fdb("p1", [2, 0, 0, 0, 0, 1], |e| e.vlan(20))
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
     fn neighbours_roundtrip_and_validate() {
         use std::net::{Ipv4Addr, Ipv6Addr};
         let cfg = NetworkConfig::new()
@@ -5851,6 +6088,22 @@ mod serde_roundtrip_tests {
         let cfg = NetworkConfig::new().link("d0", |l| l.dummy());
         let json = cfg.to_json_string().unwrap();
         assert!(json.contains(r#""link-type":"dummy""#), "{json}");
+    }
+}
+
+/// Serde adapter for a required MAC — `aa:bb:cc:dd:ee:ff` — as
+/// [`DeclaredFdb::mac`] has one.
+#[cfg(feature = "serde")]
+mod mac_str_serde {
+    use serde::{Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(mac: &[u8; 6], s: S) -> Result<S::Ok, S::Error> {
+        super::mac_serde::serialize(&Some(*mac), s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 6], D::Error> {
+        super::mac_serde::deserialize(d)?
+            .ok_or_else(|| serde::de::Error::custom("a MAC is required"))
     }
 }
 

@@ -10,7 +10,8 @@ use std::{
 
 use super::kind::{self, KindPlan, KindUpdate, LinkRecreate};
 use super::types::{
-    DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredNeighbour, DeclaredQdisc, DeclaredRoute,
+    DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredLinkType, DeclaredNeighbour, DeclaredQdisc,
+    DeclaredRoute,
     DeclaredRouteType, LinkState, MasterSpec, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
@@ -72,8 +73,8 @@ pub struct PlanOptions {
     /// - **Links and qdiscs are never purged** — deleting
     ///   interfaces is too destructive to infer; use the imperative
     ///   `Connection::del_link` / `del_qdisc` for those.
-    /// - **Neighbours are never purged** (#516): one the previous config
-    ///   declared goes through [`Self::previous`].
+    /// - **Neighbours and FDB entries are never purged** (#516): one the
+    ///   previous config declared goes through [`Self::previous`].
     pub purge: bool,
 
     /// Extra route tables to purge `static`/`boot` routes from, on
@@ -291,6 +292,20 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) neighbours_replaced: Vec<(DeclaredNeighbour, DeclaredNeighbour)>,
 
+    /// FDB entries to install (#516): a bridge entry missing, learned or
+    /// in the other state (static or local), a VXLAN remote missing — or
+    /// on a port the apply moves out of its bridge, or a device it
+    /// recreates, which loses them.
+    pub fdb_to_set: Vec<DeclaredFdb>,
+    /// FDB entries the previous config declared and this one does not,
+    /// still in the kernel (#516). Only with [`PlanOptions::previous`].
+    pub fdb_to_remove: Vec<DeclaredFdb>,
+    /// The entry each in `fdb_to_set` replaces, when one is there. Not
+    /// counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) fdb_replaced: Vec<(DeclaredFdb, DeclaredFdb)>,
+
     /// Routes to remove.
     ///
     /// Always: a route a declared route *supersedes* — same destination,
@@ -437,6 +452,8 @@ impl ConfigDiff {
             && self.routes_to_remove.is_empty()
             && self.neighbours_to_set.is_empty()
             && self.neighbours_to_remove.is_empty()
+            && self.fdb_to_set.is_empty()
+            && self.fdb_to_remove.is_empty()
             && self.tc.is_empty()
     }
 
@@ -458,6 +475,8 @@ impl ConfigDiff {
             + self.routes_to_remove.len()
             + self.neighbours_to_set.len()
             + self.neighbours_to_remove.len()
+            + self.fdb_to_set.len()
+            + self.fdb_to_remove.len()
             + self.tc.iter().map(|t| t.len()).sum::<usize>()
     }
 
@@ -558,6 +577,9 @@ impl ConfigDiff {
         for n in &self.neighbours_to_set {
             lines.push(neighbour_line(n, &self.neighbours_replaced));
         }
+        for e in &self.fdb_to_set {
+            lines.push(fdb_line(e, &self.fdb_replaced));
+        }
 
         // Purge removals (only present under `PlanOptions::purge`).
         for addr in &self.addresses_to_remove {
@@ -584,6 +606,9 @@ impl ConfigDiff {
         for n in &self.neighbours_to_remove {
             lines.push(format!("- {n}"));
         }
+        for e in &self.fdb_to_remove {
+            lines.push(format!("- {e}"));
+        }
 
         if lines.is_empty() {
             "No changes needed".to_string()
@@ -607,6 +632,17 @@ pub(crate) fn neighbour_line(
             None => format!("~ {n}"),
         },
         None => format!("+ {n}"),
+    }
+}
+
+/// An FDB entry the apply installs, as the diff and the plan print it.
+pub(crate) fn fdb_line(e: &DeclaredFdb, replaced: &[(DeclaredFdb, DeclaredFdb)]) -> String {
+    match replaced.iter().find(|(d, _)| d == e) {
+        Some((_, before)) if before.local != e.local => {
+            format!("~ {e} (was {})", if before.local { "local" } else { "static" })
+        }
+        Some(_) => format!("~ {e}"),
+        None => format!("+ {e}"),
     }
 }
 
@@ -961,6 +997,10 @@ pub struct Snapshot {
     /// previous one declares a neighbour.
     neighbours: Vec<NeighborMessage>,
     proxies: Vec<NeighborMessage>,
+    /// Every FDB entry, the `AF_BRIDGE` neighbour dump (#516): read by
+    /// [`read`](Self::read), and by `read_for` when its config or the
+    /// previous one declares one.
+    fdb: Vec<NeighborMessage>,
 }
 
 impl Snapshot {
@@ -980,6 +1020,7 @@ impl Snapshot {
         snapshot.read_tc(conn, tc_links).await?;
         snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
         snapshot.read_neighbours(conn).await?;
+        snapshot.fdb = conn.get_bridge_neighbors().await?;
         Ok(snapshot)
     }
 
@@ -1040,6 +1081,9 @@ impl Snapshot {
         {
             snapshot.read_neighbours(conn).await?;
         }
+        if !config.fdb.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.fdb.is_empty()) {
+            snapshot.fdb = conn.get_bridge_neighbors().await?;
+        }
         Ok(snapshot)
     }
 
@@ -1054,6 +1098,7 @@ impl Snapshot {
             bridge_vlans: Vec::new(),
             neighbours: Vec::new(),
             proxies: Vec::new(),
+            fdb: Vec::new(),
         })
     }
 
@@ -1220,6 +1265,17 @@ pub(crate) fn diff_snapshot(
     );
     diff_neighbours(config, snapshot, &link_by_name, &lost, opts, &mut diff);
 
+    // FDB entries (#516): a port leaving or changing its bridge loses its
+    // bridge entries (`del_nbp`), a recreated device all of them.
+    let moved: HashSet<u32> = diff
+        .links_to_modify
+        .iter()
+        .filter(|(_, c)| c.set_master.is_some() || c.unset_master)
+        .filter_map(|(name, _)| link_by_name.get(name.as_str()).map(|l| l.ifindex()))
+        .chain(plan.released.keys().copied())
+        .collect();
+    diff_fdb(config, snapshot, &link_by_name, &moved, opts, &mut diff);
+
     // TC trees (#514), against what the recreates leave: a recreated link
     // has none. The apply diffs each again after the qdisc step.
     let names = super::tc_tree::ifindexes(&current_links);
@@ -1305,6 +1361,66 @@ fn diff_neighbours(
         }
         if let Some((have, true)) = live(prev) {
             diff.neighbours_to_remove.push(have);
+        }
+    }
+}
+
+/// The declared FDB entries against the kernel's (#516). A bridge entry on
+/// a port in `moved`, or any entry on a device the apply creates or
+/// recreates, is set whatever the dump says; a previous one is removed
+/// while it is there.
+fn diff_fdb(
+    config: &NetworkConfig,
+    snapshot: &Snapshot,
+    link_by_name: &HashMap<&str, &LinkMessage>,
+    moved: &HashSet<u32>,
+    opts: &PlanOptions,
+    diff: &mut ConfigDiff,
+) {
+    use crate::netlink::types::neigh::nud;
+    // The entry the kernel has for a declaration, as one, and whether it is
+    // static or permanent rather than learned.
+    let live = |d: &DeclaredFdb| -> Option<(DeclaredFdb, bool)> {
+        let ifindex = link_by_name.get(d.dev.as_str())?.ifindex();
+        if d.dst.is_none() && moved.contains(&ifindex) {
+            return None;
+        }
+        let msg = snapshot.fdb.iter().find(|m| {
+            m.ifindex() == ifindex
+                && m.lladdr() == Some(&d.mac[..])
+                && m.vlan() == d.vlan
+                && m.destination().copied() == d.dst
+                // A bridge's entry names its master; a device's own does not.
+                && m.master().is_some() == d.dst.is_none()
+        })?;
+        let state = msg.header.ndm_state;
+        let mut have = d.clone();
+        have.local = d.dst.is_none() && state & nud::PERMANENT != 0;
+        Some((have, state & (nud::PERMANENT | nud::NOARP) != 0))
+    };
+    for e in &config.fdb {
+        match live(e) {
+            Some((have, true)) if have == *e => {}
+            Some((have, true)) => {
+                diff.fdb_replaced.push((e.clone(), have));
+                diff.fdb_to_set.push(e.clone());
+            }
+            // Missing, or learned.
+            _ => diff.fdb_to_set.push(e.clone()),
+        }
+    }
+    for prev in opts.previous.iter().flat_map(|p| p.fdb.iter()) {
+        // Gone from the config — and for a bridge entry, not declared on
+        // another port, where setting it moves it (a bridge has one entry
+        // per MAC and VLAN).
+        let kept = config.fdb.iter().any(|e| {
+            e.same_entry(prev) || (prev.dst.is_none() && e.dst.is_none() && e.mac == prev.mac && e.vlan == prev.vlan)
+        });
+        if kept {
+            continue;
+        }
+        if let Some((have, true)) = live(prev) {
+            diff.fdb_to_remove.push(have);
         }
     }
 }
@@ -3167,6 +3283,8 @@ mod tests {
                 "addresses-to-add",
                 "addresses-to-change",
                 "addresses-to-remove",
+                "fdb-to-remove",
+                "fdb-to-set",
                 "links-missing",
                 "links-to-add",
                 "links-to-modify",

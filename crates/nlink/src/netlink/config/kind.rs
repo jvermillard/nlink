@@ -77,7 +77,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::diff::{PlanOptions, purgeable_address, purgeable_route};
-use super::types::{DeclaredLink, DeclaredLinkType, DeclaredNeighbour, NetworkConfig, QdiscParent};
+use super::types::{
+    DeclaredFdb, DeclaredLink, DeclaredLinkType, DeclaredNeighbour, NetworkConfig, QdiscParent,
+};
 use crate::netlink::{
     attr::AttrIter,
     connection::Connection,
@@ -2039,6 +2041,23 @@ pub(crate) fn plan(
         .iter()
         .chain(opts.previous.iter().flat_map(|p| p.neighbours.iter()))
         .collect();
+    // FDB entries this config or the previous one declares: put back, or
+    // meant to go (#516). Declared without a VLAN, an entry is one per VLAN
+    // of the port as well as the untagged one.
+    let declared_fdb: Vec<&DeclaredFdb> = config
+        .fdb
+        .iter()
+        .chain(opts.previous.iter().flat_map(|p| p.fdb.iter()))
+        .collect();
+    let fdb_declared = |e: &NeighborMessage| {
+        let dev = names.get(&e.ifindex()).copied();
+        declared_fdb.iter().any(|d| {
+            Some(d.dev.as_str()) == dev
+                && e.lladdr() == Some(&d.mac[..])
+                && (d.vlan.is_none() || e.vlan() == d.vlan)
+                && e.destination().copied() == d.dst
+        })
+    };
     // What a purging apply deletes anyway does not hold a recreate back:
     // refusing over it made an edit that changes a VLAN id and drops one of
     // its addresses take two applies (#471).
@@ -2297,7 +2316,7 @@ pub(crate) fn plan(
             for e in extras.fdb.iter().filter(|e| {
                 e.ifindex() == l.ifindex() || e.master() == Some(l.ifindex())
             }) {
-                if fdb_entry_is_users(e, &by_index, &link_macs) {
+                if fdb_entry_is_users(e, &by_index, &link_macs) && !fdb_declared(e) {
                     blocked_by.push(Blocker::Fdb {
                         entry: fdb_label(e, &names),
                         via: None,

@@ -1777,6 +1777,88 @@ async fn neighbours_change_and_come_back_after_a_recreate_or_flush() -> nlink::R
     Ok(())
 }
 
+/// Declared FDB entries A→B→C→D (#516): a static and a local bridge entry,
+/// two flood remotes and a unicast remote on a VXLAN device. Step 2 moves
+/// the static entry to the other port, makes the other one local and
+/// points the unicast remote elsewhere. Step 3 changes the VNI, which
+/// recreates the VXLAN device; its remotes come back, and the recreate is
+/// not refused over them. Step 4 moves a port to another bridge, which
+/// deletes its entries; the apply puts them in the new one. `bridge -j fdb`
+/// shows each step.
+#[tokio::test]
+async fn fdb_entries_change_and_come_back_after_a_move_or_recreate() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "bridge", "vxlan");
+
+    let mac = |n: u8| [0x02, 0, 0, 0, 0x5d, n];
+    let ip = |n: u8| v4(10, 85, 0, n);
+    let step = |p0_master: &'static str, m1_dev: &'static str, local: bool, vni: u32, uni: u8| {
+        NetworkConfig::new()
+            .link("br0", |l| l.bridge().up())
+            .link("br1", |l| l.bridge().up())
+            .link("p0", move |l| l.dummy().master(p0_master).up())
+            .link("p1", |l| l.dummy().master("br0").up())
+            .link("vx0", move |l| l.vxlan(vni).vxlan_local(ip(1)).vxlan_port(4789))
+            .fdb(m1_dev, mac(1), |e| e)
+            .fdb("p0", mac(2), move |e| if local { e.local() } else { e })
+            .fdb("vx0", [0; 6], move |e| e.dst(ip(2)))
+            .fdb("vx0", [0; 6], move |e| e.dst(ip(3)))
+            .fdb("vx0", mac(5), move |e| e.dst(ip(uni)))
+    };
+    let steps = [
+        step("br0", "p0", false, 5, 4),
+        step("br0", "p1", true, 5, 6),
+        step("br0", "p1", true, 6, 6),
+        step("br1", "p1", true, 6, 6),
+    ];
+    // (mac 1's port, mac 2's bridge, mac 2's state, the unicast remote)
+    let want = [
+        ("p0", "br0", "static", "10.85.0.4"),
+        ("p1", "br0", "permanent", "10.85.0.6"),
+        ("p1", "br0", "permanent", "10.85.0.6"),
+        ("p1", "br1", "permanent", "10.85.0.6"),
+    ];
+    let ns = TestNamespace::new("tr-fdb")?;
+    let mut vx = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let out = ns.exec("bridge", &["-j", "fdb", "show"]).map_err(|e| e.to_string())?;
+        let all: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+        let entries = all.as_array().cloned().unwrap_or_default();
+        let find = |mac: &str, dev: &str, dst: Option<&str>| {
+            entries.iter().find(|e| {
+                e["mac"] == mac && e["ifname"] == dev && dst.is_none_or(|d| e["dst"] == d)
+            })
+        };
+        let (m1_dev, m2_bridge, m2_state, uni) = want[i];
+        let m1 = find("02:00:00:00:5d:01", m1_dev, None);
+        let m2 = find("02:00:00:00:5d:02", "p0", None);
+        let checks = [
+            ("mac 1", m1.map(|e| (e["master"].clone(), e["state"].clone())), ("br0", "static")),
+            ("mac 2", m2.map(|e| (e["master"].clone(), e["state"].clone())), (m2_bridge, m2_state)),
+        ];
+        for (what, have, (master, state)) in checks {
+            if have != Some((serde_json::json!(master), serde_json::json!(state))) {
+                return Err(format!("step {}: {what} is {have:?}: {out}", i + 1));
+            }
+        }
+        for (m, dst) in [("00:00:00:00:00:00", "10.85.0.2"), ("00:00:00:00:00:00", "10.85.0.3"), ("02:00:00:00:5d:05", uni)] {
+            if find(m, "vx0", Some(dst)).is_none() {
+                return Err(format!("step {}: no remote {m} dst {dst}: {out}", i + 1));
+            }
+        }
+        let remotes = entries.iter().filter(|e| e["ifname"] == "vx0" && e["mac"] == "02:00:00:00:5d:05").count();
+        if remotes != 1 {
+            return Err(format!("step {}: the unicast MAC has {remotes} remotes: {out}", i + 1));
+        }
+        vx.push(link_json(&ns, "vx0")?["ifindex"].as_u64());
+        Ok(())
+    })
+    .await?;
+    assert_eq!(vx[0], vx[1], "step 2 changes entries, not the device");
+    assert_ne!(vx[1], vx[2], "a new VNI recreates the VXLAN device");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.
