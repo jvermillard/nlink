@@ -65,7 +65,7 @@ pub mod watch;
 
 pub use config::{
     DeclaredWgDevice, DeclaredWgDeviceBuilder, DeclaredWgPeer, DeclaredWgPeerBuilder,
-    DeviceChanges, PeerChanges, PublicKey, WireguardApplyResult, WireguardConfig,
+    DeviceChanges, PeerChanges, PrivateKey, PublicKey, WireguardApplyResult, WireguardConfig,
     WireguardConfigDiff,
 };
 pub use types::{

@@ -45,8 +45,12 @@ serde = ["dep:serde", "dep:serde_json"]
 # matches the validated serde JSON shape. Opt-in only — no runtime
 # cost when disabled. Use `NetworkConfig::json_schema()`.
 schemars = ["dep:schemars", "serde"]
+# Generate WireGuard private keys and derive their public keys
+# (`PrivateKey::generate`, `PrivateKey::public_key`): X25519, without a
+# separate crypto dependency of your own.
+wireguard-keys = ["dep:x25519-dalek"]
 # All features
-full = ["sockdiag", "tuntap", "output", "namespace_watcher", "lab", "syscall_batch", "serde", "schemars"]
+full = ["sockdiag", "tuntap", "output", "namespace_watcher", "lab", "syscall_batch", "serde", "schemars", "wireguard-keys"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
@@ -83,6 +87,8 @@ inotify = { version = "0.11", default-features = false, features = ["stream"], o
 # friendly subscriber. Integration-test only; production consumers
 # install their own subscriber.
 tracing-subscriber = { workspace = true, optional = true }
+# WireGuard key generation and public-key derivation (`wireguard-keys`).
+x25519-dalek = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

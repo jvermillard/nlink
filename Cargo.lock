@@ -497,6 +497,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winnow",
+ "x25519-dalek",
  "zerocopy",
 ]
 

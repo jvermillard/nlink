@@ -182,6 +182,7 @@ unsafe pointer casts in `types/`.
 | `syscall_batch` | `recvmmsg`/`sendmmsg` batching wired into eager + streaming dump paths (0.16+; opt-in for one soak release) |
 | `serde` | `Serialize` + validating `Deserialize` on the declarative config types (`NetworkConfig` round-trips through JSON/YAML; addresses/routes as CIDR strings, MACs as `aa:bb:..`, validated via `try_from`). Also gates `ConfigDiff`/`NftablesDiff`/result-type `Serialize`. Pulls `serde_json` for the `NetworkConfig::{from_json_str,to_json_string}` helpers. |
 | `schemars` | JSON Schema (draft 7) for `NetworkConfig` via `json_schema()` / `json_schema_value()` — wire into editor `json.schemas`/`yaml.schemas` or CI validation. Opt-in; implies `serde`; faithful to the human-facing JSON shape (CIDR strings, not parsed structs). 0.23+. |
+| `wireguard-keys` | `genl::wireguard::PrivateKey::{generate, public_key}` — X25519 key pairs without a crypto crate of your own (`x25519-dalek`). The key type itself, base64 and clamping, is always available. 0.31+, #529. |
 | `full` | All of the above |
 
 ## Type-safe units (Rate / Bytes / Percent)

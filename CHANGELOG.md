@@ -46,6 +46,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A WireGuard keepalive under a second turned keepalive off (#529).**
+  `persistent_keepalive(Duration::from_millis(500))` was truncated to 0
+  seconds, which WireGuard reads as "off", with no warning. A fraction of
+  a second now rounds up. More than 65535 s fails `validate()`.
+
 - **Documentation that contradicted the code (#511).** About 35
   statements, each checked against the source. Those that later fixes in
   this cycle had made true, or had already rewritten, are left as they
@@ -1149,6 +1154,13 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`genl::wireguard::PrivateKey`** (#529): a private key, clamped, that
+  reads and writes the base64 `wg genkey` prints and never appears in
+  `Debug`. With the new `wireguard-keys` feature, `PrivateKey::generate()`
+  and `.public_key()` do what `wg genkey` and `wg pubkey` do (X25519 via
+  `x25519-dalek`), so a consumer no longer needs a crypto crate of its own
+  for key pairs. Pass a key where a raw one is taken with `.into()`.
 
 - **`RateLimiter::{remove_egress, remove_ingress}`, `LinkMessage::alias()`
   and `Connection::set_link_alias{,_by_index}`** (#490).
