@@ -232,7 +232,13 @@ pub trait QdiscConfig: Send + Sync {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// Jitter without a [`rate`](Self::rate) reorders packets: netem sends
+/// each at its own delayed time from a time-sorted queue (tfifo), so a
+/// packet given less jitter overtakes one given more. tc(8) behaves the
+/// same; set a rate, or no jitter, to keep the order.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct NetemConfig {
     /// Added delay.
     pub delay: Option<Duration>,
@@ -266,6 +272,160 @@ pub struct NetemConfig {
     /// A Markov loss model (`loss state …` / `loss gemodel …`) in place
     /// of random [`loss`](Self::loss). Added in 0.29 (#368).
     pub loss_model: Option<NetemLossModel>,
+    /// Mark packets with ECN instead of dropping them, where `loss` would
+    /// (`tc … ecn`). Added in 0.32 (#515).
+    pub ecn: bool,
+    /// Release packets in slots (`tc … slot`). Added in 0.32 (#515).
+    pub slot: Option<NetemSlot>,
+    /// The seed of netem's random numbers (`tc … seed N`, Linux 6.3+): the
+    /// same seed drops, duplicates and reorders the same packets of the
+    /// same traffic, run after run. Added in 0.32 (#515).
+    pub seed: Option<u64>,
+    /// The delay distribution jitter is drawn from (`tc … distribution
+    /// normal`); uniform when `None`. Added in 0.32 (#515).
+    pub distribution: Option<NetemDistribution>,
+    /// The link-layer overhead the [`rate`](Self::rate) accounts for, in
+    /// bytes per packet (`tc … rate R OVERHEAD`). Added in 0.32 (#515).
+    pub rate_packet_overhead: i32,
+    /// The cell size the rate rounds each packet up to (ATM: 53).
+    /// Added in 0.32 (#515).
+    pub rate_cell_size: u32,
+    /// The overhead added to each cell. Added in 0.32 (#515).
+    pub rate_cell_overhead: i32,
+}
+
+/// A netem slot (`tc … slot MIN MAX [packets N] [bytes N]`): packets are
+/// held and released in bursts, each slot between `min_delay` and
+/// `max_delay` after the last, as a Wi-Fi or DOCSIS link schedules them
+/// (#515).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NetemSlot {
+    /// The shortest time between slots.
+    pub min_delay: Duration,
+    /// The longest time between slots; each is uniformly between the two.
+    pub max_delay: Duration,
+    /// The most packets one slot releases; unlimited when `None`.
+    pub max_packets: Option<u32>,
+    /// The most bytes one slot releases; unlimited when `None`.
+    pub max_bytes: Option<u32>,
+}
+
+impl NetemSlot {
+    /// Slots `min_delay` to `max_delay` apart, with no limit on what one
+    /// releases.
+    pub fn new(min_delay: Duration, max_delay: Duration) -> Self {
+        Self {
+            min_delay,
+            max_delay,
+            max_packets: None,
+            max_bytes: None,
+        }
+    }
+
+    /// Release at most `n` packets per slot.
+    pub fn packets(mut self, n: u32) -> Self {
+        self.max_packets = Some(n);
+        self
+    }
+
+    /// Release at most `n` bytes per slot.
+    pub fn bytes(mut self, n: u32) -> Self {
+        self.max_bytes = Some(n);
+        self
+    }
+}
+
+/// A netem delay distribution table (`tc … distribution NAME`): the shape
+/// of the jitter added to each packet's delay (#515).
+///
+/// tc(8) loads tables from iproute2's generated `.dist` files (`normal`,
+/// `pareto`, `paretonormal`); [`named`](Self::named) reads the same files
+/// from the same places, so a table matches `tc`'s exactly.
+///
+/// The kernel keeps a table across a change and never dumps it: to remove
+/// one, delete the qdisc and add it again. For the same reason a reconcile
+/// cannot see one — [`PerPeerImpairer`](crate::netlink::impair::PerPeerImpairer)
+/// leaves a netem in place when everything else about it matches, whatever
+/// table it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetemDistribution {
+    table: Vec<i16>,
+}
+
+impl NetemDistribution {
+    /// The most entries a table may have (`NETEM_DIST_MAX`).
+    pub const MAX_LEN: usize = 16384;
+
+    /// A table iproute2 installs, by name (`normal`, `pareto`,
+    /// `paretonormal`, …), found where tc(8) looks: `$TC_LIB_DIR`,
+    /// `/usr/lib/tc`, `/usr/lib64/tc`, and the multiarch
+    /// `/usr/lib/<triplet>/tc`.
+    pub fn named(name: &str) -> Result<Self> {
+        if name.is_empty() || name.contains('/') {
+            return Err(Error::InvalidMessage(format!(
+                "netem: distribution `{name}` is not a table name"
+            )));
+        }
+        let file = format!("{name}.dist");
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(dir) = std::env::var_os("TC_LIB_DIR") {
+            dirs.push(dir.into());
+        }
+        dirs.extend(["/usr/lib/tc", "/usr/lib64/tc"].map(std::path::PathBuf::from));
+        if let Ok(entries) = std::fs::read_dir("/usr/lib") {
+            dirs.extend(entries.flatten().map(|e| e.path().join("tc")));
+        }
+        for dir in dirs {
+            let path = dir.join(&file);
+            if path.is_file() {
+                return Self::from_file(path);
+            }
+        }
+        Err(Error::InvalidMessage(format!(
+            "netem: no distribution table `{file}` (is iproute2 installed? set TC_LIB_DIR to \
+             where its .dist files are)"
+        )))
+    }
+
+    /// A table from an iproute2 `.dist` file: whitespace-separated integers,
+    /// `#` comments.
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(Error::Io)?;
+        let mut table = Vec::new();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("");
+            for word in line.split_whitespace() {
+                let v: i16 = word.parse().map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "netem: {}: `{word}` is not a table entry",
+                        path.display()
+                    ))
+                })?;
+                table.push(v);
+            }
+        }
+        Self::from_table(table)
+    }
+
+    /// A table of your own: entries scaled by `NETEM_DIST_SCALE` (8192),
+    /// at most [`MAX_LEN`](Self::MAX_LEN).
+    pub fn from_table(table: Vec<i16>) -> Result<Self> {
+        if table.is_empty() || table.len() > Self::MAX_LEN {
+            return Err(Error::InvalidMessage(format!(
+                "netem: a distribution table has 1 to {} entries, not {}",
+                Self::MAX_LEN,
+                table.len()
+            )));
+        }
+        Ok(Self { table })
+    }
+
+    /// The entries.
+    pub fn table(&self) -> &[i16] {
+        &self.table
+    }
 }
 
 impl NetemConfig {
@@ -340,6 +500,48 @@ impl NetemConfig {
     /// installing a config that sets both is an error.
     pub fn loss_model(mut self, model: NetemLossModel) -> Self {
         self.loss_model = Some(model);
+        self
+    }
+
+    /// Mark packets with ECN instead of dropping them where `loss` would.
+    /// See [`ecn`](Self::ecn).
+    pub fn ecn(mut self, on: bool) -> Self {
+        self.ecn = on;
+        self
+    }
+
+    /// Release packets in slots. See [`NetemSlot`].
+    pub fn slot(mut self, slot: NetemSlot) -> Self {
+        self.slot = Some(slot);
+        self
+    }
+
+    /// Seed netem's random numbers, for runs that drop the same packets.
+    /// See [`seed`](Self::seed).
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Draw the jitter from this distribution. It needs a delay and a
+    /// jitter. See [`NetemDistribution`].
+    pub fn distribution(mut self, distribution: NetemDistribution) -> Self {
+        self.distribution = Some(distribution);
+        self
+    }
+
+    /// The link-layer overhead the rate accounts for: bytes per packet,
+    /// and a cell size and per-cell overhead (0 for none), as tc(8)'s
+    /// `rate R PACKETOVERHEAD CELLSIZE CELLOVERHEAD`.
+    pub fn rate_overhead(
+        mut self,
+        packet_overhead: i32,
+        cell_size: u32,
+        cell_overhead: i32,
+    ) -> Self {
+        self.rate_packet_overhead = packet_overhead;
+        self.rate_cell_size = cell_size;
+        self.rate_cell_overhead = cell_overhead;
         self
     }
 
@@ -426,14 +628,16 @@ impl NetemConfig {
     /// - `corrupt <pct> [<corr>]`
     /// - `reorder <pct> [<corr>]`
     /// - `gap <n>`
-    /// - `rate <rate>` — typed config doesn't model the optional
-    ///   `packet_overhead` / `cell_size` / `cell_overhead` extras
-    ///   yet, so those positional args are rejected here.
+    /// - `rate <rate> [<packet_overhead> [<cell_size> [<cell_overhead>]]]`
     /// - `limit <packets>`
+    /// - `ecn`
+    /// - `slot <min> [<max>] [packets <n>] [bytes <n>]`
+    /// - `distribution <name>` — an iproute2 table, see
+    ///   [`NetemDistribution::named`]
+    /// - `seed <n>`
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
-    /// `slot`, `ecn`, `distribution`. These need `NetemConfig`
-    /// extensions before they can land here.
+    /// **Not modelled** (returns `Error::InvalidMessage`): `slot
+    /// distribution …`, a slot whose spacing is drawn from a table.
     ///
     /// Strict: unknown keywords, missing values, and unparseable
     /// time/rate/percent/integer values all return an error rather
@@ -588,15 +792,34 @@ impl NetemConfig {
                         ))
                     })?);
                     i += 2;
-                    // Reject the legacy positional packet_overhead /
-                    // cell_size / cell_overhead extras — typed config
-                    // doesn't model them.
-                    if let Some(extra) = params.get(i)
-                        && !is_netem_keyword(extra)
+                    // Positional packet_overhead, cell_size, cell_overhead.
+                    let mut extras = 0;
+                    while let Some(v) = params.get(i).copied()
+                        && !is_netem_keyword(v)
                     {
-                        return Err(Error::InvalidMessage(format!(
-                            "netem: positional `rate` extras (packet_overhead/cell_size/cell_overhead) are not modelled by NetemConfig — file an issue if you need them, got `{extra}`"
-                        )));
+                        let bad = |what: &str| {
+                            Error::InvalidMessage(format!(
+                                "netem: invalid rate {what} `{v}` (expected integer)"
+                            ))
+                        };
+                        match extras {
+                            0 => {
+                                cfg.rate_packet_overhead =
+                                    v.parse().map_err(|_| bad("packet overhead"))?
+                            }
+                            1 => cfg.rate_cell_size = v.parse().map_err(|_| bad("cell size"))?,
+                            2 => {
+                                cfg.rate_cell_overhead =
+                                    v.parse().map_err(|_| bad("cell overhead"))?
+                            }
+                            _ => {
+                                return Err(Error::InvalidMessage(format!(
+                                    "netem: `rate` takes <rate> [<packet_overhead> [<cell_size> [<cell_overhead>]]], got an extra `{v}`"
+                                )));
+                            }
+                        }
+                        extras += 1;
+                        i += 1;
                     }
                 }
                 "limit" => {
@@ -610,10 +833,75 @@ impl NetemConfig {
                     })?;
                     i += 2;
                 }
-                "slot" | "ecn" | "distribution" => {
-                    return Err(Error::InvalidMessage(format!(
-                        "netem: `{key}` is not modelled by NetemConfig yet — file an issue if you need this token"
-                    )));
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "seed" => {
+                    let n_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `seed` requires a value".into())
+                    })?;
+                    cfg.seed = Some(n_str.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "netem: invalid seed `{n_str}` (expected unsigned 64-bit integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "distribution" => {
+                    let name = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `distribution` requires a table name".into())
+                    })?;
+                    cfg.distribution = Some(NetemDistribution::named(name)?);
+                    i += 2;
+                }
+                "slot" => {
+                    let time = |what: &str, v: &str| {
+                        crate::util::parse::get_time(v).map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "netem: invalid slot {what} `{v}` (expected tc-style time)"
+                            ))
+                        })
+                    };
+                    let min_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `slot` requires a minimum delay".into())
+                    })?;
+                    if min_str == "distribution" {
+                        return Err(Error::InvalidMessage(
+                            "netem: `slot distribution …` is not modelled by NetemConfig; use `slot <min> <max>` (NetemSlot::new)".into(),
+                        ));
+                    }
+                    let min = time("minimum delay", min_str)?;
+                    i += 2;
+                    let mut max = min;
+                    if let Some(v) = params.get(i).copied()
+                        && !is_netem_keyword(v)
+                        && v != "packets"
+                        && v != "bytes"
+                    {
+                        max = time("maximum delay", v)?;
+                        i += 1;
+                    }
+                    let mut slot = NetemSlot::new(min, max);
+                    while let Some(sub) = params.get(i).copied()
+                        && (sub == "packets" || sub == "bytes")
+                    {
+                        let n_str = params.get(i + 1).copied().ok_or_else(|| {
+                            Error::InvalidMessage(format!("netem: slot `{sub}` requires a value"))
+                        })?;
+                        let n: u32 = n_str.parse().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "netem: invalid slot {sub} `{n_str}` (expected unsigned integer)"
+                            ))
+                        })?;
+                        slot = if sub == "packets" {
+                            slot.packets(n)
+                        } else {
+                            slot.bytes(n)
+                        };
+                        i += 2;
+                    }
+                    cfg.slot = Some(slot);
                 }
                 other => {
                     return Err(Error::InvalidMessage(format!(
@@ -645,6 +933,7 @@ fn is_netem_keyword(s: &str) -> bool {
             | "slot"
             | "ecn"
             | "distribution"
+            | "seed"
             | "random"
     )
 }
@@ -707,6 +996,23 @@ impl QdiscConfig for NetemConfig {
             return Err(Error::InvalidMessage(
                 "netem: reorder requires delay to be set".into(),
             ));
+        }
+        // A distribution shapes the jitter, which netem only adds to a
+        // delay; tc(8) refuses one without both.
+        if self.distribution.is_some()
+            && (self.delay.is_none() || self.jitter.is_none_or(|j| j.is_zero()))
+        {
+            return Err(Error::InvalidMessage(
+                "netem: a distribution needs a delay and a jitter to shape".into(),
+            ));
+        }
+        if let Some(slot) = &self.slot
+            && slot.min_delay > slot.max_delay
+        {
+            return Err(Error::InvalidMessage(format!(
+                "netem: slot min_delay {:?} is above its max_delay {:?}",
+                slot.min_delay, slot.max_delay
+            )));
         }
         // A loss model replaces random loss in the kernel, which would
         // accept `loss` / its correlation alongside one and ignore them.
@@ -793,7 +1099,12 @@ impl QdiscConfig for NetemConfig {
         // the kernel assigns `q->rate` from TCA_NETEM_RATE first, so a stale
         // 64-bit rate cannot survive a replace that omits RATE64.
         let bytes_per_sec = self.rate.map_or(0, |r| r.as_bytes_per_sec());
-        let mut rate_struct = TcNetemRate::default();
+        let mut rate_struct = TcNetemRate {
+            packet_overhead: self.rate_packet_overhead,
+            cell_size: self.rate_cell_size,
+            cell_overhead: self.rate_cell_overhead,
+            ..TcNetemRate::default()
+        };
         if bytes_per_sec > u32::MAX as u64 {
             rate_struct.rate = u32::MAX;
             builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
@@ -808,16 +1119,40 @@ impl QdiscConfig for NetemConfig {
             model.write_attr(builder);
         }
 
-        // ECN and a slot are not modelled, so they are written off: a
-        // replace is `netem_change()`, which keeps both when they are not
-        // sent, so one set outside nlink (`tc … ecn`, `slot 1ms 2ms`) would
-        // otherwise survive every replace, unseen (#493). A zero slot is the
-        // kernel's "no slot" (`get_slot` clears `slot_next`). The delay
-        // distribution table cannot be cleared this way — `netem_change`
-        // keeps it, and `netem_dump` never shows it; only a delete and add
-        // resets one.
-        builder.append_attr_u32(TCA_NETEM_ECN, 0);
-        builder.append_attr(TCA_NETEM_SLOT, TcNetemSlot::default().as_bytes());
+        // ECN and the slot are always sent, off when unset: a replace is
+        // `netem_change()`, which keeps both when they are not sent, so one
+        // set outside nlink (`tc … ecn`, `slot 1ms 2ms`) would otherwise
+        // survive every replace, unseen (#493). A zero slot is the kernel's
+        // "no slot" (`get_slot` clears `slot_next`), and a zero packet or
+        // byte limit its "unlimited".
+        builder.append_attr_u32(TCA_NETEM_ECN, u32::from(self.ecn));
+        let slot = self
+            .slot
+            .map_or_else(TcNetemSlot::default, |s| TcNetemSlot {
+                min_delay: i64::try_from(s.min_delay.as_nanos()).unwrap_or(i64::MAX),
+                max_delay: i64::try_from(s.max_delay.as_nanos()).unwrap_or(i64::MAX),
+                max_packets: s
+                    .max_packets
+                    .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
+                max_bytes: s
+                    .max_bytes
+                    .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
+                ..TcNetemSlot::default()
+            });
+        builder.append_attr(TCA_NETEM_SLOT, slot.as_bytes());
+        // The seed is sent only when set: the kernel picks a random one
+        // otherwise, and keeps the old one across a change (Linux 6.3+;
+        // older kernels ignore the attribute).
+        if let Some(seed) = self.seed {
+            builder.append_attr(TCA_NETEM_PRNG_SEED, &seed.to_ne_bytes());
+        }
+        // The delay distribution table cannot be cleared by a change —
+        // `netem_change` keeps it, and `netem_dump` never shows it — so it
+        // is sent when set, and only a delete and add removes one.
+        if let Some(dist) = &self.distribution {
+            let bytes: Vec<u8> = dist.table().iter().flat_map(|v| v.to_ne_bytes()).collect();
+            builder.append_attr(TCA_NETEM_DELAY_DIST, &bytes);
+        }
 
         Ok(())
     }
@@ -9813,15 +10148,29 @@ mod tests {
     }
 
     #[test]
-    fn netem_parse_params_rate_extras_rejected() {
-        // The legacy parser accepts `rate <r> <packet_overhead> <cell_size>
-        // <cell_overhead>`. Typed config doesn't model those — typed
-        // parser rejects them with a clear pointer at the legacy path.
-        let err = NetemConfig::parse_params(&["rate", "100mbit", "20"]).unwrap_err();
-        assert!(
-            err.to_string().contains("packet_overhead"),
-            "expected rate-extras error, got: {err}"
+    fn netem_parse_params_rate_extras() {
+        // tc(8)'s `rate R PACKETOVERHEAD CELLSIZE CELLOVERHEAD`, greedy up
+        // to the next keyword; the overheads are signed.
+        let cfg =
+            NetemConfig::parse_params(&["rate", "1mbit", "-4", "53", "5", "limit", "9"]).unwrap();
+        assert_eq!(
+            (
+                cfg.rate_packet_overhead,
+                cfg.rate_cell_size,
+                cfg.rate_cell_overhead
+            ),
+            (-4, 53, 5)
         );
+        assert_eq!(cfg.limit, 9);
+        let cfg = NetemConfig::parse_params(&["rate", "1mbit", "20"]).unwrap();
+        assert_eq!((cfg.rate_packet_overhead, cfg.rate_cell_size), (20, 0));
+        for bad in [
+            &["rate", "1mbit", "1", "2", "3", "4"][..],
+            &["rate", "1mbit", "x"],
+        ] {
+            let err = NetemConfig::parse_params(bad).unwrap_err();
+            assert!(err.to_string().contains("netem: "), "got: {err}");
+        }
     }
 
     #[test]
@@ -9831,13 +10180,201 @@ mod tests {
     }
 
     #[test]
-    fn netem_parse_params_unsupported_features_rejected() {
-        for unsup in ["slot", "ecn", "distribution"] {
-            let err = NetemConfig::parse_params(&[unsup]).unwrap_err();
+    fn netem_parse_params_ecn_seed_slot() {
+        let cfg = NetemConfig::parse_params(&[
+            "delay",
+            "10ms",
+            "ecn",
+            "seed",
+            "18446744073709551615",
+            "slot",
+            "1ms",
+            "2ms",
+            "packets",
+            "5",
+            "bytes",
+            "3000",
+            "loss",
+            "1%",
+        ])
+        .unwrap();
+        assert!(cfg.ecn);
+        assert_eq!(cfg.seed, Some(u64::MAX));
+        assert_eq!(
+            cfg.slot,
+            Some(
+                NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2))
+                    .packets(5)
+                    .bytes(3000)
+            )
+        );
+        assert_eq!(cfg.loss, Percent::new(1.0));
+
+        // tc(8): an omitted maximum is the minimum.
+        let cfg = NetemConfig::parse_params(&["slot", "3ms", "packets", "2"]).unwrap();
+        assert_eq!(
+            cfg.slot,
+            Some(NetemSlot::new(Duration::from_millis(3), Duration::from_millis(3)).packets(2))
+        );
+    }
+
+    #[test]
+    fn netem_parse_params_new_tokens_are_strict() {
+        for (params, needle) in [
+            (&["seed"][..], "`seed` requires a value"),
+            (&["seed", "-1"], "invalid seed"),
+            (&["slot"], "`slot` requires"),
+            (&["slot", "x"], "invalid slot minimum delay"),
+            (&["slot", "1ms", "packets"], "slot `packets` requires"),
+            (&["slot", "1ms", "bytes", "lots"], "invalid slot bytes"),
+            (
+                &["slot", "distribution", "normal", "1ms", "1ms"],
+                "not modelled",
+            ),
+            (&["distribution"], "requires a table name"),
+            (&["distribution", "../normal"], "not a table name"),
+            (&["distribution", "no-such-table"], "no distribution table"),
+        ] {
+            let err = NetemConfig::parse_params(params).unwrap_err().to_string();
             assert!(
-                err.to_string().contains("not modelled"),
-                "expected not-modelled error for `{unsup}`, got: {err}"
+                err.contains(needle),
+                "{params:?}: expected `{needle}`, got: {err}"
             );
+            assert!(err.contains("netem: "), "{params:?}: {err}");
+        }
+    }
+
+    /// The attributes after `tc_netem_qopt`, which netem writes bare,
+    /// ahead of its attribute stream.
+    fn netem_attrs(cfg: &NetemConfig) -> crate::netlink::test_support::AttrMap {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        cfg.write_options(&mut b).unwrap();
+        crate::netlink::test_support::parse_attrs(&b.as_bytes()[start + TcNetemQopt::SIZE..])
+    }
+
+    /// The new fields on the wire (#515), against `struct tc_netem_rate`,
+    /// `struct tc_netem_slot` and the attribute types in `pkt_sched.h`.
+    #[test]
+    fn netem_writes_ecn_slot_seed_and_rate_overhead() {
+        let cfg = NetemConfig::new()
+            .rate(crate::util::Rate::bytes_per_sec(125_000))
+            .rate_overhead(-4, 53, 5)
+            .ecn(true)
+            .seed(0x0102_0304_0506_0708)
+            .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)).packets(5));
+        let attrs = netem_attrs(&cfg);
+        let rate = &attrs[&TCA_NETEM_RATE];
+        assert_eq!(rate.len(), 16);
+        assert_eq!(u32::from_ne_bytes(rate[0..4].try_into().unwrap()), 125_000);
+        assert_eq!(i32::from_ne_bytes(rate[4..8].try_into().unwrap()), -4);
+        assert_eq!(u32::from_ne_bytes(rate[8..12].try_into().unwrap()), 53);
+        assert_eq!(i32::from_ne_bytes(rate[12..16].try_into().unwrap()), 5);
+        assert_eq!(attrs[&TCA_NETEM_ECN], 1u32.to_ne_bytes());
+        assert_eq!(
+            attrs[&TCA_NETEM_PRNG_SEED],
+            0x0102_0304_0506_0708u64.to_ne_bytes()
+        );
+        let slot = &attrs[&TCA_NETEM_SLOT];
+        assert_eq!(slot.len(), 40);
+        assert_eq!(
+            i64::from_ne_bytes(slot[0..8].try_into().unwrap()),
+            1_000_000
+        );
+        assert_eq!(
+            i64::from_ne_bytes(slot[8..16].try_into().unwrap()),
+            2_000_000
+        );
+        assert_eq!(i32::from_ne_bytes(slot[16..20].try_into().unwrap()), 5);
+        // 0 is the kernel's "unlimited" for the byte limit not set.
+        assert_eq!(i32::from_ne_bytes(slot[20..24].try_into().unwrap()), 0);
+        assert!(slot[24..].iter().all(|&b| b == 0), "no slot distribution");
+        assert!(!attrs.contains_key(&TCA_NETEM_DELAY_DIST));
+
+        // Unset: ECN and the slot are written off, so a replace clears
+        // them; the seed is left for the kernel to pick.
+        let attrs = netem_attrs(&NetemConfig::new());
+        assert_eq!(attrs[&TCA_NETEM_ECN], 0u32.to_ne_bytes());
+        assert!(attrs[&TCA_NETEM_SLOT].iter().all(|&b| b == 0));
+        assert!(!attrs.contains_key(&TCA_NETEM_PRNG_SEED));
+    }
+
+    #[test]
+    fn netem_distribution_table_on_the_wire() {
+        let dist = NetemDistribution::from_table(vec![-32768, -1, 0, 1, 32767]).unwrap();
+        let cfg = NetemConfig::new()
+            .delay(Duration::from_millis(10))
+            .jitter(Duration::from_millis(2))
+            .distribution(dist);
+        let attrs = netem_attrs(&cfg);
+        let want: Vec<u8> = [-32768i16, -1, 0, 1, 32767]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        assert_eq!(attrs[&TCA_NETEM_DELAY_DIST], want);
+    }
+
+    #[test]
+    fn netem_distribution_needs_delay_and_jitter() {
+        let dist = || NetemDistribution::from_table(vec![0]).unwrap();
+        for cfg in [
+            NetemConfig::new().distribution(dist()),
+            NetemConfig::new()
+                .delay(Duration::from_millis(10))
+                .distribution(dist()),
+            NetemConfig::new()
+                .delay(Duration::from_millis(10))
+                .jitter(Duration::ZERO)
+                .distribution(dist()),
+        ] {
+            let mut b = MessageBuilder::new(0, 0);
+            let err = cfg.write_options(&mut b).unwrap_err();
+            assert!(
+                err.to_string().contains("needs a delay and a jitter"),
+                "got: {err}"
+            );
+        }
+        let mut b = MessageBuilder::new(0, 0);
+        let err = NetemConfig::new()
+            .slot(NetemSlot::new(
+                Duration::from_millis(2),
+                Duration::from_millis(1),
+            ))
+            .write_options(&mut b)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("above its max_delay"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn netem_distribution_table_limits() {
+        assert!(NetemDistribution::from_table(Vec::new()).is_err());
+        assert!(NetemDistribution::from_table(vec![0; NetemDistribution::MAX_LEN]).is_ok());
+        assert!(NetemDistribution::from_table(vec![0; NetemDistribution::MAX_LEN + 1]).is_err());
+    }
+
+    #[test]
+    fn netem_distribution_reads_an_iproute2_file() {
+        let dir = std::env::temp_dir().join(format!("nlink-dist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.dist");
+        std::fs::write(&path, "# comment\n -3 4\n\t5 # trailing\n").unwrap();
+        assert_eq!(
+            NetemDistribution::from_file(&path).unwrap().table(),
+            [-3, 4, 5]
+        );
+        std::fs::write(&path, "1 40000\n").unwrap();
+        let err = NetemDistribution::from_file(&path).unwrap_err().to_string();
+        assert!(err.contains("`40000` is not a table entry"), "got: {err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // iproute2's own table, when it is installed: 4096 entries, from
+        // the most negative i16.
+        if let Ok(normal) = NetemDistribution::named("normal") {
+            assert_eq!(normal.table().len(), 4096);
+            assert_eq!(normal.table()[0], -32768);
         }
     }
 

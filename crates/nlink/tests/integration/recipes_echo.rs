@@ -20,6 +20,8 @@ use nlink::{Bytes, Percent, Rate, ReconcileReport};
 use crate::common::traffic::{send_tcp_syns, send_udp};
 use crate::common::TestNamespace;
 
+// A table of test cases, built once each: the size is no concern.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum Recipe {
     Rate(RateLimiter),

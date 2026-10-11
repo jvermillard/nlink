@@ -271,9 +271,13 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
     }
 
     // Rate (bytes/sec). Desired's `rate` is Option<Rate>; live's is u64
-    // (0 == unset).
+    // (0 == unset). The overheads are echoed as sent.
     let desired_rate = desired.rate.map(|r| r.as_bytes_per_sec()).unwrap_or(0);
-    if desired_rate != live_opts.rate {
+    if desired_rate != live_opts.rate
+        || desired.rate_packet_overhead != live_opts.packet_overhead
+        || desired.rate_cell_size != live_opts.cell_size
+        || desired.rate_cell_overhead != live_opts.cell_overhead
+    {
         return false;
     }
 
@@ -283,12 +287,40 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
         return false;
     }
 
-    // ECN and a slot are not modelled, and `write_options` sends both off.
-    // One set outside nlink is therefore a difference a replace closes
-    // (#493).
-    if live_opts.ecn || live_opts.slot.is_some() {
+    // ECN and the slot are always sent, off when unset, so one set outside
+    // nlink is a difference a replace closes (#493). A slot's "unlimited"
+    // is 0 both ways — the kernel holds it as `INT_MAX` and `netem_dump`
+    // turns that back into 0, so a limit of `INT_MAX` or more reads back as
+    // 0 too. A slot drawn from a table (`slot distribution …`, which nlink
+    // does not write) never matches.
+    if desired.ecn != live_opts.ecn {
         return false;
     }
+    let limit = |want: Option<u32>, live: i32| {
+        let want = want
+            .and_then(|n| i32::try_from(n).ok())
+            .filter(|&n| n != i32::MAX);
+        want.unwrap_or(0) == live
+    };
+    let nanos = |d: std::time::Duration| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX);
+    match (&desired.slot, &live_opts.slot) {
+        (None, None) => {}
+        (Some(d), Some(l))
+            if nanos(d.min_delay) == l.min_delay_ns
+                && nanos(d.max_delay) == l.max_delay_ns
+                && limit(d.max_packets, l.max_packets)
+                && limit(d.max_bytes, l.max_bytes)
+                && l.dist_delay_ns == 0
+                && l.dist_jitter_ns == 0 => {}
+        _ => return false,
+    }
+    // A seed is compared only when one is asked for: unasked, the kernel
+    // picks one at random, and reports it.
+    if desired.seed.is_some() && desired.seed != live_opts.seed() {
+        return false;
+    }
+    // The delay distribution table is not compared: `netem_dump` never
+    // reports it (see `NetemDistribution`).
 
     // Markov loss model (#368). The kernel echoes TCA_NETEM_LOSS only for
     // a model, so "none" on both sides is a match; otherwise compare in the
@@ -686,6 +718,71 @@ mod tests {
         assert!(!netem_matches(
             &desired,
             &with(TCA_NETEM_SLOT, slot.as_bytes())
+        ));
+    }
+
+    /// #515: ECN, the slot, the seed and the rate overheads are written,
+    /// so they are compared — a reconcile that ignored them would leave a
+    /// changed one in place, and one that compared them wrongly would
+    /// replace the qdisc forever.
+    #[test]
+    fn netem_matches_compares_ecn_slot_seed_and_overhead() {
+        use crate::netlink::tc::NetemSlot;
+        use crate::util::Rate;
+        let base = || {
+            NetemConfig::new()
+                .delay(Duration::from_millis(10))
+                .rate(Rate::mbit(1))
+                .rate_overhead(20, 53, 5)
+                .ecn(true)
+                .seed(42)
+                .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)).packets(5))
+        };
+        assert!(netem_matches(&base(), &make_netem_msg(base())));
+        for (what, other) in [
+            ("ecn", base().ecn(false)),
+            ("seed", base().seed(43)),
+            ("overhead", base().rate_overhead(20, 53, 6)),
+            (
+                "slot",
+                base().slot(NetemSlot::new(
+                    Duration::from_millis(1),
+                    Duration::from_millis(3),
+                )),
+            ),
+            (
+                "slot packets",
+                base().slot(NetemSlot::new(
+                    Duration::from_millis(1),
+                    Duration::from_millis(2),
+                )),
+            ),
+        ] {
+            assert!(
+                !netem_matches(&base(), &make_netem_msg(other.clone())),
+                "{what}"
+            );
+            assert!(
+                !netem_matches(&other, &make_netem_msg(base())),
+                "{what}, reversed"
+            );
+        }
+        // No seed asked for accepts whatever the kernel picked.
+        let mut unseeded = base();
+        unseeded.seed = None;
+        assert!(netem_matches(&unseeded, &make_netem_msg(base())));
+        // A limit the kernel holds as INT_MAX — unlimited — dumps as 0.
+        let slot = NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2));
+        let unlimited = make_netem_msg(NetemConfig::new().slot(slot));
+        for n in [0, i32::MAX as u32, u32::MAX] {
+            assert!(
+                netem_matches(&NetemConfig::new().slot(slot.packets(n)), &unlimited),
+                "{n}"
+            );
+        }
+        assert!(!netem_matches(
+            &NetemConfig::new().slot(slot.packets(5)),
+            &unlimited
         ));
     }
 

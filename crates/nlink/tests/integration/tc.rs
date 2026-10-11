@@ -380,6 +380,204 @@ async fn netem_replace_clears_an_external_slot_and_ecn() -> Result<()> {
     Ok(())
 }
 
+/// `tc -d qdisc show dev <dev>` with the handle cut out, so two devices
+/// given the same netem print the same line.
+fn netem_line(ns: &TestNamespace, dev: &str) -> Result<String> {
+    let shown = ns.exec("tc", &["-d", "qdisc", "show", "dev", dev])?;
+    let line = shown
+        .lines()
+        .find(|l| l.starts_with("qdisc netem"))
+        .unwrap_or_else(|| panic!("no netem on {dev}: {shown}"));
+    Ok(line
+        .split_whitespace()
+        .enumerate()
+        .filter(|(i, _)| *i != 2)
+        .map(|(_, w)| w)
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+/// #515: the slot, ECN, the PRNG seed, the rate overheads and a delay
+/// distribution, which `parse_params` refused and `NetemConfig` could not
+/// carry. The same tokens go through `tc` on one device and through
+/// `NetemConfig::parse_params` on another, and the kernel shows the same
+/// netem on both; the table is not dumped, so it is checked by the kernel
+/// accepting it. A replace without them then clears what it should and
+/// keeps the seed, which the kernel holds across a change.
+#[tokio::test]
+async fn netem_slot_ecn_seed_overhead_and_distribution_match_tc() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem");
+
+    let (ns, conn) = setup_tc_ns("netem-515").await?;
+    conn.add_link(DummyLink::new("dummy1")).await?;
+    conn.set_link_up("dummy1").await?;
+    let tokens = [
+        "delay",
+        "10ms",
+        "2ms",
+        "distribution",
+        "normal",
+        "loss",
+        "1%",
+        "rate",
+        "1mbit",
+        "20",
+        "53",
+        "5",
+        "slot",
+        "1ms",
+        "2ms",
+        "packets",
+        "5",
+        "bytes",
+        "3000",
+        "ecn",
+        "seed",
+        "42",
+        "limit",
+        "500",
+    ];
+    let mut args = vec!["qdisc", "add", "dev", "dummy1", "root", "netem"];
+    args.extend(tokens);
+    ns.exec("tc", &args)?;
+    conn.add_qdisc("dummy0", NetemConfig::parse_params(&tokens)?)
+        .await?;
+
+    let ours = netem_line(&ns, "dummy0")?;
+    assert_eq!(
+        ours,
+        netem_line(&ns, "dummy1")?,
+        "nlink and tc installed different netems"
+    );
+    for word in [
+        "seed 42",
+        "ecn",
+        "slot 1ms 2ms packets 5 bytes 3000",
+        "packetoverhead 20",
+    ] {
+        assert!(ours.contains(word), "`{word}` missing: {ours}");
+    }
+
+    let opts = dummy0_netem(&conn).await?;
+    assert_eq!(opts.seed(), Some(42));
+    assert!(opts.ecn());
+    assert_eq!(
+        (
+            opts.packet_overhead(),
+            opts.cell_size(),
+            opts.cell_overhead()
+        ),
+        (20, 53, 5)
+    );
+    let slot = opts.slot().expect("the slot");
+    assert_eq!(
+        (slot.min_delay_ns, slot.max_delay_ns),
+        (1_000_000, 2_000_000)
+    );
+    assert_eq!((slot.max_packets, slot.max_bytes), (5, 3000));
+
+    conn.replace_qdisc(
+        "dummy0",
+        NetemConfig::new().delay(Duration::from_millis(10)),
+    )
+    .await?;
+    let opts = dummy0_netem(&conn).await?;
+    assert!(!opts.ecn(), "ECN survived the replace");
+    assert!(
+        opts.slot().is_none(),
+        "the slot survived: {:?}",
+        opts.slot()
+    );
+    assert_eq!(
+        (
+            opts.packet_overhead(),
+            opts.cell_size(),
+            opts.cell_overhead()
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        opts.seed(),
+        Some(42),
+        "the kernel keeps a seed a change does not send"
+    );
+    Ok(())
+}
+
+/// #515: a seeded netem drops the same packets of the same traffic. Five
+/// batches of 40 datagrams through a 50 % loss, read as the cumulative drop
+/// counts after each batch: the same seed twice gives the same five counts,
+/// another seed gives others (two random seeds would match by chance about
+/// once in 10^5). IPv6 is off on the device, so nothing but the test's
+/// datagrams draws from netem's generator.
+#[tokio::test]
+async fn netem_seed_reproduces_the_same_losses() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem");
+
+    let ns = TestNamespace::new("netem-seed")?;
+    let conn = ns.connection()?;
+    for key in ["all", "default"] {
+        ns.exec(
+            "sysctl",
+            &["-qw", &format!("net.ipv6.conf.{key}.disable_ipv6=1")],
+        )?;
+    }
+    conn.add_link(DummyLink::new("seed0")).await?;
+    let idx = conn
+        .get_link_by_name("seed0")
+        .await?
+        .expect("seed0")
+        .ifindex();
+    conn.add_address_by_index(idx, "10.9.9.1".parse().unwrap(), 24)
+        .await?;
+    conn.set_link_up_by_index(idx).await?;
+
+    let run = |seed: u64| {
+        let conn = &conn;
+        let ns = &ns;
+        async move {
+            let cfg = NetemConfig::new()
+                .loss(nlink::Percent::new(50.0))
+                .seed(seed);
+            conn.add_qdisc_by_index(idx, cfg).await?;
+            let mut drops = Vec::new();
+            for _ in 0..5 {
+                assert_eq!(
+                    crate::common::traffic::send_udp(ns, &["10.9.9.2:9"], 40),
+                    40
+                );
+                let qdiscs = conn.get_qdiscs_by_index(idx).await?;
+                let netem = qdiscs
+                    .iter()
+                    .find(|q| q.kind() == Some("netem"))
+                    .expect("netem");
+                drops.push(netem.drops());
+            }
+            conn.del_qdisc_by_index(idx, TcHandle::ROOT).await?;
+            Result::Ok(drops)
+        }
+    };
+    let first = run(7).await?;
+    assert!(
+        first[4] > 50 && first[4] < 150,
+        "50 % loss of 200 dropped {}: {first:?}",
+        first[4]
+    );
+    assert_eq!(
+        run(7).await?,
+        first,
+        "the same seed dropped different packets"
+    );
+    assert_ne!(
+        run(8).await?,
+        first,
+        "another seed dropped the same packets"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_del_netem() -> Result<()> {
     require_root!();
