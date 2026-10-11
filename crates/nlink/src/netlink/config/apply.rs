@@ -848,6 +848,39 @@ pub(crate) fn link_config(
             }
             Box::new(config)
         }
+        DeclaredLinkType::Ipvlan {
+            parent,
+            mode,
+            isolation,
+        } => {
+            use crate::netlink::link::{IpvlanFlags, IpvlanLink, IpvlanMode as K};
+            let mut config = IpvlanLink::new(&link.name, parent)
+                .mode(match mode {
+                    super::types::IpvlanMode::L2 => K::L2,
+                    super::types::IpvlanMode::L3 => K::L3,
+                    super::types::IpvlanMode::L3s => K::L3S,
+                })
+                .flags(match isolation {
+                    super::types::IpvlanIsolation::Bridge => IpvlanFlags::Bridge,
+                    super::types::IpvlanIsolation::Private => IpvlanFlags::Private,
+                    super::types::IpvlanIsolation::Vepa => IpvlanFlags::Vepa,
+                });
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            Box::new(config)
+        }
+        DeclaredLinkType::Macvtap { parent, mode } => {
+            let mut config = crate::netlink::link::MacvtapLink::new(&link.name, parent)
+                .mode(kernel_macvlan_mode(*mode));
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
+            Box::new(config)
+        }
         DeclaredLinkType::Macvlan { parent, mode } => {
             let mut config = MacvlanLink::new(&link.name, parent);
             config = config.mode(kernel_macvlan_mode(*mode));

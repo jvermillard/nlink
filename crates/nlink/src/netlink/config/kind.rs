@@ -1106,22 +1106,58 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 }
             }
         }
-        DeclaredLinkType::Macvlan { parent, mode } => {
+        DeclaredLinkType::Ipvlan {
+            parent,
+            mode,
+            isolation,
+        } => {
+            const IFLA_IPVLAN_MODE: u16 = 1;
+            const IFLA_IPVLAN_FLAGS: u16 = 2;
             if let Some(have) = lower_name(live, names)
                 && have != parent.as_str()
             {
-                d.recreate.push(format!("macvlan parent {have} -> {parent}"));
+                d.recreate.push(format!("ipvlan parent {have} -> {parent}"));
+            }
+            // Both change in place (`ipvlan_nl_changelink`, #516).
+            let want = *mode as u16;
+            if let Some(have) = data.u16_ne(IFLA_IPVLAN_MODE)
+                && have != want
+            {
+                d.update(
+                    "ipvlan",
+                    KindAttr::U16(IFLA_IPVLAN_MODE, want),
+                    format!("ipvlan mode {have} -> {want} ({mode:?})"),
+                );
+            }
+            let want = *isolation as u16;
+            if let Some(have) = data.u16_ne(IFLA_IPVLAN_FLAGS)
+                && have != want
+            {
+                d.update(
+                    "ipvlan",
+                    KindAttr::U16(IFLA_IPVLAN_FLAGS, want),
+                    format!("ipvlan isolation {have} -> {want} ({isolation:?})"),
+                );
+            }
+        }
+        DeclaredLinkType::Macvlan { parent, mode } | DeclaredLinkType::Macvtap { parent, mode } => {
+            let kind = declared.link_type.kind().unwrap_or("macvlan");
+            if let Some(have) = lower_name(live, names)
+                && have != parent.as_str()
+            {
+                d.recreate.push(format!("{kind} parent {have} -> {parent}"));
             }
             let want = kernel_macvlan_mode(*mode) as u32;
             if let Some(have) = data.u32(macvlan::IFLA_MACVLAN_MODE)
                 && have != want
             {
                 let passthru = KernelMacvlanMode::Passthru as u32;
-                let change = format!("macvlan mode {have} -> {want} ({mode:?})");
+                let change = format!("{kind} mode {have} -> {want} ({mode:?})");
                 if (have == passthru) != (want == passthru) {
                     d.recreate.push(change);
                 } else {
-                    d.update("macvlan", KindAttr::U32(macvlan::IFLA_MACVLAN_MODE, want), change);
+                    let kind = if kind == "macvtap" { "macvtap" } else { "macvlan" };
+                    d.update(kind, KindAttr::U32(macvlan::IFLA_MACVLAN_MODE, want), change);
                 }
             }
         }

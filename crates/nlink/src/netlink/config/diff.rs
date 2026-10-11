@@ -1451,9 +1451,10 @@ fn diff_links<'a>(
 /// The device a declared link stacks on, whose MTU caps its own.
 pub(crate) fn declared_lower(link: &DeclaredLink) -> Option<&str> {
     match &link.link_type {
-        DeclaredLinkType::Vlan { parent, .. } | DeclaredLinkType::Macvlan { parent, .. } => {
-            Some(parent)
-        }
+        DeclaredLinkType::Vlan { parent, .. }
+        | DeclaredLinkType::Macvlan { parent, .. }
+        | DeclaredLinkType::Ipvlan { parent, .. }
+        | DeclaredLinkType::Macvtap { parent, .. } => Some(parent),
         DeclaredLinkType::Vxlan { underlay_dev, .. } => underlay_dev.as_deref(),
         _ => None,
     }
