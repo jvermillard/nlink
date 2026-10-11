@@ -231,3 +231,36 @@ async fn a_watch_on_a_named_namespace_ends_when_it_is_deleted() -> nlink::Result
     drop(netns);
     Ok(())
 }
+
+/// `set_nsid` gives a namespace an id here, and `get_nsid` and
+/// `get_nsid_for_pid` read it back (#669). All three padded their one-byte
+/// `rtgenmsg` twice, so the attribute sat four bytes past where the kernel
+/// looks, and every call failed: "Peer netns reference is missing"
+/// (EINVAL).
+#[tokio::test]
+async fn nsids_are_set_and_read() -> nlink::Result<()> {
+    use std::os::fd::{AsFd, AsRawFd};
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("netns-nsid")?;
+    let peer = TestNamespace::new("netns-nsid-peer")?;
+    let conn = ns.connection()?;
+    let netns = Netns::open(peer.name())?;
+    let fd = netns.as_fd().as_raw_fd();
+    // NETNSA_NSID_NOT_ASSIGNED, -1: no id yet.
+    assert_eq!(conn.get_nsid(fd).await?, u32::MAX);
+    conn.set_nsid(fd, 7).await?;
+    assert_eq!(conn.get_nsid(fd).await?, 7);
+    let listed = ns.exec("ip", &["netns", "list-id"])?;
+    assert!(listed.contains("nsid 7 "), "{listed}");
+
+    // A process inside the namespace: it enters before it execs.
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("10");
+    let mut child = peer.spawn(cmd)?;
+    let got = conn.get_nsid_for_pid(child.id()).await;
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(got?, 7);
+    Ok(())
+}
