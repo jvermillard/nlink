@@ -112,6 +112,19 @@ impl DiffOptions {
         self
     }
 
+    /// The interfaces an address purge with these options touches, given
+    /// the config: every declared link, every interface a declared address
+    /// names, and [`Self::purge_address_devs`] (#470).
+    pub(crate) fn purge_address_scope<'a>(&'a self, config: &'a NetworkConfig) -> HashSet<&'a str> {
+        config
+            .links
+            .iter()
+            .map(|l| l.name.as_str())
+            .chain(config.addresses.iter().map(|a| a.dev.as_str()))
+            .chain(self.purge_address_devs.iter().map(String::as_str))
+            .collect()
+    }
+
     /// The route tables a purge with these options touches, given
     /// the config: main, every table a declared route names, and
     /// [`Self::purge_tables`].
@@ -565,6 +578,7 @@ pub async fn compute_diff_with_options(
     };
     let plan = kind::plan(
         config,
+        opts,
         &current_links,
         &current_addresses,
         &current_routes,
@@ -1236,24 +1250,9 @@ fn diff_addresses(
     // declares, as a link or by an address, or the caller names (#470),
     // and never kernel-managed addresses (link-local / loopback / any
     // non-global scope / anything with a lifetime).
-    let managed_devs: HashSet<&str> = config
-        .links
-        .iter()
-        .map(|l| l.name.as_str())
-        .chain(config.addresses.iter().map(|a| a.dev.as_str()))
-        .chain(opts.purge_address_devs.iter().map(String::as_str))
-        .collect();
+    let managed_devs = opts.purge_address_scope(config);
     for a in current {
-        // Only `global` (universe) scope — excludes IPv6 link-local
-        // (fe80::, scope link), loopback (::1 / 127.0.0.1, scope
-        // host), and other kernel-managed scopes.
-        if a.scope() != Scope::Universe {
-            continue;
-        }
-        // An address the kernel expires came from SLAAC, privacy
-        // extensions or a DHCP lease, and the next RA or renewal brings
-        // it back, so removing it never converges (#470).
-        if !a.is_permanent() {
+        if !purgeable_address(a) {
             continue;
         }
         let Some(name) = ifindex_to_name.get(&a.ifindex()) else {
@@ -1281,6 +1280,33 @@ fn diff_addresses(
             diff.addresses_to_remove.push(removal);
         }
     }
+}
+
+/// Whether a purge may remove `a` when nothing declares it, wherever it is.
+///
+/// Only `global` (universe) scope — not IPv6 link-local (fe80::, scope
+/// link), loopback (::1 / 127.0.0.1, scope host) or another kernel-managed
+/// scope. And only a permanent address: one the kernel expires came from
+/// SLAAC, privacy extensions or a DHCP lease, and the next RA or renewal
+/// brings it back, so removing it never converges (#470).
+pub(super) fn purgeable_address(a: &AddressMessage) -> bool {
+    a.scope() == Scope::Universe && a.is_permanent()
+}
+
+/// Whether a purge whose table scope is `tables` may remove `r` when
+/// nothing declared carries it: an IPv4 or IPv6 `static`/`boot` route of a
+/// type a declaration can describe, in a table the config owns.
+pub(super) fn purgeable_route(r: &RouteMessage, tables: &HashSet<u32>) -> bool {
+    (r.is_ipv4() || r.is_ipv6())
+        && matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
+        && matches!(
+            r.route_type(),
+            RouteType::Unicast
+                | RouteType::Blackhole
+                | RouteType::Unreachable
+                | RouteType::Prohibit
+        )
+        && tables.contains(&r.table_id())
 }
 
 /// The destination the kernel stores for a declared route.
@@ -1518,7 +1544,7 @@ fn diff_routes(
         let superseded = declared_here
             .iter()
             .any(|d| route_matches_but_metric(d, oif_of(d), r));
-        let purged = purge && tables.contains(&r.table_id());
+        let purged = purge && purgeable_route(r, &tables);
         if !(superseded || purged) {
             continue;
         }

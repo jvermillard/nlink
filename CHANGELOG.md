@@ -46,6 +46,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A link recreate was refused over what the same purge deleted, and was
+  not refused when it would delete a veth's peer in another namespace
+  (#471, items 1 and 3).**
+  - With purge on, an undeclared address on the link or a static route
+    through it held the recreate back, even though the same apply was
+    about to delete it. So changing a VLAN id and dropping one of its
+    addresses took two applies. What the purge removes no longer blocks;
+    the diff and the plan share the purge predicates.
+  - A veth's or vxcan's peer in another namespace is not part of the
+    recreate closure (nothing here can declare it), so a kind change on
+    the live link deleted the peer silently. That is now a blocker.
+
+  Item 2 (per-link settings such as devconf, an undeclared MAC, MTU,
+  txqlen or alias, which a recreate resets silently) moves to #513.
+
 - **Link changes ran in declaration order, so the kernel refused valid
   configs (#473).** Only creates were sorted.
   - **Raising a parent's and a VLAN's MTU together** failed with `ERANGE`
