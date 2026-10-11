@@ -1978,12 +1978,60 @@ pub struct DeclaredQdisc {
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) parent: QdiscParent,
     pub(crate) qdisc_type: DeclaredQdiscType,
+    /// The qdisc's handle, in tc(8) notation in JSON (`"1:"`). `None`: `1:`
+    /// for a classful kind, so its classes and filters can name it, and
+    /// the kernel's choice for the others (#514).
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "handle_serde"
+        )
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub(crate) handle: Option<crate::TcHandle>,
+}
+
+/// A qdisc handle as tc(8) writes it, `"1:"`, in JSON.
+#[cfg(feature = "serde")]
+mod handle_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        h: &Option<crate::TcHandle>,
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match h {
+            Some(h) => s.serialize_str(&h.to_string()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Option<crate::TcHandle>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|s| s.parse().map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 impl DeclaredQdisc {
     /// Get the device name.
     pub fn dev(&self) -> &str {
         &self.dev
+    }
+
+    /// The handle it is installed with: the declared one, `1:` for a
+    /// classful kind (HTB, prio), and `None`, the kernel's choice, for the
+    /// others (#514).
+    pub fn effective_handle(&self) -> Option<crate::TcHandle> {
+        self.handle.or_else(|| {
+            self.qdisc_type
+                .is_classful()
+                .then(|| crate::TcHandle::major_only(1))
+        })
     }
 
     /// Get the parent as declared.
@@ -2314,8 +2362,14 @@ impl DeclaredQdiscType {
     pub(crate) fn required_parent(&self) -> Option<QdiscParent> {
         match self {
             DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => Some(QdiscParent::Ingress),
+            DeclaredQdiscType::KernelDefault => Some(QdiscParent::Root),
             _ => None,
         }
+    }
+
+    /// Whether the kind has classes, and so a fixed handle by default.
+    pub(crate) fn is_classful(&self) -> bool {
+        matches!(self, Self::Htb { .. } | Self::Prio { .. })
     }
 }
 
@@ -2464,6 +2518,10 @@ pub enum DeclaredQdiscType {
     Ingress,
     /// Clsact qdisc (for BPF).
     Clsact,
+    /// The kernel's own root qdisc: whatever root is installed goes, and
+    /// the kernel puts its default back (`pfifo_fast`, `mq`, `noqueue`,
+    /// …). Built by [`QdiscBuilder::kernel_default`] (#514).
+    KernelDefault,
 }
 
 impl DeclaredQdiscType {
@@ -2478,6 +2536,7 @@ impl DeclaredQdiscType {
             Self::Prio { .. } => "prio",
             Self::Ingress => "ingress",
             Self::Clsact => "clsact",
+            Self::KernelDefault => "default",
         }
     }
 }
@@ -2489,6 +2548,7 @@ pub struct QdiscBuilder {
     dev: String,
     parent: QdiscParent,
     qdisc_type: Option<DeclaredQdiscType>,
+    handle: Option<crate::TcHandle>,
     /// Setters called for a kind the qdisc is not (#476).
     errors: Vec<String>,
 }
@@ -2499,8 +2559,32 @@ impl QdiscBuilder {
             dev: dev.to_string(),
             parent: QdiscParent::Root,
             qdisc_type: None,
+            handle: None,
             errors: Vec::new(),
         }
+    }
+
+    /// Install the qdisc with handle `handle` (`1:` is
+    /// `TcHandle::major_only(1)`), which its classes and filters name. A
+    /// classful kind defaults to `1:`; the others get the kernel's choice
+    /// (#514). A handle with a minor is an error.
+    pub fn handle(mut self, handle: crate::TcHandle) -> Self {
+        if handle.minor() != 0 {
+            self.errors.push(format!(
+                "`.handle({handle})`: a qdisc handle has no minor (`1:`, not `1:1`)"
+            ));
+        } else {
+            self.handle = Some(handle);
+        }
+        self
+    }
+
+    /// Declare the kernel's own root qdisc: whatever root is installed is
+    /// deleted, and the kernel puts its default back (#514).
+    pub fn kernel_default(mut self) -> Self {
+        self.parent = QdiscParent::Root;
+        self.qdisc_type = Some(DeclaredQdiscType::KernelDefault);
+        self
     }
 
     /// Record a setter called for the wrong kind: it did nothing, so
@@ -3111,6 +3195,7 @@ impl QdiscBuilder {
             dev: self.dev,
             parent: self.parent,
             qdisc_type,
+            handle: self.handle,
         })
     }
 }

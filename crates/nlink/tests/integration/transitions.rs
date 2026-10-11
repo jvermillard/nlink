@@ -1018,3 +1018,48 @@ async fn offline_recreate_predictions_match_the_kernel() -> nlink::Result<()> {
     assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }
+
+/// A declared handle is the handle the kernel holds, a classful kind sits at
+/// `1:` where its classes can name it, and the kernel's own root comes back
+/// when declared. Each step converges (#514).
+#[tokio::test]
+async fn qdisc_handles_change_in_place() -> nlink::Result<()> {
+    use nlink::TcHandle;
+    use nlink::netlink::config::QdiscBuilder;
+    require_root!();
+    nlink::require_modules!("dummy", "sch_netem", "sch_prio");
+
+    let q = |f: fn(QdiscBuilder) -> QdiscBuilder| dummy(|l| l).qdisc("d0", f);
+    let steps = [
+        q(|q| q.netem().handle(TcHandle::major_only(0x10))),
+        q(|q| q.netem().handle(TcHandle::major_only(0x20))),
+        q(|q| q.prio()),
+        q(|q| q.kernel_default()),
+    ];
+    let want = ["netem 10:", "netem 20:", "prio 1:", "default"];
+    let ns = TestNamespace::new("tr-handles")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let out = ns
+            .exec("tc", &["-j", "qdisc", "show", "dev", "d0", "root"])
+            .map_err(|e| e.to_string())?;
+        let qdiscs: serde_json::Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+        let root = &qdiscs[0];
+        let shown = format!(
+            "{} {}",
+            root["kind"].as_str().unwrap_or("?"),
+            root["handle"].as_str().unwrap_or("?")
+        );
+        let ok = match want[i] {
+            // The kernel's default root has handle 0: — `noqueue` on a
+            // dummy.
+            "default" => root["handle"] == "0:",
+            w => shown == w,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("want {}, the kernel has {shown}: {out}", want[i]))
+        }
+    })
+    .await
+}
