@@ -228,6 +228,20 @@ pub async fn apply_diff(
     // 5. Configure qdiscs
     // 6. Remove old resources (if purge enabled)
 
+    // A declared link that does not exist and that nothing in this apply
+    // creates: a typo, or a device not there yet (#475).
+    for name in &diff.links_missing {
+        let error = Error::interface_not_found(name.as_str());
+        if options.continue_on_error {
+            result.errors.push(ApplyError {
+                operation: format!("link {name}"),
+                error,
+            });
+            continue;
+        }
+        return Err(error);
+    }
+
     // A declared route whose place holds a route the config does not own
     // — the kernel's connected route, an RA, DHCP or routing daemon's —
     // would replace it (#469). Refused before anything changes.

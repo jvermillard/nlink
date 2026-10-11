@@ -146,6 +146,14 @@ pub struct ConfigDiff {
     /// Links to modify (name, changes).
     pub links_to_modify: Vec<(String, LinkChanges)>,
 
+    /// Links the config declares without a kind — so it does not create
+    /// them — that do not exist, and that no veth or netkit pair in this
+    /// apply creates as its peer. A typo, or a device not there yet. The
+    /// apply fails on the first, before it changes anything, with
+    /// [`Error::InterfaceNotFound`](crate::Error::InterfaceNotFound). They
+    /// were skipped without a word (#475).
+    pub links_missing: Vec<String>,
+
     /// Addresses to add.
     pub addresses_to_add: Vec<DeclaredAddress>,
 
@@ -244,6 +252,7 @@ impl ConfigDiff {
         self.links_to_recreate.is_empty()
             && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
+            && self.links_missing.is_empty()
             && self.addresses_to_add.is_empty()
             && self.routes_to_add.is_empty()
             && self.routes_refused.is_empty()
@@ -258,6 +267,7 @@ impl ConfigDiff {
         self.links_to_recreate.len()
             + self.links_to_add.len()
             + self.links_to_modify.len()
+            + self.links_missing.len()
             + self.addresses_to_add.len()
             + self.routes_to_add.len()
             + self.routes_refused.len()
@@ -293,6 +303,11 @@ impl ConfigDiff {
         }
         for (name, changes) in &self.links_to_modify {
             lines.push(format!("~ link {} ({})", name, changes.summary()));
+        }
+        for name in &self.links_missing {
+            lines.push(format!(
+                "! link {name} (missing: it does not exist, and the config does not create it)"
+            ));
         }
 
         // Addresses
@@ -702,6 +717,20 @@ fn diff_links<'a>(
     let mut port_set_changes: HashSet<&str> = HashSet::new();
     let mut flushing: HashSet<&str> = HashSet::new();
 
+    // The peers of the veth and netkit pairs this apply creates: declared
+    // on their own, without a kind, they do not exist yet, and will (#475).
+    let created_peers: HashSet<&str> = config
+        .links
+        .iter()
+        .filter(|l| !current.contains_key(l.name.as_str()))
+        .filter_map(|l| match &l.link_type {
+            DeclaredLinkType::Veth { peer } | DeclaredLinkType::Netkit { peer, .. } => {
+                Some(peer.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
@@ -744,19 +773,27 @@ fn diff_links<'a>(
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
             }
-        } else {
+        } else if declared.link_type != DeclaredLinkType::Physical {
             // Link doesn't exist, needs to be created
-            // But only if it's not a physical interface
-            if declared.link_type != DeclaredLinkType::Physical {
-                port_set_changes.extend(declared.master.name());
-                let mut link = declared.clone();
-                // A recreated link comes back down; one declared without a
-                // state keeps the one it had.
-                if link.state == LinkState::Unchanged && plan.was_up.contains(&link.name) {
-                    link.state = LinkState::Up;
-                }
-                diff.links_to_add.push(link);
+            port_set_changes.extend(declared.master.name());
+            let mut link = declared.clone();
+            // A recreated link comes back down; one declared without a
+            // state keeps the one it had.
+            if link.state == LinkState::Unchanged && plan.was_up.contains(&link.name) {
+                link.state = LinkState::Up;
             }
+            diff.links_to_add.push(link);
+        } else if created_peers.contains(declared.name.as_str()) {
+            // The other end of a pair this apply creates. Its settings go
+            // in as modifications, which run after every create; they used
+            // to wait for the next apply, so the pair had no carrier (#475).
+            port_set_changes.extend(declared.master.name());
+            let changes = new_peer_changes(declared, &bonds);
+            if !changes.is_empty() {
+                diff.links_to_modify.push((declared.name.clone(), changes));
+            }
+        } else {
+            diff.links_missing.push(declared.name.clone());
         }
     }
 
@@ -819,6 +856,24 @@ fn diff_links<'a>(
     // That requires explicit purge mode
 
     flushing
+}
+
+/// What the peer of a pair this apply creates needs once it exists. The
+/// kernel creates it down, with no master, and the create carries none of
+/// its own declaration, so every declared setting is a change.
+fn new_peer_changes(declared: &DeclaredLink, bonds: &HashSet<&str>) -> LinkChanges {
+    let set_master = declared.master.name().map(str::to_string);
+    // A bond opens the port it enslaves (`bond_enslave()` ends in
+    // `dev_open()`), so a port declared down is closed after it.
+    let joins_bond = set_master.as_deref().is_some_and(|m| bonds.contains(m));
+    LinkChanges {
+        set_up: declared.state == LinkState::Up,
+        set_down: declared.state == LinkState::Down && joins_bond,
+        set_mtu: declared.mtu,
+        set_address: declared.address,
+        set_master,
+        ..LinkChanges::default()
+    }
 }
 
 /// Plan 186 §3c — stable topological sort of `links_to_add`.

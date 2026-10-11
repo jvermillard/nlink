@@ -223,7 +223,15 @@ impl Stack {
     pub async fn diff_in_with(&self, ns: NamespaceSpec<'_>, opts: DiffOptions) -> Result<StackDiff> {
         let mut out = StackDiff::default();
         if let Some(cfg) = &self.network {
-            out.network = Some(diff::network_in_with(ns.clone(), cfg, opts).await?);
+            let mut network = diff::network_in_with(ns.clone(), cfg, opts).await?;
+            // An apply creates the WireGuard links first, so a network
+            // declaration on one is not missing (#475).
+            if let Some(wg) = &self.wireguard {
+                network
+                    .links_missing
+                    .retain(|name| !wg.devices().iter().any(|d| &d.ifname == name));
+            }
+            out.network = Some(network);
         }
         if let Some(cfg) = &self.nftables {
             out.nftables = Some(diff::nftables_in(ns.clone(), cfg).await?);
