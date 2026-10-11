@@ -46,6 +46,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The address purge missed a link with no declared address left, and
+  removed addresses the kernel hands out (#470).**
+  - A purge only managed the interfaces that still had a declared
+    address, so when a link's last address left the config, the address
+    stayed on the link. It now reaches every declared link as well, and
+    `DiffOptions::purge_address_devs` / `ApplyOptions::with_purge_address_devs`
+    add interfaces a caller owned before and declares nothing on now.
+  - It removed SLAAC, privacy and DHCP-leased addresses. The next RA or
+    renewal brought them back, so a purging diff never converged where
+    an RA source or DHCP client ran. An address without
+    `IFA_F_PERMANENT` is now left alone unless declared.
+
 - **Four `NetworkConfig` builder mistakes became a different config
   instead of an error (#476).**
   - `route(.., |r| r.via("10.0.0.1x"))` dropped the gateway it could not
@@ -902,6 +914,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`DiffOptions::purge_address_devs` and
+  `ApplyOptions::with_purge_address_devs`** (#470): interfaces to purge
+  addresses from that the config no longer declares.
 
 - **`Connection::lookup_route(dest)`**: the kernel's route for a
   destination, `ip route get` semantics (#509).

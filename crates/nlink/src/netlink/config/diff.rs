@@ -46,9 +46,16 @@ pub struct DiffOptions {
     /// before anything is deleted.
     ///
     /// Scope + safety rails:
-    /// - **Addresses**: only `global`-scope addresses on interfaces
-    ///   the config declares addresses on. IPv6 link-local,
-    ///   loopback, and any non-global scope are excluded.
+    /// - **Addresses**: only `global`-scope, permanent addresses, on the
+    ///   interfaces the config declares — as a link or by giving it an
+    ///   address — and those listed in [`Self::purge_address_devs`]. IPv6
+    ///   link-local, loopback and any non-global scope are excluded, and
+    ///   so is an address the kernel will expire (no `IFA_F_PERMANENT`):
+    ///   SLAAC, temporary, or DHCP-assigned with a lifetime. The next RA
+    ///   or lease renewal would put it back, so a purge that removed it
+    ///   never converged. Until 0.31 the interfaces were only the ones
+    ///   with a declared address, so dropping a link's last address left
+    ///   it on the link (#470).
     /// - **Routes**: only `static`/`boot` protocol routes, and only
     ///   in the tables the config **owns**: the main table (254),
     ///   every table some declared route names via
@@ -72,6 +79,12 @@ pub struct DiffOptions {
     /// declaration and its leftovers stay. Ignored unless
     /// [`Self::purge`] is on.
     pub purge_tables: Vec<u32>,
+
+    /// Extra interfaces to purge addresses from, on top of the ones the
+    /// config declares. For a caller that owned an interface's addresses
+    /// in its previous config and declares nothing on it now. Ignored
+    /// unless [`Self::purge`] is on.
+    pub purge_address_devs: Vec<String>,
 }
 
 impl DiffOptions {
@@ -85,6 +98,17 @@ impl DiffOptions {
     /// Add route tables to the purge scope. See [`Self::purge_tables`].
     pub fn purge_tables(mut self, tables: impl IntoIterator<Item = u32>) -> Self {
         self.purge_tables.extend(tables);
+        self
+    }
+
+    /// Add interfaces to the address purge scope. See
+    /// [`Self::purge_address_devs`].
+    pub fn purge_address_devs<S: Into<String>>(
+        mut self,
+        devs: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.purge_address_devs
+            .extend(devs.into_iter().map(Into::into));
         self
     }
 
@@ -140,8 +164,9 @@ pub struct ConfigDiff {
     /// with `purge` on; the default
     /// [`diff`](crate::netlink::config::NetworkConfig::diff) never
     /// removes anything. Kernel-managed addresses (IPv6 link-local,
-    /// loopback, any non-`global` scope) are excluded, and only
-    /// interfaces the config declares addresses on are touched.
+    /// loopback, any non-`global` scope, anything with a lifetime) are
+    /// excluded, and only the interfaces the config declares and
+    /// [`DiffOptions::purge_address_devs`] are touched.
     pub addresses_to_remove: Vec<DeclaredAddress>,
 
     /// Routes to remove.
@@ -552,7 +577,7 @@ pub async fn compute_diff_with_options(
         &current_addresses,
         &ifindex_to_name,
         &flushed_names,
-        opts.purge,
+        opts,
         &mut diff,
     );
 
@@ -967,7 +992,7 @@ fn diff_addresses(
     current: &[AddressMessage],
     ifindex_to_name: &HashMap<u32, &str>,
     flushed: &HashSet<&str>,
-    purge: bool,
+    opts: &DiffOptions,
     diff: &mut ConfigDiff,
 ) {
     // Build set of desired addresses: (dev, address, prefix_len)
@@ -1025,22 +1050,33 @@ fn diff_addresses(
         }
     }
 
-    if !purge {
-        let _ = desired; // Silence unused warning in the non-purge path.
+    if !opts.purge {
         return;
     }
 
     // Purge: remove global-scope addresses that the kernel has but
     // the config doesn't declare — but only on interfaces the config
-    // declares *some* address on (we don't touch interfaces we're
-    // not managing addresses for), and never kernel-managed
-    // addresses (link-local / loopback / any non-global scope).
-    let managed_devs: HashSet<&str> = config.addresses.iter().map(|a| a.dev.as_str()).collect();
+    // declares, as a link or by an address, or the caller names (#470),
+    // and never kernel-managed addresses (link-local / loopback / any
+    // non-global scope / anything with a lifetime).
+    let managed_devs: HashSet<&str> = config
+        .links
+        .iter()
+        .map(|l| l.name.as_str())
+        .chain(config.addresses.iter().map(|a| a.dev.as_str()))
+        .chain(opts.purge_address_devs.iter().map(String::as_str))
+        .collect();
     for a in current {
         // Only `global` (universe) scope — excludes IPv6 link-local
         // (fe80::, scope link), loopback (::1 / 127.0.0.1, scope
         // host), and other kernel-managed scopes.
         if a.scope() != Scope::Universe {
+            continue;
+        }
+        // An address the kernel expires came from SLAAC, privacy
+        // extensions or a DHCP lease, and the next RA or renewal brings
+        // it back, so removing it never converges (#470).
+        if !a.is_permanent() {
             continue;
         }
         let Some(name) = ifindex_to_name.get(&a.ifindex()) else {
@@ -2466,6 +2502,64 @@ mod tests {
         d.routes_to_remove.push(declared_route("10.1.0.0", 24));
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 2);
+    }
+
+    // ---- #470 — address purge scope ----
+
+    fn kernel_addr(ifindex: u32, addr: &str, plen: u8, flags: u32) -> AddressMessage {
+        crate::netlink::messages::AddressMessageBuilder::new()
+            .ifindex(ifindex)
+            .address(addr.parse().unwrap())
+            .prefix_len(plen)
+            .scope(Scope::Universe)
+            .flags(flags)
+            .build()
+    }
+
+    fn purge_addresses(
+        config: &NetworkConfig,
+        current: &[AddressMessage],
+        opts: DiffOptions,
+    ) -> Vec<String> {
+        let names = HashMap::from([(1, "d0"), (2, "d1"), (3, "d2")]);
+        let mut diff = ConfigDiff::default();
+        diff_addresses(config, current, &names, &HashSet::new(), &opts, &mut diff);
+        diff.addresses_to_remove
+            .iter()
+            .map(|a| format!("{}/{} on {}", a.address, a.prefix_len, a.dev))
+            .collect()
+    }
+
+    /// A purge reaches every declared link, not only the ones that still
+    /// have a declared address, and the interfaces the caller names. It
+    /// leaves an address the kernel will expire alone (#470).
+    #[test]
+    fn address_purge_covers_declared_links_and_skips_dynamic_addresses() {
+        const PERMANENT: u32 = 0x80;
+        let config = NetworkConfig::new()
+            .link("d0", |l| l.dummy())
+            .address("d1", "10.0.1.1/24")
+            .unwrap();
+        let current = [
+            // d0 is declared and has no address left: removed.
+            kernel_addr(1, "10.0.0.1", 24, PERMANENT),
+            // SLAAC, or a DHCP lease: the kernel expires it.
+            kernel_addr(1, "2001:db8::9", 64, 0),
+            kernel_addr(2, "10.0.1.1", 24, PERMANENT),
+            kernel_addr(2, "10.0.1.9", 24, 0),
+            // d2 is not declared.
+            kernel_addr(3, "10.0.2.1", 24, PERMANENT),
+        ];
+        let purge = DiffOptions::default().purge(true);
+        assert_eq!(
+            purge_addresses(&config, &current, purge.clone()),
+            ["10.0.0.1/24 on d0"]
+        );
+        assert_eq!(
+            purge_addresses(&config, &current, purge.purge_address_devs(["d2"])),
+            ["10.0.0.1/24 on d0", "10.0.2.1/24 on d2"]
+        );
+        assert!(purge_addresses(&config, &current, DiffOptions::default()).is_empty());
     }
 
     #[test]

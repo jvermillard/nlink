@@ -688,13 +688,17 @@ desired
 Purge is conservatively fenced so a reconcile can't strip
 kernel-managed state:
 
-- **Addresses:** only **global-scope** addresses on interfaces the
-  config already manages are eligible. IPv6 link-local, loopback, and
-  any non-universe scope are never removed.
-- **Routes:** only **`static`/`boot`-protocol routes in the main
-  table** (unicast/blackhole/unreachable/prohibit). Kernel-derived, RA,
-  DHCP, and redirect routes, the auto-added connected route, and every
-  non-main table are left untouched.
+- **Addresses:** only **global-scope, permanent** addresses on the
+  interfaces the config declares (as a link or by an address), plus any
+  named with `DiffOptions::purge_address_devs`. IPv6 link-local,
+  loopback, any non-universe scope, and addresses the kernel will expire
+  (SLAAC, temporary, a DHCP lease) are never removed.
+- **Routes:** only **`static`/`boot`-protocol routes**
+  (unicast/blackhole/unreachable/prohibit), in the main table, the
+  tables declared routes name, and any named with
+  `DiffOptions::purge_tables`. Kernel-derived, RA, DHCP, and redirect
+  routes, the auto-added connected route, and every other table are left
+  untouched.
 - **Links and qdiscs are never purged** — deleting an interface is too
   blunt for a declarative reconcile; use the imperative `del_link` /
   `del_qdisc` when you mean it.
