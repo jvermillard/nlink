@@ -181,12 +181,14 @@ pub(crate) fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec
 
 /// Kernel-assigned rule handle (`NFTA_RULE_HANDLE`).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuleHandle(pub u64);
 
 /// Where an added or moved rule goes in its chain. Rule order is policy
 /// (first match wins), so the diff says exactly where each rule lands.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RulePlacement {
@@ -200,6 +202,7 @@ pub enum RulePlacement {
 
 /// A declared rule to add, and where it goes.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RuleAdd {
@@ -216,6 +219,7 @@ pub struct RuleAdd {
 
 /// Why the diff deletes a rule and puts it back.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MoveReason {
@@ -239,6 +243,7 @@ pub enum MoveReason {
 /// A rule the diff deletes and re-inserts, keeping (or restoring) its place
 /// in the chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RuleMove {
@@ -267,6 +272,7 @@ pub struct RuleMove {
 /// ([`NftablesDiff::flowtables_to_delete`] and
 /// [`NftablesDiff::flowtables_to_add`] both name it).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct FlowtableUpdate {
@@ -310,6 +316,7 @@ impl std::fmt::Display for FlowtableUpdate {
 /// chain with an empty diff. A base chain cannot be a jump target, so only
 /// its own rules depend on it.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ChainRecreate {
@@ -362,6 +369,7 @@ impl std::fmt::Display for ChainRecreate {
 /// Elements to add to, or remove from, one set — with the [`Set`] they
 /// belong to, since how an element is written depends on the set.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SetElementsChange {
@@ -379,6 +387,7 @@ pub struct SetElementsChange {
 /// message fails the whole batch, so deleting it would fail every apply until
 /// someone removed the rule by hand (#459).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -459,6 +468,7 @@ impl std::fmt::Display for KeptInUse {
 /// `is_empty()` returns true when declared and current already
 /// agree (idempotent reapply).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -587,6 +597,21 @@ pub struct NftablesDiff {
 }
 
 impl NftablesDiff {
+    /// The JSON Schema (draft 7) of the JSON a `NftablesDiff` serializes to,
+    /// pretty-printed. Requires the `schemars` feature. Publish it beside
+    /// a `diff` output so a change to the diff's shape is a visible change
+    /// to its schema (#531).
+    #[cfg(feature = "schemars")]
+    pub fn json_schema() -> String {
+        crate::netlink::config::draft07_schema_text::<Self>()
+    }
+
+    /// [`json_schema`](Self::json_schema) as a [`schemars::Schema`].
+    #[cfg(feature = "schemars")]
+    pub fn json_schema_value() -> schemars::Schema {
+        crate::netlink::config::draft07_schema::<Self>()
+    }
+
     /// `true` if declared state already matches kernel state.
     pub fn is_empty(&self) -> bool {
         self.tables_to_add.is_empty()

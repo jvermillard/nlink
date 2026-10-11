@@ -15,7 +15,7 @@ use super::super::{
 /// flow on `Connection<Nftables>`.
 ///
 /// See the module-level docs for usage.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NftablesConfig {
     pub(crate) tables: Vec<DeclaredTable>,
 }
@@ -58,8 +58,9 @@ impl NftablesConfig {
 /// A declared table — name, family, flags, and nested chains +
 /// rules + flowtables.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredTable {
     pub(crate) name: String,
     pub(crate) family: Family,
@@ -113,6 +114,7 @@ impl DeclaredTable {
 /// and changes nothing), so a changed limit is deleted and recreated, and
 /// the rules using it move out of the way and back to their places.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredObject {
@@ -295,8 +297,9 @@ impl DeclaredTableBuilder {
 /// A declared chain — name + optional base-chain hook spec.
 /// Non-base (regular) chains omit the hook fields.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredChain {
     pub(crate) name: String,
     pub(crate) hook: Option<Hook>,
@@ -447,8 +450,9 @@ impl DeclaredChainBuilder {
 /// or whose elements time out, so that what the packet path put there
 /// stays.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredSet {
     pub(crate) name: String,
     pub(crate) key_type: SetKeyType,
@@ -463,6 +467,7 @@ pub struct DeclaredSet {
 
 /// How a declared set's elements are reconciled with the kernel's.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -759,8 +764,9 @@ impl DeclaredSetBuilder {
 /// rather than an in-place replace. Give a rule that will change a key
 /// with `DeclaredTableBuilder::rule_keyed`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredRule {
     pub(crate) table: String,
     pub(crate) chain: String,
@@ -804,8 +810,9 @@ impl DeclaredRule {
 
 /// A declared flowtable inside a table.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredFlowtable {
     pub(crate) family: Family,
     pub(crate) table: String,

@@ -16,7 +16,7 @@ pub use crate::netlink::link::{
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", default))]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NetworkConfig {
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) links: Vec<DeclaredLink>,
@@ -32,6 +32,23 @@ pub struct NetworkConfig {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) invalid: Vec<crate::netlink::error::ValidationErrorInfo>,
+}
+
+/// The draft-7 JSON Schema of `T`, the dialect nlink's schemas promise
+/// (see [`NetworkConfig::json_schema_value`]).
+#[cfg(feature = "schemars")]
+pub(crate) fn draft07_schema<T: schemars::JsonSchema>() -> schemars::Schema {
+    schemars::generate::SchemaSettings::draft07()
+        .into_generator()
+        .into_root_schema_for::<T>()
+}
+
+/// [`draft07_schema`], pretty-printed.
+#[cfg(feature = "schemars")]
+pub(crate) fn draft07_schema_text<T: schemars::JsonSchema>() -> String {
+    // Library-generated: no user data, no serializer that can fail.
+    serde_json::to_string_pretty(&draft07_schema::<T>())
+        .expect("schema serialization is infallible")
 }
 
 impl NetworkConfig {
@@ -184,9 +201,18 @@ impl NetworkConfig {
     /// rather than inherited.
     #[cfg(feature = "schemars")]
     pub fn json_schema_value() -> schemars::Schema {
-        schemars::generate::SchemaSettings::draft07()
-            .into_generator()
-            .into_root_schema_for::<NetworkConfig>()
+        draft07_schema::<NetworkConfig>()
+    }
+
+    /// `true` when the config declares nothing: no links, addresses,
+    /// routes or qdiscs, and no builder mistake waiting for
+    /// [`validate`](Self::validate) (#531).
+    pub fn is_empty(&self) -> bool {
+        self.links.is_empty()
+            && self.addresses.is_empty()
+            && self.routes.is_empty()
+            && self.qdiscs.is_empty()
+            && self.invalid.is_empty()
     }
 
     /// Add a link (interface) configuration.
@@ -346,7 +372,7 @@ impl NetworkConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredLink {
     pub(crate) name: String,
     pub(crate) link_type: DeclaredLinkType,
@@ -1089,7 +1115,7 @@ impl LinkBuilder {
 // `with` is field-level only, so a container override is a no-op —
 // the manual impl below delegates to `AddressRepr` instead, keeping
 // the schema faithful to the wire.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredAddress {
     pub(crate) dev: String,
     pub(crate) address: IpAddr,
@@ -1241,7 +1267,7 @@ pub enum AddressParseError {
 #[cfg_attr(feature = "serde", serde(into = "RouteRepr", try_from = "RouteRepr"))]
 // JsonSchema delegated to `RouteRepr` via the manual impl below (the
 // JSON shape is string destination/gateway, not the parsed fields).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredRoute {
     pub(crate) destination: IpAddr,
     pub(crate) prefix_len: u8,
@@ -1641,7 +1667,7 @@ impl RouteBuilder {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeclaredQdisc {
     pub(crate) dev: String,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -1945,7 +1971,7 @@ impl DeclaredQdiscType {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum DeclaredQdiscType {
     /// Network emulator.

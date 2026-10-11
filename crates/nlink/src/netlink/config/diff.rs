@@ -144,6 +144,7 @@ impl DiffOptions {
 /// Construct via [`NetworkConfig::diff`](super::NetworkConfig::diff),
 /// not literally.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 #[non_exhaustive]
@@ -238,6 +239,21 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// The JSON Schema (draft 7) of the JSON a `ConfigDiff` serializes to,
+    /// pretty-printed. Requires the `schemars` feature. Publish it beside
+    /// a `diff` output so a change to the diff's shape is a visible change
+    /// to its schema (#531).
+    #[cfg(feature = "schemars")]
+    pub fn json_schema() -> String {
+        crate::netlink::config::draft07_schema_text::<Self>()
+    }
+
+    /// [`json_schema`](Self::json_schema) as a [`schemars::Schema`].
+    #[cfg(feature = "schemars")]
+    pub fn json_schema_value() -> schemars::Schema {
+        crate::netlink::config::draft07_schema::<Self>()
+    }
+
     /// Apply this pre-computed diff in-place without re-running
     /// [`crate::netlink::config::NetworkConfig::diff`].
     ///
@@ -430,6 +446,7 @@ impl std::fmt::Display for ConfigDiff {
 /// unreachable. Give the declared route another metric, or remove the
 /// other route.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -461,6 +478,7 @@ impl std::fmt::Display for RouteConflict {
 
 /// Changes to make to an existing link.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 pub struct LinkChanges {
@@ -2749,6 +2767,94 @@ mod tests {
         d.routes_to_remove.push(declared_route("10.1.0.0", 24));
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 2);
+    }
+
+    // ---- #531 — comparing configs, and the diff's shape ----
+
+    /// Declarative configs compare by value, and say when they are empty.
+    #[test]
+    fn configs_compare_and_know_they_are_empty() {
+        use crate::netlink::genl::wireguard::WireguardConfig;
+        use crate::netlink::nftables::Family;
+        use crate::netlink::nftables::config::NftablesConfig;
+
+        let net = |mtu| NetworkConfig::new().link("d0", move |l| l.dummy().mtu(mtu));
+        assert_eq!(net(1500), net(1500));
+        assert_ne!(net(1500), net(9000));
+        assert!(NetworkConfig::new().is_empty());
+        assert!(!net(1500).is_empty());
+
+        let nft = |name: &'static str| NftablesConfig::new().table(name, Family::Inet, |t| t);
+        assert_eq!(nft("a"), nft("a"));
+        assert_ne!(nft("a"), nft("b"));
+
+        let wg = |port| WireguardConfig::new().device("wg0", move |d| d.listen_port(port));
+        assert_eq!(wg(1), wg(1));
+        assert_ne!(wg(1), wg(2));
+        assert!(WireguardConfig::new().is_empty());
+    }
+
+    /// The JSON shape of each diff, pinned: a key added, renamed or
+    /// removed fails here, so it is a deliberate change with a CHANGELOG
+    /// line rather than one consumers find in production (#531).
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn diff_schemas_keep_their_shape() {
+        fn keys(schema: schemars::Schema) -> Vec<String> {
+            let mut keys: Vec<String> = schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default();
+            keys.sort();
+            keys
+        }
+        assert_eq!(
+            keys(ConfigDiff::json_schema_value()),
+            [
+                "addresses-to-add",
+                "addresses-to-remove",
+                "links-missing",
+                "links-to-add",
+                "links-to-modify",
+                "links-to-recreate",
+                "qdiscs-to-add",
+                "qdiscs-to-replace",
+                "routes-refused",
+                "routes-to-add",
+                "routes-to-remove",
+            ]
+        );
+        assert_eq!(
+            keys(crate::netlink::nftables::config::NftablesDiff::json_schema_value()),
+            [
+                "chains-to-add",
+                "chains-to-delete",
+                "chains-to-modify",
+                "chains-to-recreate",
+                "flowtables-to-add",
+                "flowtables-to-delete",
+                "flowtables-to-update",
+                "generation",
+                "kept-in-use",
+                "objects-to-add",
+                "objects-to-delete",
+                "objects-to-update",
+                "rules-to-add",
+                "rules-to-delete",
+                "rules-to-move",
+                "rules-to-replace",
+                "set-elements-to-add",
+                "set-elements-to-remove",
+                "sets-to-add",
+                "sets-to-delete",
+                "sets-to-update",
+                "tables-refused",
+                "tables-to-add",
+                "tables-to-delete",
+                "tables-to-modify",
+            ]
+        );
     }
 
     // ---- #473 — the order of link modifications ----

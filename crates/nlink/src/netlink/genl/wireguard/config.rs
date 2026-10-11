@@ -294,7 +294,7 @@ fn b64_decode_32(s: &str) -> Option<[u8; WG_KEY_LEN]> {
 
 /// Desired WireGuard configuration — one or more devices,
 /// each with their peers. Plan 196.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[must_use = "WireguardConfig does nothing unless .diff() or .apply() is called"]
 pub struct WireguardConfig {
     devices: Vec<DeclaredWgDevice>,
@@ -338,6 +338,11 @@ impl WireguardConfig {
     /// View the declared devices (read-only).
     pub fn devices(&self) -> &[DeclaredWgDevice] {
         &self.devices
+    }
+
+    /// `true` when the config declares no device (#531).
+    pub fn is_empty(&self) -> bool {
+        self.devices.is_empty()
     }
 
     /// Compute the diff between desired (this config) and
@@ -971,7 +976,7 @@ fn clamp_private_key(mut key: [u8; WG_KEY_LEN]) -> [u8; WG_KEY_LEN] {
 // =============================================================================
 
 /// A declared WireGuard device. Plan 196.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeclaredWgDevice {
     pub ifname: String,
@@ -1160,8 +1165,9 @@ impl DeclaredWgDeviceBuilder {
 
 /// A declared WireGuard peer. Plan 196.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeclaredWgPeer {
     #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::pubkey"))]
@@ -1394,6 +1400,7 @@ impl DeclaredWgPeerBuilder {
 /// keys render as base64, preshared/private keys as presence
 /// booleans.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -1409,6 +1416,21 @@ pub struct WireguardConfigDiff {
 }
 
 impl WireguardConfigDiff {
+    /// The JSON Schema (draft 7) of the JSON a `WireguardConfigDiff` serializes to,
+    /// pretty-printed. Requires the `schemars` feature. Publish it beside
+    /// a `diff` output so a change to the diff's shape is a visible change
+    /// to its schema (#531).
+    #[cfg(feature = "schemars")]
+    pub fn json_schema() -> String {
+        crate::netlink::config::draft07_schema_text::<Self>()
+    }
+
+    /// [`json_schema`](Self::json_schema) as a [`schemars::Schema`].
+    #[cfg(feature = "schemars")]
+    pub fn json_schema_value() -> schemars::Schema {
+        crate::netlink::config::draft07_schema::<Self>()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.devices_to_modify.is_empty() && self.devices_to_add.is_empty()
     }
@@ -1475,6 +1497,7 @@ impl fmt::Display for WireguardConfigDiff {
 
 /// What changed on a single device. Plan 196.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -1587,6 +1610,7 @@ impl DeviceChanges {
 
 /// What changed on a single peer. Plan 196.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]

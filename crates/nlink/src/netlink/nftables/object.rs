@@ -12,6 +12,7 @@ use crate::netlink::builder::MessageBuilder;
 /// The kind of a stateful object: `NFT_OBJECT_*`. Only the kinds nlink can
 /// build are named; [`ObjectState::Other`] carries the rest as read back.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 #[non_exhaustive]
@@ -37,6 +38,7 @@ impl ObjectType {
 
 /// What an object is configured to do.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ObjectConfig {
@@ -62,6 +64,7 @@ impl ObjectConfig {
 /// A named stateful object, to create with
 /// [`Connection::add_object`](crate::netlink::Connection::add_object).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
 pub struct Object {

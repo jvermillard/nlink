@@ -1155,6 +1155,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Declarative configs compare, say when they are empty, and the diffs
+  have JSON Schemas (#531).**
+  - `NetworkConfig`, `NftablesConfig` and `WireguardConfig` and the
+    `Declared*` types inside them derive `PartialEq`. Every type but those
+    holding netem's `f64` loss percentage also derives `Eq`, and so do
+    `Rule` and `Expr`. Compare a plan by value instead of by its `Debug`
+    text, which printed WireGuard keys.
+  - `NetworkConfig::is_empty()` and `WireguardConfig::is_empty()` join
+    `NftablesConfig`'s.
+  - Under `schemars`, `ConfigDiff`, `NftablesDiff` and
+    `WireguardConfigDiff` derive `JsonSchema` (with every type they
+    reach) and have `json_schema()` / `json_schema_value()` (draft 7, like
+    `NetworkConfig`'s). A test pins each diff's top-level keys, so a
+    change to its JSON shape is deliberate and shows in its schema.
+
 - **`genl::wireguard::PrivateKey`** (#529): a private key, clamped, that
   reads and writes the base64 `wg genkey` prints and never appears in
   `Debug`. With the new `wireguard-keys` feature, `PrivateKey::generate()`

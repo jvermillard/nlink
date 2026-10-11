@@ -4,7 +4,7 @@ use super::{types::*, *};
 use crate::netlink::builder::MessageBuilder;
 
 /// A single nftables expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Expr {
     /// Load metadata into a register.
@@ -257,6 +257,7 @@ impl From<LookupExpr> for Expr {
 /// only after. As a rule expression the quota is the rule's own; as an
 /// [`Object`] it is shared by name.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct QuotaExpr {
@@ -410,6 +411,7 @@ impl From<DynsetExpr> for Expr {
 /// `limit`: a packet-rate limit, matching while under the rate (or, with
 /// [`over`](Self::over), once over it).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LimitExpr {
