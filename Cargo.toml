@@ -33,6 +33,9 @@ authors = ["Marc Pardo <p13marc@gmail.com>"]
 # Async runtime
 tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
 
+# X25519 for WireGuard key pairs (`wireguard-keys` feature)
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+
 # Netlink socket (thin libc wrapper - socket ops only)
 netlink-sys = "0.9"
 

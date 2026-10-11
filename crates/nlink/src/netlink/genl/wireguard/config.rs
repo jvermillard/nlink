@@ -119,6 +119,108 @@ impl FromStr for PublicKey {
     }
 }
 
+/// A WireGuard private key: 32 bytes, X25519-clamped as the kernel stores
+/// it.
+///
+/// Round-trips with the base64 `wg genkey` prints, via [`FromStr`] and
+/// [`fmt::Display`] — `Display` writes the secret, so print it only where
+/// a key belongs. [`fmt::Debug`] never shows it (#499). Pass it where a
+/// raw key is taken with `.into()`. With the `wireguard-keys` feature,
+/// [`generate`](Self::generate) and [`public_key`](Self::public_key) do
+/// what `wg genkey` and `wg pubkey` do (#529).
+///
+/// ```
+/// use nlink::netlink::genl::wireguard::PrivateKey;
+/// // RFC 7748 §6.1, Alice's private key.
+/// let key: PrivateKey = "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo=".parse().unwrap();
+/// assert_eq!(key.to_string(), "cAdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LGo=");
+/// assert!(!format!("{key:?}").contains("cAdt"));
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct PrivateKey([u8; WG_KEY_LEN]);
+
+impl PrivateKey {
+    /// Wrap 32 bytes as a key, clamped (`curve25519_clamp_secret`) as the
+    /// kernel would store them.
+    pub fn from_bytes(bytes: [u8; WG_KEY_LEN]) -> Self {
+        Self(clamp_private_key(bytes))
+    }
+
+    /// The key's 32 bytes, clamped.
+    pub fn as_bytes(&self) -> &[u8; WG_KEY_LEN] {
+        &self.0
+    }
+
+    /// A new random key, as `wg genkey` makes: 32 bytes from the kernel's
+    /// random source (`getrandom(2)`), clamped.
+    #[cfg(feature = "wireguard-keys")]
+    pub fn generate() -> Result<Self> {
+        let mut bytes = [0u8; WG_KEY_LEN];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            // SAFETY: the pointer and length name the unfilled tail of
+            // `bytes`, which outlives the call.
+            let n = unsafe {
+                libc::getrandom(bytes[filled..].as_mut_ptr().cast(), bytes.len() - filled, 0)
+            };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
+            }
+            filled += n as usize;
+        }
+        Ok(Self::from_bytes(bytes))
+    }
+
+    /// The public key of this private key, as `wg pubkey` derives it
+    /// (X25519 with the base point).
+    #[cfg(feature = "wireguard-keys")]
+    pub fn public_key(&self) -> PublicKey {
+        let secret = x25519_dalek::StaticSecret::from(self.0);
+        PublicKey(x25519_dalek::PublicKey::from(&secret).to_bytes())
+    }
+}
+
+impl From<[u8; WG_KEY_LEN]> for PrivateKey {
+    fn from(bytes: [u8; WG_KEY_LEN]) -> Self {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl From<PrivateKey> for [u8; WG_KEY_LEN] {
+    fn from(key: PrivateKey) -> Self {
+        key.0
+    }
+}
+
+impl fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PrivateKey")
+            .field(&crate::util::SecretBytes(&self.0))
+            .finish()
+    }
+}
+
+impl fmt::Display for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&b64_encode_32(&self.0))
+    }
+}
+
+impl FromStr for PrivateKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // The input is not echoed: it is a secret.
+        b64_decode_32(s)
+            .map(Self::from_bytes)
+            .ok_or_else(|| Error::InvalidMessage("invalid WireGuard private key".into()))
+    }
+}
+
 /// Encode a 32-byte buffer as 44 base64 chars (RFC 4648,
 /// alphabet `A-Za-z0-9+/`, single `=` pad).
 fn b64_encode_32(bytes: &[u8; WG_KEY_LEN]) -> String {
@@ -301,6 +403,19 @@ impl WireguardConfig {
             let mut owner: std::collections::HashMap<(IpAddr, u8), &[u8; WG_KEY_LEN]> =
                 std::collections::HashMap::new();
             for peer in &device.peers {
+                if peer
+                    .persistent_keepalive
+                    .is_some_and(|ka| ka > Duration::from_secs(u64::from(u16::MAX)))
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("devices.{}.peers", device.ifname),
+                        format!(
+                            "peer {}: a persistent keepalive longer than 65535 s, the most \
+                             WireGuard takes",
+                            b64_encode_32(&peer.public_key)
+                        ),
+                    ));
+                }
                 for prefix in allowed_ip_set(&peer.allowed_ips) {
                     match owner.get(&prefix) {
                         Some(first) if *first != &peer.public_key => {
@@ -835,6 +950,15 @@ fn allowed_ip_set(ips: &[AllowedIp]) -> std::collections::BTreeSet<(IpAddr, u8)>
 /// `curve25519_clamp_secret()` on it — clear the low three bits and the
 /// top bit, set bit 254 — and `GET_DEVICE` returns that copy. A key from
 /// `wg genkey` is already clamped; any other 32 bytes are not.
+/// A persistent-keepalive interval in the whole seconds WireGuard counts,
+/// rounded **up**: truncated, 500 ms was 0, which turns keepalive off
+/// (#529). `Duration::ZERO` is 0, off. Past `u16::MAX` seconds it
+/// saturates; [`WireguardConfig::validate`] refuses that.
+fn keepalive_secs(interval: Duration) -> u16 {
+    let secs = interval.as_secs() + u64::from(interval.subsec_nanos() > 0);
+    u16::try_from(secs).unwrap_or(u16::MAX)
+}
+
 fn clamp_private_key(mut key: [u8; WG_KEY_LEN]) -> [u8; WG_KEY_LEN] {
     key[0] &= 248;
     key[31] &= 127;
@@ -1107,7 +1231,7 @@ impl DeclaredWgPeer {
             changes.endpoint_set = true;
         }
         if let Some(ka) = self.persistent_keepalive {
-            let want_secs: u16 = ka.as_secs().try_into().unwrap_or(u16::MAX);
+            let want_secs = keepalive_secs(ka);
             if current.persistent_keepalive != Some(want_secs) {
                 changes.persistent_keepalive_set = true;
             }
@@ -1134,8 +1258,7 @@ impl DeclaredWgPeer {
             b = b.endpoint(ep);
         }
         if let Some(ka) = self.persistent_keepalive {
-            let secs: u16 = ka.as_secs().try_into().unwrap_or(u16::MAX);
-            b = b.persistent_keepalive(secs);
+            b = b.persistent_keepalive(keepalive_secs(ka));
         }
         for ip in &self.allowed_ips {
             b = b.allowed_ip(*ip);
@@ -1230,6 +1353,10 @@ impl DeclaredWgPeerBuilder {
         self
     }
 
+    /// Send a keepalive this often. WireGuard counts whole seconds, so a
+    /// fraction of one rounds up — 500 ms is 1 s; it was 0, which turns
+    /// keepalive off (#529). `Duration::ZERO` turns it off. More than
+    /// 65535 s fails [`WireguardConfig::validate`].
     pub fn persistent_keepalive(mut self, d: Duration) -> Self {
         self.persistent_keepalive = Some(d);
         self
@@ -1517,6 +1644,69 @@ const _PLAN_196_MARKER: Option<Error> = None;
 
 #[cfg(test)]
 mod tests {
+
+    /// WireGuard counts keepalive in whole seconds, and a fraction rounds
+    /// up: 500 ms was 0, which turns keepalive off (#529).
+    #[test]
+    fn keepalive_rounds_up_to_whole_seconds() {
+        use super::keepalive_secs;
+        use std::time::Duration;
+        assert_eq!(keepalive_secs(Duration::from_millis(500)), 1);
+        assert_eq!(keepalive_secs(Duration::from_secs(25)), 25);
+        assert_eq!(keepalive_secs(Duration::from_millis(25_100)), 26);
+        assert_eq!(keepalive_secs(Duration::ZERO), 0);
+        assert_eq!(keepalive_secs(Duration::from_secs(1 << 20)), u16::MAX);
+        let too_long = super::WireguardConfig::new().device("wg0", |d| {
+            d.peer([7u8; 32], |p| {
+                p.persistent_keepalive(Duration::from_secs(70_000))
+            })
+        });
+        assert!(too_long.validate().is_err());
+    }
+
+    /// The private key round-trips through base64 clamped, and never shows
+    /// in `Debug` (#529, #499).
+    #[test]
+    fn private_key_base64_and_debug() {
+        use super::PrivateKey;
+        let key: PrivateKey = "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo="
+            .parse()
+            .unwrap();
+        assert_eq!(
+            key.to_string(),
+            "cAdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LGo="
+        );
+        let shown = format!("{key:?}");
+        assert!(
+            shown.contains("bytes redacted") && !shown.contains("cAdt"),
+            "{shown}"
+        );
+        assert!("not base64".parse::<PrivateKey>().is_err());
+    }
+
+    /// RFC 7748 §6.1: Alice's public key from her private key; and a
+    /// generated key is clamped and has a public key of its own.
+    #[cfg(feature = "wireguard-keys")]
+    #[test]
+    fn private_keys_generate_and_derive_their_public_key() {
+        use super::PrivateKey;
+        let alice: PrivateKey = "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo="
+            .parse()
+            .unwrap();
+        assert_eq!(
+            alice.public_key().to_string(),
+            "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+        );
+        let a = PrivateKey::generate().unwrap();
+        let b = PrivateKey::generate().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            PrivateKey::from_bytes(*a.as_bytes()),
+            "generated keys are clamped"
+        );
+        assert_ne!(a.public_key(), b.public_key());
+    }
 
     /// One prefix on two peers of a device is refused, masked the way the
     /// kernel stores it; the same prefix on two devices is fine (#498).
