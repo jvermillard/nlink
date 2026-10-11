@@ -379,6 +379,173 @@ pub trait LinkConfig: Send + Sync {
     fn pinned_mtu(&self) -> Option<u32> {
         None
     }
+
+    /// The master to enslave the link to as it is created
+    /// (`IFLA_MASTER`), resolved in the namespace the link is created in.
+    /// Set with [`LinkCreateExt::master`]; the default is `None`.
+    fn master_ref(&self) -> Option<&InterfaceRef> {
+        None
+    }
+
+    /// Whether to create the link up (`IFF_UP` in the request's header).
+    /// Set with [`LinkCreateExt::up`].
+    fn up_at_create(&self) -> bool {
+        false
+    }
+
+    /// An alias to give the link once it exists. The kernel ignores
+    /// `IFLA_IFALIAS` on a create (`rtnl_create_link` has no case for it),
+    /// so [`Connection::add_link`] sets it afterwards, in the link's
+    /// namespace. Set with [`LinkCreateExt::alias`].
+    fn alias_after_create(&self) -> Option<&str> {
+        None
+    }
+
+    /// The network namespace to create the link in (`IFLA_NET_NS_FD`).
+    /// Set with [`LinkCreateExt::netns`].
+    fn netns_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        None
+    }
+
+    /// Something a builder could not take, which makes the create fail.
+    fn creation_error(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// Options every link takes as it is created: a master, the up state, an
+/// alias, and the namespace to create it in (#517).
+///
+/// Every link builder has them through this trait, and they are best set
+/// last: each returns a [`LinkCreate`], which carries them on to
+/// [`Connection::add_link`] in one request — no `add_link` →
+/// `set_link_master` → `set_link_up` round trips, and a link created in
+/// its namespace never sits in the host's one first.
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::netlink::link::{DummyLink, LinkCreateExt};
+///
+/// conn.add_link(DummyLink::new("d0").mtu(9000).master("br0").up().alias("lab:d0"))
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub trait LinkCreateExt: LinkConfig + Sized {
+    /// Enslave the link to `master` (a bridge, a bond, a VRF) as it is
+    /// created.
+    fn master(self, master: impl Into<InterfaceRef>) -> LinkCreate<Self> {
+        LinkCreate::new(self).master(master)
+    }
+
+    /// Create the link up.
+    fn up(self) -> LinkCreate<Self> {
+        LinkCreate::new(self).up()
+    }
+
+    /// Give the link an alias (`ip link set dev X alias …`) — a tag to
+    /// find it by later.
+    fn alias(self, alias: impl Into<String>) -> LinkCreate<Self> {
+        LinkCreate::new(self).alias(alias)
+    }
+
+    /// Create the link in the network namespace `fd` refers to. A master
+    /// is then looked up there too.
+    fn netns(self, fd: impl std::os::fd::AsFd) -> LinkCreate<Self> {
+        LinkCreate::new(self).netns(fd)
+    }
+}
+
+impl<L: LinkConfig> LinkCreateExt for L {}
+
+/// A link builder with [`LinkCreateExt`]'s options.
+#[derive(Debug)]
+pub struct LinkCreate<L> {
+    link: L,
+    master: Option<InterfaceRef>,
+    up: bool,
+    alias: Option<String>,
+    netns: Option<std::os::fd::OwnedFd>,
+    error: Option<String>,
+}
+
+impl<L: LinkConfig> LinkCreate<L> {
+    fn new(link: L) -> Self {
+        Self {
+            link,
+            master: None,
+            up: false,
+            alias: None,
+            netns: None,
+            error: None,
+        }
+    }
+
+    /// See [`LinkCreateExt::master`].
+    pub fn master(mut self, master: impl Into<InterfaceRef>) -> Self {
+        self.master = Some(master.into());
+        self
+    }
+
+    /// See [`LinkCreateExt::up`].
+    pub fn up(mut self) -> Self {
+        self.up = true;
+        self
+    }
+
+    /// See [`LinkCreateExt::alias`].
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// See [`LinkCreateExt::netns`]. The fd is duplicated, so the caller's
+    /// can be closed.
+    pub fn netns(mut self, fd: impl std::os::fd::AsFd) -> Self {
+        match fd.as_fd().try_clone_to_owned() {
+            Ok(fd) => self.netns = Some(fd),
+            Err(e) => self.error = Some(format!("duplicating the namespace fd: {e}")),
+        }
+        self
+    }
+}
+
+impl<L: LinkConfig> LinkConfig for LinkCreate<L> {
+    fn name(&self) -> &str {
+        self.link.name()
+    }
+    fn kind(&self) -> &str {
+        self.link.kind()
+    }
+    fn peer_name(&self) -> Option<&str> {
+        self.link.peer_name()
+    }
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.parent_ref()
+    }
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        self.link.write_to(builder, parent_index);
+    }
+    fn pinned_mtu(&self) -> Option<u32> {
+        self.link.pinned_mtu()
+    }
+    fn master_ref(&self) -> Option<&InterfaceRef> {
+        self.master.as_ref()
+    }
+    fn up_at_create(&self) -> bool {
+        self.up
+    }
+    fn alias_after_create(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+    fn netns_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        use std::os::fd::AsFd;
+        self.netns.as_ref().map(|fd| fd.as_fd())
+    }
+    fn creation_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
 }
 
 // ============================================================================
@@ -608,7 +775,10 @@ impl LinkConfig for VethLink {
         let data = builder.nest_start(IflaInfo::Data as u16);
         let peer = builder.nest_start(veth::VETH_INFO_PEER);
 
-        // Peer ifinfomsg
+        // Peer ifinfomsg. Its `IFF_UP` cannot bring the peer up: the peer
+        // is configured before the pair is linked, and `veth_open` refuses
+        // a veth with no peer yet (`ENOTCONN`, #517). Bring the peer up
+        // once the pair exists.
         let peer_ifinfo = IfInfoMsg::new();
         builder.append(&peer_ifinfo);
 
@@ -5270,20 +5440,51 @@ impl Connection<Route> {
             None => None,
         };
 
+        if let Some(why) = config.creation_error() {
+            return Err(super::error::Error::InvalidMessage(format!(
+                "add_link({}): {why}",
+                config.name()
+            )));
+        }
+
+        // A link created in another namespace is looked up — its master,
+        // its alias, a pinned MTU — there (#517).
+        let elsewhere = match config.netns_fd() {
+            Some(fd) => Some(Connection::<Route>::new_in_namespace_fd(fd)?),
+            None => None,
+        };
+        let home = elsewhere.as_ref().unwrap_or(self);
+        let master_index = match config.master_ref() {
+            Some(master) => Some(home.resolve_interface(master).await?),
+            None => None,
+        };
+
         // Build the message
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_NEWLINK,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
 
-        // Append ifinfomsg header
-        let ifinfo = IfInfoMsg::new();
+        // Append ifinfomsg header; `IFF_UP` there brings the link up as it
+        // is created (`rtnl_configure_link`).
+        let mut ifinfo = IfInfoMsg::new();
+        if config.up_at_create() {
+            ifinfo.ifi_flags = libc::IFF_UP as u32;
+            ifinfo.ifi_change = libc::IFF_UP as u32;
+        }
         builder.append(&ifinfo);
 
         // Write the link configuration
         let link_name = config.name().to_string();
         let link_kind = config.kind().to_string();
         config.write_to(&mut builder, parent_index);
+        if let Some(master) = master_index {
+            builder.append_attr_u32(IflaAttr::Master as u16, master);
+        }
+        if let Some(fd) = config.netns_fd() {
+            use std::os::fd::AsRawFd;
+            builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd.as_raw_fd() as u32);
+        }
 
         self.send_ack(builder)
             .await
@@ -5292,7 +5493,10 @@ impl Connection<Route> {
         // A bridge created with an MTU keeps it only once the MTU is pinned
         // (#474).
         if let Some(mtu) = config.pinned_mtu() {
-            self.pin_bridge_mtu(link_name.as_str(), mtu).await?;
+            home.pin_bridge_mtu(link_name.as_str(), mtu).await?;
+        }
+        if let Some(alias) = config.alias_after_create() {
+            home.set_link_alias(link_name.as_str(), alias).await?;
         }
         Ok(())
     }
