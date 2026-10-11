@@ -397,7 +397,7 @@ impl NetworkConfig {
     ///
     /// It is how a caller finds its own links again with no record of
     /// what it applied before: after a crash, say, where
-    /// [`DiffOptions::previous`](super::DiffOptions::previous) needs the
+    /// [`PlanOptions::previous`](super::PlanOptions::previous) needs the
     /// previous config. Everything on a tagged link (addresses, routes,
     /// qdiscs) goes with it; what the kernel would destroy with it that
     /// cannot be declared (FDB entries, neighbours, an untagged link
@@ -568,7 +568,7 @@ impl NetworkConfig {
 
     /// Declare `dev`'s TC tree (#514): HTB classes, the leaf qdisc in a
     /// class, and filters with their actions. See
-    /// [`tc_tree`](super::tc_tree)'s module documentation; the device's
+    /// [`TcBuilder`](super::TcBuilder) for what it declares; the device's
     /// root and ingress/clsact qdiscs are declared with
     /// [`qdisc`](Self::qdisc), before this when the tree uses a hook.
     pub fn tc(
@@ -2441,7 +2441,7 @@ impl QdiscBuilder {
     ///
     /// The kernel's field is whole seconds, and 0 turns perturbation off,
     /// so a fraction rounds up: 500 ms installs 1 s. A period past
-    /// `i32::MAX` seconds makes [`build`](Self::build) fail (#597).
+    /// `i32::MAX` seconds is a validation error (#597).
     pub fn perturb(mut self, period: Duration) -> Self {
         let secs = period.as_secs() + u64::from(period.subsec_nanos() > 0);
         match (&mut self.qdisc_type, i32::try_from(secs)) {

@@ -58,7 +58,8 @@ mod diff;
 mod rules;
 mod types;
 
-pub use apply::{ReconcileOptions, ReconcileReport};
+// The one reconcile vocabulary every layer shares (#532).
+pub use crate::netlink::reconcile::{ReconcileOptions, ReconcileReport};
 pub use diff::{
     ChainRecreate, FlowtableUpdate, KeptInUse, MoveReason, NftDiffOptions, NftablesDiff, RuleAdd,
     RuleHandle, RuleMove, RulePlacement, SetElementsChange,

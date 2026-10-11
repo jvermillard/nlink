@@ -99,13 +99,13 @@ async fn apply_cmd(args: ApplyArgs) -> Result<()> {
     let conn = Connection::<Route>::new()?;
 
     if args.reconcile {
-        use nlink::netlink::nftables::config::ReconcileOptions;
+        use nlink::reconcile::ReconcileOptions;
         let report = cfg
             .apply_reconcile(&conn, ReconcileOptions::default())
             .await?;
         println!(
             "Reconciled {} change(s) in {} attempt(s).",
-            report.change_count, report.attempts
+            report.changes_made, report.attempts
         );
         return Ok(());
     }

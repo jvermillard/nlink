@@ -63,7 +63,7 @@ pub async fn run_syncconf(interface: &str, file: &Path) -> Result<()> {
         .await?;
     println!(
         "wg: synced {} change(s) to {interface} in {} attempt(s)",
-        report.change_count, report.attempts
+        report.changes_made, report.attempts
     );
     Ok(())
 }

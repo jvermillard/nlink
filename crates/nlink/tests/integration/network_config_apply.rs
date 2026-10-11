@@ -25,10 +25,10 @@
 use nlink::Result;
 use nlink::netlink::{
     Connection, Route,
-    config::{ApplyOptions, DiffOptions, NetworkConfig},
+    config::{ApplyOptions, PlanOptions, NetworkConfig},
     namespace,
-    nftables::config::ReconcileOptions,
 };
+use nlink::reconcile::ReconcileOptions;
 
 use crate::common::{TestNamespace, with_timeout};
 
@@ -315,7 +315,7 @@ async fn purge_removes_undeclared_global_address_keeps_declared() -> Result<()> 
 
         // Purge diff: exactly one address slated for removal.
         let diff = cfg
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         let removed: Vec<(IpAddr, u8)> = diff
             .addresses_to_remove
@@ -330,7 +330,7 @@ async fn purge_removes_undeclared_global_address_keeps_declared() -> Result<()> 
         );
 
         // Apply the purge, then confirm kernel state.
-        let result = diff.apply(&conn, Default::default()).await?;
+        let result = diff.apply(&conn, nlink::ExecOptions::default()).await?;
         assert_eq!(result.changes_made, 1, "one address removed");
 
         let addrs = conn.get_addresses().await?;
@@ -395,7 +395,7 @@ async fn default_diff_never_removes_addresses() -> Result<()> {
         // …and the purge diff WOULD remove the undeclared .9 (proves
         // the gate is the flag, not a missing-data accident).
         let purge = cfg
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         assert_eq!(
             purge.addresses_to_remove.len(),
@@ -442,7 +442,7 @@ async fn purge_removes_static_route_keeps_connected_route() -> Result<()> {
             .expect("valid CIDR");
 
         let diff = cfg
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         let removed: Vec<(std::net::IpAddr, u8)> = diff
             .routes_to_remove
@@ -460,7 +460,7 @@ async fn purge_removes_static_route_keeps_connected_route() -> Result<()> {
             "kernel connected route (proto kernel) must NOT be purged; got {removed:?}"
         );
 
-        let _ = diff.apply(&conn, Default::default()).await?;
+        let _ = diff.apply(&conn, nlink::ExecOptions::default()).await?;
 
         // The static route is gone; the connected route remains.
         let routes = conn.get_routes().await?;
@@ -478,7 +478,7 @@ async fn purge_removes_static_route_keeps_connected_route() -> Result<()> {
 
         // Idempotent: re-diff now sees nothing to remove.
         let again = cfg
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         assert!(
             again.routes_to_remove.is_empty(),
@@ -541,7 +541,7 @@ async fn purge_reaches_the_tables_the_config_declares_into() -> Result<()> {
             .route("10.1.0.0/24", |r| r.dev("eth0").table(100))
             .expect("valid CIDR");
         let diff = cfg
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         assert_eq!(
             diff.routes_to_remove.len(),
@@ -614,7 +614,7 @@ async fn purge_tolerates_a_route_removed_between_diff_and_apply() -> Result<()> 
 
         let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
         let diff = cfg
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         assert_eq!(diff.routes_to_remove.len(), 1);
 
@@ -622,7 +622,7 @@ async fn purge_tolerates_a_route_removed_between_diff_and_apply() -> Result<()> 
         assert!(conn.del_route_if_exists(stale.clone()).await?);
         assert!(!conn.del_route_if_exists(stale).await?, "second delete reports absent");
 
-        let result = diff.apply(&conn, Default::default()).await?;
+        let result = diff.apply(&conn, nlink::ExecOptions::default()).await?;
         assert_eq!(result.changes_made, 0, "{result:?}");
         assert!(result.errors.is_empty(), "{result:?}");
         assert!(
@@ -674,12 +674,28 @@ async fn apply_reconcile_with_options_purges_and_plain_does_not() -> Result<()> 
                 .collect()
         };
 
+        // A dry run with purge counts the removal and makes it not (#532:
+        // the reconcile options carry `dry_run` for every layer now).
+        let report = cfg
+            .apply_reconcile_with_options(
+                &conn,
+                ReconcileOptions::default().with_dry_run(true),
+                ApplyOptions::default().with_purge(true),
+            )
+            .await?;
+        assert!(report.dry_run, "{report:?}");
+        assert_eq!(report.changes_made, 1, "{report:?}");
+        assert!(
+            v4(&conn.get_addresses().await?).contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            "a dry run removes nothing"
+        );
+
         // Plain reconcile: the declaration is already satisfied and the
         // undeclared address is not its business.
         let report = cfg
             .apply_reconcile(&conn, ReconcileOptions::default())
             .await?;
-        assert_eq!((report.attempts, report.change_count), (1, 0), "{report:?}");
+        assert_eq!((report.attempts, report.changes_made), (1, 0), "{report:?}");
         let have = v4(&conn.get_addresses().await?);
         assert!(
             have.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
@@ -695,7 +711,7 @@ async fn apply_reconcile_with_options_purges_and_plain_does_not() -> Result<()> 
                 ApplyOptions::default().with_purge(true),
             )
             .await?;
-        assert_eq!((report.attempts, report.change_count), (1, 1), "{report:?}");
+        assert_eq!((report.attempts, report.changes_made), (1, 1), "{report:?}");
         let have = v4(&conn.get_addresses().await?);
         assert!(
             have.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
@@ -714,7 +730,7 @@ async fn apply_reconcile_with_options_purges_and_plain_does_not() -> Result<()> 
                 ApplyOptions::default().with_purge(true),
             )
             .await?;
-        assert_eq!((report.attempts, report.change_count), (1, 0), "{report:?}");
+        assert_eq!((report.attempts, report.changes_made), (1, 0), "{report:?}");
         Ok(())
     })
     .await
@@ -765,7 +781,7 @@ async fn purge_address_devs_reaches_reconcile_and_stack() -> Result<()> {
         let report = cfg
             .apply_reconcile_with_options(&conn, ReconcileOptions::default(), opts())
             .await?;
-        assert_eq!(report.change_count, 2, "{report:?}");
+        assert_eq!(report.changes_made, 2, "{report:?}");
         let left: Vec<IpAddr> = conn
             .get_addresses_by_name("d1")
             .await?
@@ -800,7 +816,7 @@ async fn a_snapshot_diff_is_the_live_diff_without_a_read() -> Result<()> {
 
         let before = Snapshot::read(&conn).await?;
         let live = cfg.diff(&conn).await?;
-        let offline = cfg.diff_snapshot(&before, DiffOptions::default())?;
+        let offline = cfg.diff_snapshot(&before, PlanOptions::default())?;
         assert_eq!(offline.to_string(), live.to_string());
         assert!(!offline.is_empty());
 
@@ -809,7 +825,7 @@ async fn a_snapshot_diff_is_the_live_diff_without_a_read() -> Result<()> {
             .await?;
         assert!(applied.is_success(), "{applied:?}");
 
-        let stale = cfg.diff_snapshot(&before, DiffOptions::default())?;
+        let stale = cfg.diff_snapshot(&before, PlanOptions::default())?;
         assert_eq!(
             stale.to_string(),
             offline.to_string(),
@@ -817,7 +833,52 @@ async fn a_snapshot_diff_is_the_live_diff_without_a_read() -> Result<()> {
         );
         let now = Snapshot::read(&conn).await?;
         assert!(now.links().iter().any(|l| l.name() == Some("d0")));
-        assert!(cfg.diff_snapshot(&now, DiffOptions::default())?.is_empty());
+        assert!(cfg.diff_snapshot(&now, PlanOptions::default())?.is_empty());
+        Ok(())
+    })
+    .await
+}
+
+/// A precomputed diff executes with `ExecOptions` alone, and `verify` diffs
+/// again with the config and plan it came from (#519). Here the diff goes
+/// stale before it is applied: the MTU it saw as right is changed under
+/// it, so the apply adds the address and the re-diff finds the MTU.
+#[tokio::test]
+async fn a_precomputed_diff_verifies_against_its_own_config() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        use nlink::ExecOptions;
+
+        let ns = TestNamespace::new("diffverify")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().mtu(1400).up())
+            .address("d0", "10.63.0.1/24")?;
+        let link_only = NetworkConfig::new().link("d0", |l| l.dummy().mtu(1400).up());
+        let applied = link_only.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.change_count(), 1, "the address only: {diff}");
+        conn.set_link_mtu("d0", 1300).await?;
+
+        let err = diff
+            .apply(&conn, ExecOptions::new().with_verify(true))
+            .await
+            .expect_err("the MTU changed under the diff");
+        let nlink::Error::NotConverged { remaining } = &err else {
+            panic!("not NotConverged: {err}");
+        };
+        assert!(remaining.to_string().contains("d0"), "{remaining}");
+
+        // Without verify the same stale diff reports success.
+        conn.set_link_mtu("d0", 1300).await?;
+        let diff = cfg.diff(&conn).await?;
+        conn.set_link_mtu("d0", 1200).await?;
+        let applied = diff.apply(&conn, ExecOptions::new()).await?;
+        assert!(applied.is_success(), "{applied:?}");
         Ok(())
     })
     .await
@@ -858,7 +919,7 @@ async fn the_previous_config_says_what_to_remove() -> Result<()> {
         ns.exec("ip", &["addr", "add", "10.80.0.9/24", "dev", "d0"])?;
 
         let diff = b
-            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .diff_with_options(&conn, PlanOptions::default().previous(a.clone()))
             .await?;
         assert_eq!(diff.addresses_to_remove.len(), 1, "{diff}");
         assert_eq!(diff.routes_to_remove.len(), 1, "{diff}");
@@ -869,7 +930,7 @@ async fn the_previous_config_says_what_to_remove() -> Result<()> {
             .await?;
         assert!(applied.is_success(), "{applied:?}");
         let again = b
-            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .diff_with_options(&conn, PlanOptions::default().previous(a.clone()))
             .await?;
         assert!(again.is_empty(), "the second diff: {again}");
 
@@ -936,7 +997,7 @@ async fn the_previous_config_removes_the_links_it_created() -> Result<()> {
             );
         }
         let again = b
-            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .diff_with_options(&conn, PlanOptions::default().previous(a.clone()))
             .await?;
         assert!(again.is_empty(), "the second diff: {again}");
         Ok(())
@@ -971,7 +1032,7 @@ async fn a_removal_over_undeclared_state_is_refused() -> Result<()> {
         ns.exec("ip", &["route", "add", "10.92.0.0/24", "dev", "v10"])?;
 
         let diff = b
-            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .diff_with_options(&conn, PlanOptions::default().previous(a.clone()))
             .await?;
         let removal = diff
             .links_to_remove
@@ -1097,7 +1158,7 @@ async fn an_owner_tag_lets_a_purge_find_the_configs_links() -> Result<()> {
             .link("d0", |l| l.dummy().up());
         let purge = || ApplyOptions::default().with_purge(true);
         let diff = b
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         let refused = diff
             .links_to_remove
@@ -1133,7 +1194,7 @@ async fn an_owner_tag_lets_a_purge_find_the_configs_links() -> Result<()> {
             );
         }
         let again = b
-            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .diff_with_options(&conn, PlanOptions::default().purge(true))
             .await?;
         assert!(again.is_empty(), "the second diff: {again}");
         Ok(())

@@ -21,7 +21,7 @@
 //!
 //! The network layer takes [`ApplyOptions`] through
 //! [`Stack::apply_in_with`] (purge, dry-run, continue-on-error)
-//! and [`DiffOptions`] through [`Stack::diff_in_with`]; the
+//! and [`PlanOptions`] through [`Stack::diff_in_with`]; the
 //! plain `apply*`/`diff*` forms use the defaults.
 //!
 //! Each layer is optional; `Stack` skips layers that aren't
@@ -37,7 +37,7 @@
 
 use crate::Result;
 use crate::netlink::config::{
-    ApplyOptions, ApplyResult as NetworkApplyResult, ConfigDiff, DiffOptions, NetworkConfig,
+    ApplyOptions, ApplyResult as NetworkApplyResult, ConfigDiff, PlanOptions, NetworkConfig,
 };
 use crate::netlink::genl::wireguard::{
     WireguardApplyResult, WireguardConfig, WireguardConfigDiff,
@@ -162,8 +162,8 @@ impl Stack {
         // The pre-flight diff sees the same options the network layer
         // will apply with: `purge_tables` was dropped (#501), and then
         // `purge_address_devs` (#601).
-        let diff_opts = opts.diff_options();
-        if opts.dry_run {
+        let diff_opts = opts.plan.clone();
+        if opts.exec.dry_run {
             return Ok(StackApplyReport {
                 dry_run: Some(self.diff_in_with(ns, diff_opts).await?),
                 ..StackApplyReport::default()
@@ -199,8 +199,8 @@ impl Stack {
         self.diff_in(NamespaceSpec::Default).await
     }
 
-    /// [`Self::diff`] with [`DiffOptions`] for the network layer.
-    pub async fn diff_with(&self, opts: DiffOptions) -> Result<StackDiff> {
+    /// [`Self::diff`] with [`PlanOptions`] for the network layer.
+    pub async fn diff_with(&self, opts: PlanOptions) -> Result<StackDiff> {
         self.diff_in_with(NamespaceSpec::Default, opts).await
     }
 
@@ -213,13 +213,13 @@ impl Stack {
     /// named, path-referenced, or a process's namespace by PID
     /// (container support, #169).
     pub async fn diff_in(&self, ns: NamespaceSpec<'_>) -> Result<StackDiff> {
-        self.diff_in_with(ns, DiffOptions::default()).await
+        self.diff_in_with(ns, PlanOptions::default()).await
     }
 
-    /// [`Self::diff_in`] with [`DiffOptions`] for the network layer —
-    /// `DiffOptions::default().purge(true)` shows the `-` lines a
+    /// [`Self::diff_in`] with [`PlanOptions`] for the network layer —
+    /// `PlanOptions::default().purge(true)` shows the `-` lines a
     /// purging [`Self::apply_in_with`] would delete.
-    pub async fn diff_in_with(&self, ns: NamespaceSpec<'_>, opts: DiffOptions) -> Result<StackDiff> {
+    pub async fn diff_in_with(&self, ns: NamespaceSpec<'_>, opts: PlanOptions) -> Result<StackDiff> {
         let mut out = StackDiff::default();
         if let Some(cfg) = &self.network {
             let mut network = diff::network_in_with(ns.clone(), cfg, opts).await?;

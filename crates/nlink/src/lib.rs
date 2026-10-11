@@ -242,8 +242,12 @@ pub use netlink::parse_params::ParseParams;
 // public boundaries instead of raw &str / u16.
 pub use netlink::eth_proto::EthProto;
 pub use netlink::tc_handle::{FilterPriority, TcHandle, TcHandleParseError};
-// Reconcile-pattern types shared by recipe helpers.
-pub use netlink::tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject};
+// One reconcile vocabulary for every layer and recipe (#532), and how an
+// apply executes (#519): `nlink::reconcile::*`, and the common names here.
+pub use netlink::reconcile;
+pub use netlink::reconcile::{
+    ExecOptions, ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject,
+};
 pub use netlink::{
     Connection, Error, ErrorKind, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result,
     ResultExt, RtnetlinkGroup,

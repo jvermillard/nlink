@@ -33,7 +33,7 @@
 //! variant — landed alongside the atomic apply. See
 //! [`NftablesDiff::apply_reconcile`].
 
-use std::time::Duration;
+use crate::netlink::reconcile::{ReconcileOptions, ReconcileReport};
 
 use super::diff::{NftablesDiff, RulePlacement};
 use super::types::{DeclaredChain, DeclaredRule};
@@ -525,131 +525,25 @@ impl NftablesDiff {
         conn: &Connection<Nftables>,
         opts: ReconcileOptions,
     ) -> Result<ReconcileReport> {
-        let mut attempt: usize = 0;
-        loop {
-            match self.apply(conn).await {
-                Ok(_) => {
-                    return Ok(ReconcileReport {
-                        attempts: attempt + 1,
-                        change_count: self.change_count(),
-                    });
-                }
-                Err(e) if e.is_dump_interrupted() && attempt < opts.max_retries => {
-                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
-                    tokio::time::sleep(backoff).await;
-                    attempt += 1;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
+        if opts.dry_run {
+            return Ok(ReconcileReport {
+                attempts: 1,
+                changes_made: self.change_count(),
+                dry_run: true,
+                ..ReconcileReport::default()
+            });
         }
+        let (_, attempts) = opts
+            .retry(Error::is_dump_interrupted, async || self.apply(conn).await)
+            .await?;
+        Ok(ReconcileReport {
+            attempts,
+            changes_made: self.change_count(),
+            ..ReconcileReport::default()
+        })
     }
 }
 
-/// Options controlling [`NftablesDiff::apply_reconcile`]'s retry
-/// loop. Defaults: 3 retries, 100ms initial backoff (exponential).
-///
-/// Construct via [`Default::default()`] + the builder-style
-/// setters; struct-literal construction is forbidden by
-/// `#[non_exhaustive]` so future fields can be added without an
-/// SHV bump.
-///
-/// ```
-/// use nlink::netlink::nftables::config::ReconcileOptions;
-/// use std::time::Duration;
-/// let opts = ReconcileOptions::default()
-///     .max_retries(5)
-///     .backoff(Duration::from_millis(50));
-/// ```
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct ReconcileOptions {
-    /// Maximum number of retries after the initial attempt.
-    /// Total apply attempts is `max_retries + 1`. Default: 3.
-    pub max_retries: usize,
-    /// Backoff between retries. Doubles each attempt (exponential),
-    /// capped at `backoff × 2^10`. Default: 100ms.
-    pub backoff: Duration,
-}
-
-impl Default for ReconcileOptions {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            backoff: Duration::from_millis(100),
-        }
-    }
-}
-
-impl ReconcileOptions {
-    /// Set `max_retries` (chained builder pattern).
-    #[must_use]
-    pub fn max_retries(mut self, retries: usize) -> Self {
-        self.max_retries = retries;
-        self
-    }
-
-    /// Set `backoff` (chained builder pattern).
-    #[must_use]
-    pub fn backoff(mut self, backoff: Duration) -> Self {
-        self.backoff = backoff;
-        self
-    }
-}
-
-/// Outcome of [`NftablesDiff::apply_reconcile`]. `attempts == 1`
-/// means the first apply succeeded — no contention encountered.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-#[must_use = "Inspect `.attempts` to detect retried apply paths"]
-pub struct ReconcileReport {
-    /// Total number of apply attempts (including retries).
-    /// 1 = first try succeeded; 2+ = retried after EBUSY/EAGAIN.
-    pub attempts: usize,
-    /// `change_count()` of the diff that was applied.
-    pub change_count: usize,
-}
-
-#[cfg(test)]
-mod reconcile_tests {
-    use super::*;
-
-    #[test]
-    fn default_reconcile_options_match_plan_spec() {
-        let opts = ReconcileOptions::default();
-        assert_eq!(opts.max_retries, 3);
-        assert_eq!(opts.backoff, Duration::from_millis(100));
-    }
-
-    #[test]
-    fn reconcile_report_default_is_zero_attempts() {
-        let r = ReconcileReport::default();
-        assert_eq!(r.attempts, 0);
-        assert_eq!(r.change_count, 0);
-    }
-
-    #[test]
-    fn empty_diff_apply_via_reconcile_returns_one_attempt() {
-        // Smoke: an empty diff doesn't even need a socket — apply
-        // returns Ok(0) early. apply_reconcile loops once and
-        // succeeds.
-        // Can't easily test the retry path without a mock; the
-        // shape check is what unit tests cover. Real retries land
-        // in the integration test gate.
-        let d = NftablesDiff::default();
-        assert!(d.is_empty());
-        // Build a no-op connection isn't trivial without sockets;
-        // the empty-diff fast path is exercised in apply()'s own
-        // tests at the integration level.
-        let _ = d;
-    }
-}
 
 /// The generation a successful commit at `genid` leaves the ruleset at:
 /// `nf_tables_commit` increments it, skipping 0.
@@ -685,27 +579,30 @@ impl super::NftablesConfig {
         conn: &Connection<Nftables>,
         opts: ReconcileOptions,
     ) -> Result<ReconcileReport> {
-        let mut attempt: usize = 0;
-        loop {
+        if opts.dry_run {
             let diff = self.diff(conn).await?;
-            match diff.apply(conn).await {
-                Ok(_) => {
-                    return Ok(ReconcileReport {
-                        attempts: attempt + 1,
-                        change_count: diff.change_count(),
-                    });
-                }
-                Err(e)
-                    if (e.is_restart() || e.is_dump_interrupted())
-                        && attempt < opts.max_retries =>
-                {
-                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
-                    tokio::time::sleep(backoff).await;
-                    attempt += 1;
-                }
-                Err(e) => return Err(e),
-            }
+            return Ok(ReconcileReport {
+                attempts: 1,
+                changes_made: diff.change_count(),
+                dry_run: true,
+                ..ReconcileReport::default()
+            });
         }
+        let (changes_made, attempts) = opts
+            .retry(
+                |e| e.is_restart() || e.is_dump_interrupted(),
+                async || {
+                    let diff = self.diff(conn).await?;
+                    diff.apply(conn).await?;
+                    Ok(diff.change_count())
+                },
+            )
+            .await?;
+        Ok(ReconcileReport {
+            attempts,
+            changes_made,
+            ..ReconcileReport::default()
+        })
     }
 }
 

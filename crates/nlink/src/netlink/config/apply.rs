@@ -5,13 +5,14 @@
 use std::net::IpAddr;
 
 use super::{
-    diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
+    diff::{ConfigDiff, PlanOptions, LinkChanges, compute_diff_with_options},
     kind::{KindAttr, KindUpdate, kernel_bond_mode, kernel_macvlan_mode},
     types::{
         DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredRoute,
         NetworkConfig, QdiscParent,
     },
 };
+pub use crate::netlink::reconcile::ExecOptions;
 use crate::netlink::{
     addr::{Ipv4Address, Ipv6Address},
     connection::Connection,
@@ -56,41 +57,41 @@ use crate::netlink::{
 ///
 /// `purge` was removed in 0.19 (Plan 205) because the 0.18 version
 /// was a silent no-op, and re-wired in 0.23 with the scope
-/// [`DiffOptions::purge`] documents. The removal note outlived the
+/// [`PlanOptions::purge`] documents. The removal note outlived the
 /// removal by four releases (#335).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ApplyOptions {
-    /// Don't actually make changes, just compute what would be done.
-    pub dry_run: bool,
-    /// Continue applying changes even if some operations fail.
-    pub continue_on_error: bool,
-    /// Remove kernel resources not declared in the config (full
-    /// reconcile). Scoped conservatively — see [`DiffOptions::purge`].
-    /// Addresses: global scope and permanent, on the interfaces the
-    /// config declares and [`Self::purge_address_devs`]. Routes: `static`/`boot` protocol, in the tables
-    /// the config owns (main, every table a declared route names, and
-    /// [`Self::purge_tables`]). Kernel-managed resources (link-local,
-    /// loopback, RA/DHCP routes, links, qdiscs) are never touched.
-    /// Off by default.
-    pub purge: bool,
-    /// Extra route tables to purge from — see
-    /// [`DiffOptions::purge_tables`]. Ignored unless `purge` is on.
-    pub purge_tables: Vec<u32>,
-    /// Extra interfaces to purge addresses from — see
-    /// [`DiffOptions::purge_address_devs`]. Ignored unless `purge` is on.
-    pub purge_address_devs: Vec<String>,
-    /// Diff again after the apply, and fail with
-    /// [`Error::NotConverged`](crate::Error::NotConverged) if anything is
-    /// left (#518). Off by default; ignored on a dry run.
-    pub verify: bool,
-    /// The config applied before this one: what it declared and this one
-    /// does not is removed. See [`DiffOptions::previous`] (#512).
-    pub previous: Option<std::sync::Arc<super::NetworkConfig>>,
-    /// See [`DiffOptions::recreate_policy`] (#513).
-    pub recreate_policy: super::RecreatePolicy,
-    /// See [`DiffOptions::owned`] (#513).
-    pub owned: Vec<super::Owned>,
+    /// What the diff plans: what to remove, what may be recreated, what
+    /// the caller owns (#519).
+    pub plan: PlanOptions,
+    /// How the plan executes: dry run, continue on error, verify (#519).
+    pub exec: ExecOptions,
+}
+
+impl From<PlanOptions> for ApplyOptions {
+    fn from(plan: PlanOptions) -> Self {
+        Self {
+            plan,
+            exec: ExecOptions::default(),
+        }
+    }
+}
+
+impl From<ExecOptions> for ApplyOptions {
+    fn from(exec: ExecOptions) -> Self {
+        Self {
+            plan: PlanOptions::default(),
+            exec,
+        }
+    }
+}
+
+/// An apply's execution half: what [`ConfigDiff::apply`] can use of it.
+impl From<ApplyOptions> for ExecOptions {
+    fn from(options: ApplyOptions) -> Self {
+        options.exec
+    }
 }
 
 impl ApplyOptions {
@@ -98,7 +99,7 @@ impl ApplyOptions {
     /// mutations occur — every operation just records what
     /// it WOULD do in `ApplyResult::summary`.
     pub fn with_dry_run(mut self, on: bool) -> Self {
-        self.dry_run = on;
+        self.exec.dry_run = on;
         self
     }
 
@@ -108,83 +109,72 @@ impl ApplyOptions {
     /// still run. Useful for "best-effort" reconciliation
     /// where partial progress is preferable to no progress.
     pub fn with_continue_on_error(mut self, on: bool) -> Self {
-        self.continue_on_error = on;
+        self.exec.continue_on_error = on;
         self
     }
 
     /// Toggle purge (full-reconcile removals). With purge on, `apply`
-    /// computes the diff with [`DiffOptions::purge`] so undeclared
+    /// computes the diff with [`PlanOptions::purge`] so undeclared
     /// global addresses and `static`/`boot` routes in the tables the
     /// config owns are removed in addition to the additive changes. See
-    /// [`DiffOptions::purge`] for the exact safety scope.
+    /// [`PlanOptions::purge`] for the exact safety scope.
     pub fn with_purge(mut self, on: bool) -> Self {
-        self.purge = on;
+        self.plan.purge = on;
         self
     }
 
     /// Add route tables to the purge scope. See
-    /// [`DiffOptions::purge_tables`].
+    /// [`PlanOptions::purge_tables`].
     pub fn with_purge_tables(mut self, tables: impl IntoIterator<Item = u32>) -> Self {
-        self.purge_tables.extend(tables);
+        self.plan.purge_tables.extend(tables);
         self
     }
 
     /// Add interfaces to the address purge scope. See
-    /// [`DiffOptions::purge_address_devs`].
+    /// [`PlanOptions::purge_address_devs`].
     pub fn with_purge_address_devs<S: Into<String>>(
         mut self,
         devs: impl IntoIterator<Item = S>,
     ) -> Self {
-        self.purge_address_devs
+        self.plan
+            .purge_address_devs
             .extend(devs.into_iter().map(Into::into));
         self
     }
 
     /// Remove what `previous` declared and this config no longer does;
-    /// see [`DiffOptions::previous`] (#512).
+    /// see [`PlanOptions::previous`] (#512).
     pub fn with_previous(
         mut self,
         previous: impl Into<std::sync::Arc<super::NetworkConfig>>,
     ) -> Self {
-        self.previous = Some(previous.into());
+        self.plan.previous = Some(previous.into());
         self
     }
 
-    /// See [`DiffOptions::recreate_policy`] (#513).
+    /// See [`PlanOptions::recreate_policy`] (#513).
     pub fn with_recreate_policy(mut self, policy: super::RecreatePolicy) -> Self {
-        self.recreate_policy = policy;
+        self.plan.recreate_policy = policy;
         self
     }
 
-    /// See [`DiffOptions::caller_owned`] (#513).
+    /// See [`PlanOptions::caller_owned`] (#513).
     pub fn with_caller_owned(mut self, owned: impl IntoIterator<Item = super::Owned>) -> Self {
-        self.owned.extend(owned);
+        self.plan.owned.extend(owned);
         self
     }
 
     /// Diff again after the apply and fail if anything is left; see
-    /// [`Self::verify`].
+    /// [`ExecOptions::verify`].
     pub fn with_verify(mut self, on: bool) -> Self {
-        self.verify = on;
+        self.exec.verify = on;
         self
     }
 
-    /// The [`DiffOptions`] these options apply with: the purge switch and
-    /// its scope. Every path that diffs before applying goes through this,
-    /// so none can leave a purge option out, as the reconcile loop and
-    /// `Stack` did with [`purge_address_devs`](Self::purge_address_devs)
-    /// (#601).
-    pub fn diff_options(&self) -> DiffOptions {
-        let opts = DiffOptions::default()
-            .purge(self.purge)
-            .purge_tables(self.purge_tables.iter().copied())
-            .purge_address_devs(self.purge_address_devs.iter().cloned())
-            .recreate_policy(self.recreate_policy.clone())
-            .caller_owned(self.owned.iter().cloned());
-        match &self.previous {
-            Some(previous) => opts.previous(previous.clone()),
-            None => opts,
-        }
+    /// The plan half, [`Self::plan`].
+    #[deprecated(since = "0.32.0", note = "read `ApplyOptions::plan` (#519)")]
+    pub fn diff_options(&self) -> PlanOptions {
+        self.plan.clone()
     }
 }
 
@@ -264,12 +254,24 @@ pub async fn apply_config(
     conn: &Connection<Route>,
     options: ApplyOptions,
 ) -> Result<ApplyResult> {
-    let diff_opts = options.diff_options();
-    let diff = compute_diff_with_options(config, conn, &diff_opts).await?;
-    let verify = options.verify && !options.dry_run;
-    let result = apply_diff(&diff, conn, options).await?;
-    if verify {
-        let remaining = compute_diff_with_options(config, conn, &diff_opts).await?;
+    let diff = compute_diff_with_options(config, conn, &options.plan).await?;
+    apply_diff(&diff, conn, options.exec).await
+}
+
+/// Apply a pre-computed diff.
+pub async fn apply_diff(
+    diff: &ConfigDiff,
+    conn: &Connection<Route>,
+    options: ExecOptions,
+) -> Result<ApplyResult> {
+    let result = apply_steps(diff, conn, options).await?;
+    // Diff again, with the config and plan this diff came from (#518).
+    if options.verify
+        && !options.dry_run
+        && let Some(source) = &diff.source
+    {
+        let (config, plan) = &**source;
+        let remaining = compute_diff_with_options(config, conn, plan).await?;
         if !remaining.is_empty() {
             return Err(Error::NotConverged {
                 remaining: Box::new(remaining),
@@ -279,11 +281,10 @@ pub async fn apply_config(
     Ok(result)
 }
 
-/// Apply a pre-computed diff.
-pub async fn apply_diff(
+async fn apply_steps(
     diff: &ConfigDiff,
     conn: &Connection<Route>,
-    options: ApplyOptions,
+    options: ExecOptions,
 ) -> Result<ApplyResult> {
     let mut result = ApplyResult::default();
 
@@ -815,7 +816,7 @@ pub async fn apply_diff(
     }
 
     // 6. Purge removals (only populated when the diff was computed
-    //    with `DiffOptions::purge` — see `compute_diff_with_options`).
+    //    with `PlanOptions::purge` — see `compute_diff_with_options`).
     //    Order: routes before addresses, since a route can depend on
     //    the address's prefix being present (removing the address
     //    first would let the kernel auto-flush the connected route and

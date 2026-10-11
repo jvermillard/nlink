@@ -660,7 +660,7 @@ let json = desired.to_json_string_pretty()?;
 
 By default `diff`/`apply` only ever *add* state: a kernel resource you
 stop declaring is left in place. Opt into a full reconcile — removing
-undeclared resources — with `DiffOptions::purge` (or
+undeclared resources — with `PlanOptions::purge` (or
 `ApplyOptions::with_purge`):
 
 ```rust,no_run
@@ -668,11 +668,11 @@ undeclared resources — with `DiffOptions::purge` (or
 # use nlink::netlink::config::{ApplyOptions, NetworkConfig};
 # let conn = nlink::Connection::<nlink::Route>::new()?;
 # let desired = NetworkConfig::new();
-use nlink::netlink::config::DiffOptions;
+use nlink::netlink::config::PlanOptions;
 
 // See exactly what would be removed before applying.
 let diff = desired
-    .diff_with_options(&conn, DiffOptions::default().purge(true))
+    .diff_with_options(&conn, PlanOptions::default().purge(true))
     .await?;
 println!("{diff}");   // `-` lines list addresses/routes to be removed
 
@@ -689,13 +689,13 @@ kernel-managed state:
 
 - **Addresses:** only **global-scope, permanent** addresses on the
   interfaces the config declares (as a link or by an address), plus any
-  named with `DiffOptions::purge_address_devs`. IPv6 link-local,
+  named with `PlanOptions::purge_address_devs`. IPv6 link-local,
   loopback, any non-universe scope, and addresses the kernel will expire
   (SLAAC, temporary, a DHCP lease) are never removed.
 - **Routes:** only **`static`/`boot`-protocol routes**
   (unicast/blackhole/unreachable/prohibit), in the main table, the
   tables declared routes name, and any named with
-  `DiffOptions::purge_tables`. Kernel-derived, RA, DHCP, and redirect
+  `PlanOptions::purge_tables`. Kernel-derived, RA, DHCP, and redirect
   routes, the auto-added connected route, and every other table are left
   untouched.
 - **Links and qdiscs are never purged** — deleting an interface is too
@@ -785,7 +785,7 @@ aggregate the per-layer counts, and a declared-but-absent WireGuard
 device is created automatically. The links are bootstrapped (created
 and brought up) *first*, so the network layer can address the tunnel
 and route via a peer's tunnel address (#330). `apply_in_with` /
-`diff_in_with` carry `ApplyOptions` / `DiffOptions` to the network
+`diff_in_with` carry `ApplyOptions` / `PlanOptions` to the network
 layer — `ApplyOptions::default().with_purge(true)` is how a reconcile
 removes addresses and routes that left the declaration.
 

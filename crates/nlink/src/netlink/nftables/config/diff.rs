@@ -1310,7 +1310,7 @@ fn set_update(declared: &DeclaredSet, current: &SetInfo) -> DeclaredSet {
 
 /// Options controlling [`NftablesConfig::diff_with_options`].
 ///
-/// Mirrors [`DiffOptions`](crate::netlink::config::DiffOptions) on the
+/// Mirrors [`PlanOptions`](crate::netlink::config::PlanOptions) on the
 /// `NetworkConfig` side.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

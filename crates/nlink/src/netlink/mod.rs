@@ -129,6 +129,7 @@ mod protocol;
 pub mod psched;
 pub mod ratelimit;
 pub mod reflector;
+pub mod reconcile;
 pub mod resync;
 pub mod resync_ext;
 pub mod route;

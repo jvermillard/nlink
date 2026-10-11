@@ -22,13 +22,19 @@ use crate::netlink::{
     types::{addr::Scope, route::RouteType},
 };
 
-/// Options controlling [`NetworkConfig::diff_with_options`](crate::netlink::config::NetworkConfig::diff_with_options).
+/// What a diff plans: what it removes (the purge scope, `previous`),
+/// what it may recreate, and what the caller owns — as opposed to how an
+/// apply executes, [`ExecOptions`](crate::reconcile::ExecOptions) (#519).
+/// [`NetworkConfig::diff_with_options`](crate::netlink::config::NetworkConfig::diff_with_options)
+/// takes it, and an apply through
+/// [`ApplyOptions::plan`](super::ApplyOptions::plan). Called `DiffOptions`
+/// before 0.32.
 ///
 /// `#[non_exhaustive]` (Plan 188 convention) — construct via
 /// [`Default::default`] + the builder setters.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct DiffOptions {
+pub struct PlanOptions {
     /// Compute removals for resources present in the kernel but not
     /// declared in the config ("full reconcile"). Default `false`.
     ///
@@ -103,7 +109,11 @@ pub struct DiffOptions {
     pub owned: Vec<super::Owned>,
 }
 
-impl DiffOptions {
+/// The name [`PlanOptions`] had before 0.32.
+#[deprecated(since = "0.32.0", note = "renamed `PlanOptions`, beside `ExecOptions` (#519)")]
+pub type DiffOptions = PlanOptions;
+
+impl PlanOptions {
     /// Enable/disable purge (full-reconcile removals). See
     /// [`Self::purge`] for the safety scope.
     pub fn purge(mut self, on: bool) -> Self {
@@ -225,7 +235,7 @@ pub struct ConfigDiff {
     /// Links the previous config declared and this one does not, still in
     /// the kernel with the kind they were declared with, and the links the
     /// kernel deletes along with them. The apply deletes them first, before
-    /// any recreate or create. Only with [`DiffOptions::previous`] (#512).
+    /// any recreate or create. Only with [`PlanOptions::previous`] (#512).
     pub links_to_remove: Vec<super::LinkRemoval>,
 
     /// Addresses to add.
@@ -245,11 +255,11 @@ pub struct ConfigDiff {
     pub qdiscs_to_replace: Vec<DeclaredQdisc>,
     /// Qdiscs the previous config declared and this one does not, still in
     /// the kernel: the apply deletes them, and the kernel puts its default
-    /// back. Only with [`DiffOptions::previous`] (#512).
+    /// back. Only with [`PlanOptions::previous`] (#512).
     pub qdiscs_to_remove: Vec<DeclaredQdisc>,
 
     /// Addresses to remove (purge mode only — see
-    /// [`DiffOptions::purge`]). Populated **only** when the diff is
+    /// [`PlanOptions::purge`]). Populated **only** when the diff is
     /// computed via
     /// [`NetworkConfig::diff_with_options`](crate::netlink::config::NetworkConfig::diff_with_options)
     /// with `purge` on; the default
@@ -257,7 +267,7 @@ pub struct ConfigDiff {
     /// removes anything. Kernel-managed addresses (IPv6 link-local,
     /// loopback, any non-`global` scope, anything with a lifetime) are
     /// excluded, and only the interfaces the config declares and
-    /// [`DiffOptions::purge_address_devs`] are touched.
+    /// [`PlanOptions::purge_address_devs`] are touched.
     pub addresses_to_remove: Vec<DeclaredAddress>,
 
     /// Routes to remove.
@@ -267,7 +277,7 @@ pub struct ConfigDiff {
     /// only replaces a route of the same metric, so without this a metric
     /// change left the old route installed, and winning (#468).
     ///
-    /// Under [`DiffOptions::purge`], also every route nothing declared
+    /// Under [`PlanOptions::purge`], also every route nothing declared
     /// carries, compared on the full identity (gateway, device, metric,
     /// type), not on `(dst, prefix, table)`. Restricted to the tables the
     /// config owns, to IPv4/IPv6, and to admin/user-managed protocols
@@ -318,6 +328,11 @@ pub struct ConfigDiff {
     /// its device, which the apply diffs again after the qdisc step: a
     /// root qdisc replaced or a link recreated takes its tree with it. Not
     /// shown or serialized.
+    /// The config and plan this diff was computed from, for an apply that
+    /// verifies (#518). Not shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) source: Option<std::sync::Arc<(NetworkConfig, PlanOptions)>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) tc_declared: Vec<(
         super::tc_tree::DeclaredTc,
@@ -364,12 +379,18 @@ impl ConfigDiff {
     /// you already have a `ConfigDiff` — the latter re-runs
     /// `compute_diff` internally, costing one extra round-trip
     /// of dump traffic.
+    ///
+    /// A diff is a plan already made, so this takes how to execute it
+    /// alone: [`ExecOptions`](crate::reconcile::ExecOptions), or an
+    /// [`ApplyOptions`](super::ApplyOptions) whose plan half is not used
+    /// (#519). `verify` diffs again with the config and plan this diff
+    /// came from.
     pub async fn apply(
         &self,
         conn: &Connection<Route>,
-        opts: super::apply::ApplyOptions,
+        opts: impl Into<crate::reconcile::ExecOptions>,
     ) -> Result<super::apply::ApplyResult> {
-        super::apply::apply_diff(self, conn, opts).await
+        super::apply::apply_diff(self, conn, opts.into()).await
     }
 
     /// Check if no changes are needed.
@@ -500,7 +521,7 @@ impl ConfigDiff {
             lines.push(tree.to_string());
         }
 
-        // Purge removals (only present under `DiffOptions::purge`).
+        // Purge removals (only present under `PlanOptions::purge`).
         for addr in &self.addresses_to_remove {
             lines.push(format!(
                 "- address {}/{} on {}",
@@ -674,15 +695,15 @@ impl std::fmt::Display for LinkChanges {
 
 /// Compute the difference between desired and current state.
 pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> Result<ConfigDiff> {
-    compute_diff_with_options(config, conn, &DiffOptions::default()).await
+    compute_diff_with_options(config, conn, &PlanOptions::default()).await
 }
 
-/// Like [`compute_diff`] but honours [`DiffOptions`] (currently the
-/// `purge` flag — see [`DiffOptions::purge`]).
+/// Like [`compute_diff`] but honours [`PlanOptions`] (currently the
+/// `purge` flag — see [`PlanOptions::purge`]).
 pub async fn compute_diff_with_options(
     config: &NetworkConfig,
     conn: &Connection<Route>,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
 ) -> Result<ConfigDiff> {
     config.validate()?;
     let snapshot = Snapshot::read_for(conn, config, opts).await?;
@@ -700,15 +721,15 @@ pub async fn compute_diff_with_options(
 ///
 /// ```no_run
 /// # async fn example() -> nlink::Result<()> {
-/// use nlink::netlink::config::{DiffOptions, NetworkConfig, Snapshot};
+/// use nlink::netlink::config::{PlanOptions, NetworkConfig, Snapshot};
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 ///
 /// let snapshot = Snapshot::read(&conn).await?;
 /// let a = NetworkConfig::new().link("d0", |l| l.dummy().mtu(1400));
 /// let b = NetworkConfig::new().link("d0", |l| l.dummy().mtu(9000));
 /// let (da, db) = (
-///     a.diff_snapshot(&snapshot, DiffOptions::default())?,
-///     b.diff_snapshot(&snapshot, DiffOptions::default())?,
+///     a.diff_snapshot(&snapshot, PlanOptions::default())?,
+///     b.diff_snapshot(&snapshot, PlanOptions::default())?,
 /// );
 /// println!("a: {da}\nb: {db}");
 /// # Ok(())
@@ -767,7 +788,7 @@ impl Snapshot {
     pub(crate) async fn read_for(
         conn: &Connection<Route>,
         config: &NetworkConfig,
-        opts: &DiffOptions,
+        opts: &PlanOptions,
     ) -> Result<Self> {
         let mut snapshot = Self::read_base(conn).await?;
         if kind::deletes_any(config, opts, &snapshot.links) {
@@ -827,7 +848,7 @@ impl Snapshot {
 pub(crate) fn diff_snapshot(
     config: &NetworkConfig,
     snapshot: &Snapshot,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
 ) -> Result<ConfigDiff> {
     let mut diff = ConfigDiff::default();
     let current_links = snapshot.links.clone();
@@ -957,6 +978,7 @@ pub(crate) fn diff_snapshot(
     let names = super::tc_tree::ifindexes(&current_links);
     let no_tc = super::tc_tree::TcLive::default();
     diff.tc_declared = super::tc_tree::with_previous(config, opts);
+    diff.source = Some(std::sync::Arc::new((config.clone(), opts.clone())));
     for (tree, previous) in &diff.tc_declared {
         let (live, qdiscs) = match link_by_name.get(tree.dev.as_str()) {
             Some(l) => (
@@ -1478,7 +1500,7 @@ fn diff_addresses(
     current: &[AddressMessage],
     ifindex_to_name: &HashMap<u32, &str>,
     flushed: &HashSet<&str>,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
     // Build set of desired addresses: (dev, address, prefix_len)
@@ -1662,7 +1684,7 @@ fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
     ifindex_to_name: &HashMap<u32, &str>,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
     let purge = opts.purge;
@@ -1972,7 +1994,7 @@ fn diff_qdiscs(
     config: &NetworkConfig,
     current: &[TcMessage],
     ifindex_to_name: &HashMap<u32, &str>,
-    opts: &DiffOptions,
+    opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
     // Build map of current root qdiscs by device
@@ -2258,16 +2280,16 @@ mod tests {
         let opts = ApplyOptions::default()
             .with_dry_run(true)
             .with_continue_on_error(true);
-        assert!(opts.dry_run);
-        assert!(opts.continue_on_error);
+        assert!(opts.exec.dry_run);
+        assert!(opts.exec.continue_on_error);
     }
 
     #[test]
     fn apply_options_default_is_safe() {
         use super::super::apply::ApplyOptions;
         let opts = ApplyOptions::default();
-        assert!(!opts.dry_run);
-        assert!(!opts.continue_on_error);
+        assert!(!opts.exec.dry_run);
+        assert!(!opts.exec.continue_on_error);
     }
 
     // ---- Plan 188 §2.5 — LinkChanges::Display ----
@@ -2408,9 +2430,9 @@ mod tests {
 
     #[test]
     fn diff_options_purge_builder_toggles_flag() {
-        assert!(!DiffOptions::default().purge);
-        assert!(DiffOptions::default().purge(true).purge);
-        assert!(!DiffOptions::default().purge(true).purge(false).purge);
+        assert!(!PlanOptions::default().purge);
+        assert!(PlanOptions::default().purge(true).purge);
+        assert!(!PlanOptions::default().purge(true).purge(false).purge);
     }
 
     // ---- #333 / #335 — purge scope beyond the main table ----
@@ -2425,7 +2447,7 @@ mod tests {
             .build()
     }
 
-    fn purge_routes(config: &NetworkConfig, current: &[RouteMessage], opts: DiffOptions) -> Vec<(String, u32)> {
+    fn purge_routes(config: &NetworkConfig, current: &[RouteMessage], opts: PlanOptions) -> Vec<(String, u32)> {
         let mut diff = ConfigDiff::default();
         diff_routes(config, current, &HashMap::new(), &opts, &mut diff);
         diff.routes_to_remove
@@ -2439,16 +2461,16 @@ mod tests {
         let config = NetworkConfig::new()
             .route("10.1.0.0/24", |r| r.table(100))
             .unwrap();
-        let opts = DiffOptions::default().purge(true);
+        let opts = PlanOptions::default().purge(true);
         assert_eq!(
             opts.purge_table_scope(&config),
             HashSet::from([254, 100]),
             "main plus the table a declared route names"
         );
-        let opts = DiffOptions::default().purge(true).purge_tables([200, 201]);
+        let opts = PlanOptions::default().purge(true).purge_tables([200, 201]);
         assert_eq!(opts.purge_table_scope(&config), HashSet::from([254, 100, 200, 201]));
         assert_eq!(
-            DiffOptions::default().purge_table_scope(&NetworkConfig::new()),
+            PlanOptions::default().purge_table_scope(&NetworkConfig::new()),
             HashSet::from([254]),
             "a config with no routes owns main and nothing else"
         );
@@ -2465,7 +2487,7 @@ mod tests {
             kernel_static_route("10.1.0.0", 24, 100),
             kernel_static_route("10.2.0.0", 24, 100),
         ];
-        let removed = purge_routes(&config, &current, DiffOptions::default().purge(true));
+        let removed = purge_routes(&config, &current, PlanOptions::default().purge(true));
         assert_eq!(removed, vec![("10.2.0.0/24".to_string(), 100)]);
     }
 
@@ -2479,7 +2501,7 @@ mod tests {
             kernel_static_route("10.9.0.0", 24, 254),
             kernel_static_route("10.2.0.0", 24, 100),
         ];
-        let removed = purge_routes(&config, &current, DiffOptions::default().purge(true));
+        let removed = purge_routes(&config, &current, PlanOptions::default().purge(true));
         assert_eq!(
             removed,
             vec![("10.9.0.0/24".to_string(), 254)],
@@ -2494,13 +2516,13 @@ mod tests {
         let config = NetworkConfig::new();
         let current = [kernel_static_route("10.2.0.0", 24, 100)];
         assert!(
-            purge_routes(&config, &current, DiffOptions::default().purge(true)).is_empty(),
+            purge_routes(&config, &current, PlanOptions::default().purge(true)).is_empty(),
             "without purge_tables the now-unmentioned table is left alone"
         );
         let removed = purge_routes(
             &config,
             &current,
-            DiffOptions::default().purge(true).purge_tables([100]),
+            PlanOptions::default().purge(true).purge_tables([100]),
         );
         assert_eq!(removed, vec![("10.2.0.0/24".to_string(), 100)]);
     }
@@ -2522,7 +2544,7 @@ mod tests {
             .protocol(RouteProtocol::Kernel)
             .route_type(RouteType::Local)
             .build();
-        let removed = purge_routes(&config, &[kernel_proto, local], DiffOptions::default().purge(true));
+        let removed = purge_routes(&config, &[kernel_proto, local], PlanOptions::default().purge(true));
         assert!(removed.is_empty(), "got {removed:?}");
     }
 
@@ -2692,7 +2714,7 @@ mod tests {
         let run = |route: fn(RouteBuilder) -> RouteBuilder, current: &[RouteMessage]| {
             let config = NetworkConfig::new().route("10.0.0.0/24", route).unwrap();
             let mut diff = ConfigDiff::default();
-            diff_routes(&config, current, &names, &DiffOptions::default(), &mut diff);
+            diff_routes(&config, current, &names, &PlanOptions::default(), &mut diff);
             (diff.routes_to_add.len(), diff.routes_refused)
         };
 
@@ -2737,7 +2759,7 @@ mod tests {
     fn purge_addresses(
         config: &NetworkConfig,
         current: &[AddressMessage],
-        opts: DiffOptions,
+        opts: PlanOptions,
     ) -> Vec<String> {
         let names = HashMap::from([(1, "d0"), (2, "d1"), (3, "d2")]);
         let mut diff = ConfigDiff::default();
@@ -2768,7 +2790,7 @@ mod tests {
             // d2 is not declared.
             kernel_addr(3, "10.0.2.1", 24, PERMANENT),
         ];
-        let purge = DiffOptions::default().purge(true);
+        let purge = PlanOptions::default().purge(true);
         assert_eq!(
             purge_addresses(&config, &current, purge.clone()),
             ["10.0.0.1/24 on d0"]
@@ -2777,7 +2799,7 @@ mod tests {
             purge_addresses(&config, &current, purge.purge_address_devs(["d2"])),
             ["10.0.0.1/24 on d0", "10.0.2.1/24 on d2"]
         );
-        assert!(purge_addresses(&config, &current, DiffOptions::default()).is_empty());
+        assert!(purge_addresses(&config, &current, PlanOptions::default()).is_empty());
     }
 
     #[test]
