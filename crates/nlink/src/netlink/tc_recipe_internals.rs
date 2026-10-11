@@ -446,7 +446,7 @@ fn split_attrs(mut input: &[u8]) -> BTreeMap<u16, &[u8]> {
 /// value and no mask — would otherwise always look narrowed. A mask
 /// never appears without its value here, so checking the values is
 /// enough.
-const RECIPE_FLOWER_VALUE_KEYS: &[u16] = {
+pub(crate) const RECIPE_FLOWER_VALUE_KEYS: &[u16] = {
     use super::types::tc::filter::flower::*;
     &[
         TCA_FLOWER_KEY_IP_PROTO,

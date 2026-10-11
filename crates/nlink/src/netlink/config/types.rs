@@ -27,6 +27,11 @@ pub struct NetworkConfig {
     pub(crate) routes: Vec<DeclaredRoute>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) qdiscs: Vec<DeclaredQdisc>,
+    /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
+    /// yet: a filter's actions have no document form.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) tc: Vec<super::tc_tree::DeclaredTc>,
     /// The `rtm_protocol` declared routes are installed with, and the one
     /// the diff treats as the config's own; `None` is `boot` (#512). See
     /// [`route_protocol`](Self::route_protocol).
@@ -242,6 +247,11 @@ impl NetworkConfig {
                 ));
             }
         }
+        for t in &self.tc {
+            for problem in t.problems() {
+                errors.push(ValidationErrorInfo::new(format!("tc.{}", t.dev), problem));
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -344,13 +354,14 @@ impl NetworkConfig {
     }
 
     /// `true` when the config declares nothing: no links, addresses,
-    /// routes or qdiscs, and no builder mistake waiting for
+    /// routes, qdiscs or TC trees, and no builder mistake waiting for
     /// [`validate`](Self::validate) (#531).
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
             && self.addresses.is_empty()
             && self.routes.is_empty()
             && self.qdiscs.is_empty()
+            && self.tc.is_empty()
             && self.invalid.is_empty()
     }
 
@@ -553,6 +564,45 @@ impl NetworkConfig {
             })),
         }
         self
+    }
+
+    /// Declare `dev`'s TC tree (#514): HTB classes, the leaf qdisc in a
+    /// class, and filters with their actions. See
+    /// [`tc_tree`](super::tc_tree)'s module documentation; the device's
+    /// root and ingress/clsact qdiscs are declared with
+    /// [`qdisc`](Self::qdisc), before this when the tree uses a hook.
+    pub fn tc(
+        mut self,
+        dev: &str,
+        f: impl FnOnce(super::tc_tree::TcBuilder) -> super::tc_tree::TcBuilder,
+    ) -> Self {
+        let hook = self
+            .qdiscs
+            .iter()
+            .find(|q| q.dev == dev && q.effective_parent() == QdiscParent::Ingress)
+            .map(|q| match q.qdisc_type {
+                QdiscSpec::Clsact => crate::TcHandle::CLSACT_INGRESS,
+                _ => crate::TcHandle::INGRESS,
+            });
+        match f(super::tc_tree::TcBuilder::new(dev, hook)).build() {
+            Ok(tree) => match self.tc.iter_mut().find(|t| t.dev == dev) {
+                Some(t) => {
+                    t.classes.extend(tree.classes);
+                    t.leaves.extend(tree.leaves);
+                    t.filters.extend(tree.filters);
+                }
+                None => self.tc.push(tree),
+            },
+            Err(errors) => self.invalid.extend(errors.into_iter().map(|e| {
+                crate::netlink::error::ValidationErrorInfo::new(format!("tc.{dev}"), e)
+            })),
+        }
+        self
+    }
+
+    /// The declared TC trees, one per device.
+    pub fn tc_trees(&self) -> &[super::tc_tree::DeclaredTc] {
+        &self.tc
     }
 
     /// Get the configured links.

@@ -53,6 +53,7 @@
 mod apply;
 mod diff;
 mod kind;
+mod tc_tree;
 mod types;
 
 // `ApplyError` is a field of `ApplyResult` and `LinkChanges` a field of
@@ -65,6 +66,10 @@ pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict, Snapshot};
 pub use kind::{
     Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
     RecreatePolicy,
+};
+pub use tc_tree::{
+    ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterSpec, TcBuilder,
+    TcTreeDiff,
 };
 pub use types::*;
 

@@ -299,7 +299,7 @@ pub async fn apply_diff(
     // 2. Modify existing links (state, MTU, master)
     // 3. Add addresses
     // 4. Add routes
-    // 5. Configure qdiscs
+    // 5. Configure qdiscs, then the TC trees under them
     // 6. Remove old resources (if purge enabled)
 
     // A declared link that does not exist and that nothing in this apply
@@ -770,6 +770,40 @@ pub async fn apply_diff(
                     if options.continue_on_error {
                         result.errors.push(ApplyError {
                             operation: op,
+                            error: e,
+                        });
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    // 5c. TC trees (#514), diffed again against the device as the steps
+    //     above left it: a root qdisc replaced or a link recreated took
+    //     its tree, and a redirect's target may have a new ifindex.
+    if options.dry_run {
+        for tree in &diff.tc {
+            for line in tree.to_string().lines() {
+                result.summary.push(format!("Would {line}"));
+            }
+            result.changes_made += tree.len();
+        }
+    } else {
+        for (tree, previous) in &diff.tc_declared {
+            match super::tc_tree::apply_declared(conn, tree, previous.as_ref()).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    result
+                        .summary
+                        .push(format!("Applied TC tree on {} ({n} changes)", tree.dev()));
+                    result.changes_made += n;
+                }
+                Err(e) => {
+                    if options.continue_on_error {
+                        result.errors.push(ApplyError {
+                            operation: format!("tc tree on {}", tree.dev()),
                             error: e,
                         });
                     } else {

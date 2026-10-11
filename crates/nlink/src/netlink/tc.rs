@@ -8013,6 +8013,20 @@ impl HtbClassConfig {
         (rate, self.ceil.map_or(rate, |c| c.as_bytes_per_sec()))
     }
 
+    /// The declared priority, if any.
+    pub(crate) fn priority(&self) -> Option<u32> {
+        self.prio
+    }
+
+    /// The declared ceil burst as a dump reads it back (through the tick
+    /// round trip at the ceil rate), if one is declared; the default the
+    /// kernel derives is not compared.
+    pub(crate) fn cburst_as_dumped(&self) -> Option<u32> {
+        let (_, ceil) = self.rates_bps();
+        let cburst = self.cburst?.as_u32_saturating();
+        Some(psched::tc_calc_xmitsize(ceil, psched::tc_calc_xmittime(ceil, cburst)))
+    }
+
     pub(crate) fn burst_as_dumped(&self) -> u32 {
         let rate = self.rate.as_bytes_per_sec();
         let burst = self
