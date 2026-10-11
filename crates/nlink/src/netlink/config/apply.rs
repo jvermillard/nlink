@@ -228,6 +228,26 @@ pub async fn apply_diff(
     // 5. Configure qdiscs
     // 6. Remove old resources (if purge enabled)
 
+    // A declared route whose place holds a route the config does not own
+    // — the kernel's connected route, an RA, DHCP or routing daemon's —
+    // would replace it (#469). Refused before anything changes.
+    for conflict in &diff.routes_refused {
+        let route = &conflict.route;
+        let error = Error::NotSupported(format!(
+            "route {}/{}: adding it would replace {}, which this config does not own. Give \
+             the declared route another metric, or remove the other route, and apply again.",
+            route.destination, route.prefix_len, conflict.held_by
+        ));
+        if options.continue_on_error {
+            result.errors.push(ApplyError {
+                operation: format!("add route {}/{}", route.destination, route.prefix_len),
+                error,
+            });
+            continue;
+        }
+        return Err(error);
+    }
+
     // 0. Delete the links to be recreated. A refused recreate — one that
     //    would destroy what the config does not declare — fails here,
     //    before anything has changed. The links the kernel deletes along

@@ -46,6 +46,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A declared route could silently replace the kernel's connected route
+  (#469).** Declared routes are added with `NLM_F_REPLACE`, and the kernel
+  replaces the first route at the same destination, table and metric,
+  whoever owns it. So `10.0.0.0/24 via 10.0.0.254` on a link holding
+  `10.0.0.1/24` took the place of the `proto kernel` prefix route. Every
+  gateway on that segment then failed with `ENETUNREACH`, and the next
+  diff called the config converged. A declared route whose place holds a
+  route of a protocol nlink does not add (anything but `static`/`boot`:
+  kernel, RA, DHCP, a routing daemon) is now listed in the new
+  `ConfigDiff::routes_refused` (`! route … (refused: …)`), and the apply
+  fails with `Error::NotSupported` before it changes anything. At
+  another metric the route is added next to the connected one.
+
 - **The address purge missed a link with no declared address left, and
   removed addresses the kernel hands out (#470).**
   - A purge only managed the interfaces that still had a declared
@@ -914,6 +927,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`ConfigDiff::routes_refused` and `RouteConflict`** (#469): declared
+  routes the apply will not install over a route the config does not
+  own.
 
 - **`DiffOptions::purge_address_devs` and
   `ApplyOptions::with_purge_address_devs`** (#470): interfaces to purge

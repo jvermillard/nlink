@@ -152,6 +152,11 @@ pub struct ConfigDiff {
     /// Routes to add.
     pub routes_to_add: Vec<DeclaredRoute>,
 
+    /// Declared routes the apply refuses to install, because the only
+    /// place they could go holds a route nlink does not own (#469). The
+    /// apply fails on the first, before it changes anything.
+    pub routes_refused: Vec<RouteConflict>,
+
     /// Qdiscs to add.
     pub qdiscs_to_add: Vec<DeclaredQdisc>,
     /// Qdiscs to replace (same position, different config).
@@ -241,6 +246,7 @@ impl ConfigDiff {
             && self.links_to_modify.is_empty()
             && self.addresses_to_add.is_empty()
             && self.routes_to_add.is_empty()
+            && self.routes_refused.is_empty()
             && self.qdiscs_to_add.is_empty()
             && self.qdiscs_to_replace.is_empty()
             && self.addresses_to_remove.is_empty()
@@ -254,6 +260,7 @@ impl ConfigDiff {
             + self.links_to_modify.len()
             + self.addresses_to_add.len()
             + self.routes_to_add.len()
+            + self.routes_refused.len()
             + self.qdiscs_to_add.len()
             + self.qdiscs_to_replace.len()
             + self.addresses_to_remove.len()
@@ -310,6 +317,9 @@ impl ConfigDiff {
                 "+ route {}/{}{}{}",
                 route.destination, route.prefix_len, via, dev
             ));
+        }
+        for conflict in &self.routes_refused {
+            lines.push(conflict.to_string());
         }
         // Qdiscs
         for qdisc in &self.qdiscs_to_add {
@@ -370,6 +380,45 @@ impl std::fmt::Display for ConfigDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         #[allow(deprecated)]
         f.write_str(&self.summary())
+    }
+}
+
+/// A declared route the apply will not install (#469).
+///
+/// A route is added with `NLM_F_REPLACE`, and the kernel replaces the
+/// first route at the same destination, table and metric — whoever put it
+/// there. When that is the kernel's connected route, an RA or DHCP route
+/// or a routing daemon's, replacing it breaks what depends on it: with the
+/// connected route of `10.0.0.1/24` gone, every gateway on that segment is
+/// unreachable. Give the declared route another metric, or remove the
+/// other route.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RouteConflict {
+    /// The declared route.
+    pub route: DeclaredRoute,
+    /// The route in its place, as `ip route` shows it:
+    /// `10.0.0.0/24 dev eth0 proto kernel metric 0`.
+    pub held_by: String,
+}
+
+impl std::fmt::Display for RouteConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let route = &self.route;
+        write!(f, "! route {}/{}", route.destination, route.prefix_len)?;
+        if let Some(gateway) = route.gateway {
+            write!(f, " via {gateway}")?;
+        }
+        if let Some(dev) = &route.dev {
+            write!(f, " dev {dev}")?;
+        }
+        write!(
+            f,
+            " (refused: it would replace {}, which the config does not own)",
+            self.held_by
+        )
     }
 }
 
@@ -1242,8 +1291,28 @@ fn diff_routes(
                     .any(|r| route_matches(declared, declared_oif, r))
             });
 
-        if !matches_existing {
-            diff.routes_to_add.push(declared.clone());
+        if matches_existing {
+            continue;
+        }
+        // The replace overwrites the first route at the key with the same
+        // metric (and, for IPv4, TOS 0: `fib_table_insert`; IPv6:
+        // `fib6_add_rt2node`). nlink adds `proto boot`, and a purge treats
+        // `static`/`boot` as the config's own; anything else in that place
+        // belongs to someone else and is refused, not overwritten (#469).
+        let slot = kernel_metric(declared);
+        let foreign = current_by_key.get(&key).and_then(|kernel_routes| {
+            kernel_routes.iter().find(|r| {
+                r.priority().unwrap_or(0) == slot
+                    && r.header.rtm_tos == 0
+                    && !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
+            })
+        });
+        match foreign {
+            Some(r) => diff.routes_refused.push(RouteConflict {
+                route: declared.clone(),
+                held_by: describe_route(r, ifindex_to_name),
+            }),
+            None => diff.routes_to_add.push(declared.clone()),
         }
     }
 
@@ -1339,6 +1408,29 @@ fn diff_routes(
             route_type,
         });
     }
+}
+
+/// A kernel route the way `ip route` prints it.
+fn describe_route(r: &RouteMessage, ifindex_to_name: &HashMap<u32, &str>) -> String {
+    let mut out = match r.destination {
+        Some(dst) => format!("{dst}/{}", r.dst_len()),
+        None => "default".to_string(),
+    };
+    if r.route_type() != RouteType::Unicast {
+        out = format!("{} {out}", r.route_type().name());
+    }
+    if let Some(gateway) = r.gateway() {
+        out.push_str(&format!(" via {gateway}"));
+    }
+    if let Some(name) = r.oif().and_then(|oif| ifindex_to_name.get(&oif)) {
+        out.push_str(&format!(" dev {name}"));
+    }
+    out.push_str(&format!(
+        " proto {} metric {}",
+        r.protocol().name(),
+        r.priority().unwrap_or(0)
+    ));
+    out
 }
 
 /// Does the kernel route `r`, at `declared`'s key, carry `declared`?
@@ -2502,6 +2594,58 @@ mod tests {
         d.routes_to_remove.push(declared_route("10.1.0.0", 24));
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 2);
+    }
+
+    // ---- #469 — a route in a place nlink does not own ----
+
+    /// A declared route whose replace would overwrite the kernel's
+    /// connected route (or any route of a protocol nlink does not add) is
+    /// refused rather than added. At another metric it goes alongside,
+    /// a route the kernel already carries is no change, and a `static` /
+    /// `boot` route in that place is the config's own to replace.
+    #[test]
+    fn a_route_over_a_foreign_route_is_refused() {
+        use super::super::types::RouteBuilder;
+
+        let connected = crate::netlink::messages::RouteMessageBuilder::new()
+            .destination("10.0.0.0".parse().unwrap(), 24)
+            .table(254)
+            .oif(1)
+            .protocol(RouteProtocol::Kernel)
+            .route_type(RouteType::Unicast)
+            .build();
+        let names = HashMap::from([(1, "d0")]);
+        let run = |route: fn(RouteBuilder) -> RouteBuilder, current: &[RouteMessage]| {
+            let config = NetworkConfig::new().route("10.0.0.0/24", route).unwrap();
+            let mut diff = ConfigDiff::default();
+            diff_routes(&config, current, &names, &DiffOptions::default(), &mut diff);
+            (diff.routes_to_add.len(), diff.routes_refused)
+        };
+
+        let (added, refused) = run(|r| r.via("10.0.0.254"), std::slice::from_ref(&connected));
+        assert_eq!((added, refused.len()), (0, 1));
+        assert_eq!(
+            refused[0].held_by,
+            "10.0.0.0/24 dev d0 proto kernel metric 0"
+        );
+        assert_eq!(
+            refused[0].to_string(),
+            "! route 10.0.0.0/24 via 10.0.0.254 (refused: it would replace 10.0.0.0/24 dev d0 \
+             proto kernel metric 0, which the config does not own)"
+        );
+
+        let (added, refused) = run(
+            |r| r.via("10.0.0.254").metric(100),
+            std::slice::from_ref(&connected),
+        );
+        assert_eq!((added, refused.len()), (1, 0));
+        let (added, refused) = run(|r| r.dev("d0"), std::slice::from_ref(&connected));
+        assert_eq!((added, refused.len()), (0, 0));
+        let (added, refused) = run(
+            |r| r.via("10.0.0.254"),
+            &[kernel_static_route("10.0.0.0", 24, 254)],
+        );
+        assert_eq!((added, refused.len()), (1, 0));
     }
 
     // ---- #470 — address purge scope ----
