@@ -315,6 +315,22 @@ pub async fn apply_diff(
         }
     }
 
+    // 1a. The MTU a link created below needs on the device it stacks on
+    //     (#473). `vlan_newlink` / `macvlan_common_newlink` refuse an MTU
+    //     above the lower device's, so its raise cannot wait for step 2.
+    if !options.dry_run {
+        for (name, mtu) in &diff.mtus_first {
+            match conn.set_link_mtu(name.as_str(), *mtu).await {
+                Ok(()) => {}
+                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
+                    operation: format!("set link {name} mtu={mtu}"),
+                    error: e,
+                }),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     // 1. Create new links
     for link in &diff.links_to_add {
         let op = format!("create link {}", link.name);
@@ -348,7 +364,8 @@ pub async fn apply_diff(
             result.summary.push(format!("Would {}", op));
             result.changes_made += 1;
         } else {
-            match modify_link(conn, name, changes).await {
+            let mtu_done = diff.mtus_first.iter().any(|(n, _)| n == name);
+            match modify_link(conn, name, changes, mtu_done).await {
                 Ok(()) => {
                     result
                         .summary
@@ -933,30 +950,49 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
     Ok(())
 }
 
-async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges) -> Result<()> {
+/// One link's changes, in the order the kernel needs them (#473). `mtu_done`
+/// skips an MTU step 1a already set.
+async fn modify_link(
+    conn: &Connection<Route>,
+    name: &str,
+    changes: &LinkChanges,
+    mtu_done: bool,
+) -> Result<()> {
     if let Some(update) = &changes.kind_update {
         change_kind_params(conn, name, update).await?;
     }
-    // Master changes first: enslaving to a bond needs the port down, and
-    // a bond closes the port it releases, so the declared up/down state
-    // is only settled after them.
+    // A device without IFF_LIVE_ADDR_CHANGE — most hardware — answers EBUSY
+    // to a MAC change while it is up (`eth_prepare_mac_addr_change`), so the
+    // MAC goes in while it is down: after it goes down, before it comes up.
+    // It used to follow both.
+    if changes.set_down {
+        conn.set_link_down(name).await?;
+    }
+    if let Some(address) = changes.set_address {
+        conn.set_link_address(name, address).await?;
+    }
+    // Master changes before the state: enslaving to a bond needs the port
+    // down, and a bond opens the port it enslaves and closes the one it
+    // releases, so the declared up/down state is only settled after them.
+    let master_changes = changes.set_master.is_some() || changes.unset_master;
     if let Some(master) = &changes.set_master {
         enslave(conn, name, master).await?;
     }
     if changes.unset_master {
         conn.set_link_nomaster(name).await?;
     }
+    // After the master: a bond gives the port it enslaves its own MTU, and a
+    // declared one wins.
+    if let Some(mtu) = changes.set_mtu
+        && !mtu_done
+    {
+        conn.set_link_mtu(name, mtu).await?;
+    }
     if changes.set_up {
         conn.set_link_up(name).await?;
     }
-    if changes.set_down {
+    if changes.set_down && master_changes {
         conn.set_link_down(name).await?;
-    }
-    if let Some(mtu) = changes.set_mtu {
-        conn.set_link_mtu(name, mtu).await?;
-    }
-    if let Some(address) = changes.set_address {
-        conn.set_link_address(name, address).await?;
     }
     Ok(())
 }

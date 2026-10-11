@@ -213,6 +213,14 @@ pub struct ConfigDiff {
     /// own, so it is not counted, shown or serialized.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) vlans_held_down: Vec<String>,
+
+    /// Declared MTUs set before the creates: those of modified links that a
+    /// link this apply creates stacks on, directly or through another, since
+    /// `vlan_newlink` and `macvlan_common_newlink` refuse an MTU above the
+    /// lower device's (EINVAL). They are in `links_to_modify` too, whose
+    /// MTU step skips them; not counted, shown or serialized (#473).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) mtus_first: Vec<(String, u32)>,
 }
 
 impl ConfigDiff {
@@ -634,6 +642,7 @@ pub async fn compute_diff_with_options(
     // Independent links keep their declared order — the sort
     // is stable.
     topo_sort_links_to_add(&mut diff.links_to_add);
+    order_link_modifications(config, &link_by_name, &ifindex_to_name, &mut diff);
 
     // Diff addresses
     diff_addresses(
@@ -858,6 +867,119 @@ fn diff_links<'a>(
     flushing
 }
 
+/// The device a declared link stacks on, whose MTU caps its own.
+fn declared_lower(link: &DeclaredLink) -> Option<&str> {
+    match &link.link_type {
+        DeclaredLinkType::Vlan { parent, .. } | DeclaredLinkType::Macvlan { parent, .. } => {
+            Some(parent)
+        }
+        DeclaredLinkType::Vxlan { underlay_dev, .. } => underlay_dev.as_deref(),
+        _ => None,
+    }
+}
+
+/// Put `links_to_modify` in an order the kernel accepts, and pick the MTUs
+/// that have to go in before the creates (#473).
+///
+/// A stacked device's MTU cannot exceed its lower device's — raising a VLAN
+/// first is ERANGE (`vlan_dev_change_mtu`) — and a VLAN cannot come up
+/// while its lower device is down (`vlan_dev_open`: ENETDOWN). Lower
+/// devices therefore go first. That holds for lowering too: the kernel
+/// lowers the stacked devices with their lower device (`vlan_device_event`,
+/// `macvlan_device_event` on NETDEV_CHANGEMTU), and each one's own,
+/// smaller value then fits. Declaration order decided it before.
+fn order_link_modifications(
+    config: &NetworkConfig,
+    live: &HashMap<&str, &LinkMessage>,
+    ifindex_to_name: &HashMap<u32, &str>,
+    diff: &mut ConfigDiff,
+) {
+    let declared: HashMap<&str, &DeclaredLink> =
+        config.links.iter().map(|l| (l.name.as_str(), l)).collect();
+    let lower_of = |name: &str| -> Option<String> {
+        if let Some(lower) = declared.get(name).and_then(|l| declared_lower(l)) {
+            return Some(lower.to_string());
+        }
+        // A kindless declaration of a stacked link: the kernel knows its
+        // lower device. A veth's `IFLA_LINK` is its peer, not a lower one.
+        let link = live.get(name)?;
+        let stacked = matches!(
+            link.kind(),
+            Some("vlan" | "macvlan" | "macvtap" | "ipvlan" | "ipvtap")
+        );
+        if !stacked || link.link_netnsid.is_some() {
+            return None;
+        }
+        link.link()
+            .and_then(|idx| ifindex_to_name.get(&idx))
+            .map(|n| n.to_string())
+    };
+    stable_topo_sort(
+        &mut diff.links_to_modify,
+        |(name, _)| name.as_str(),
+        |(name, _)| lower_of(name).into_iter().collect(),
+    );
+
+    // The lower devices of what this apply creates, and theirs in turn.
+    let mut first: HashSet<String> = diff
+        .links_to_add
+        .iter()
+        .filter_map(|l| declared_lower(l).map(str::to_string))
+        .collect();
+    for (name, _) in diff.links_to_modify.iter().rev() {
+        if first.contains(name)
+            && let Some(lower) = lower_of(name)
+        {
+            first.insert(lower);
+        }
+    }
+    diff.mtus_first = diff
+        .links_to_modify
+        .iter()
+        .filter(|(name, _)| first.contains(name))
+        .filter_map(|(name, changes)| Some((name.clone(), changes.set_mtu?)))
+        .collect();
+}
+
+/// Stable topological sort: an item comes after the items its `deps` name,
+/// and otherwise keeps its place. Names not among `items` are ignored; a
+/// cycle leaves its members at the end, in their original order, for the
+/// kernel to refuse.
+fn stable_topo_sort<T>(
+    items: &mut Vec<T>,
+    name: impl Fn(&T) -> &str,
+    deps: impl Fn(&T) -> Vec<String>,
+) {
+    if items.len() < 2 {
+        return;
+    }
+    let in_batch: HashSet<String> = items.iter().map(|i| name(i).to_string()).collect();
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut out: Vec<T> = Vec::with_capacity(items.len());
+    let mut remaining: Vec<T> = std::mem::take(items);
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        let mut next = Vec::with_capacity(remaining.len());
+        for item in remaining {
+            let ready = deps(&item)
+                .iter()
+                .all(|d| !in_batch.contains(d) || emitted.contains(d));
+            if ready {
+                emitted.insert(name(&item).to_string());
+                out.push(item);
+            } else {
+                next.push(item);
+            }
+        }
+        if next.len() == before {
+            out.extend(next);
+            break;
+        }
+        remaining = next;
+    }
+    *items = out;
+}
+
 /// What the peer of a pair this apply creates needs once it exists. The
 /// kernel creates it down, with no master, and the create carries none of
 /// its own declaration, so every declared setting is a change.
@@ -888,76 +1010,27 @@ fn new_peer_changes(declared: &DeclaredLink, bonds: &HashSet<&str>) -> LinkChang
 /// still degrade gracefully: any node not in a topo order falls
 /// to the tail in its declared position.
 fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
-    if links.len() < 2 {
-        return;
-    }
-
-    // Build set of names being added in this batch.
-    let names_in_batch: HashSet<String> =
-        links.iter().map(|l| l.name.clone()).collect();
-
-    // Plan 207c M5 — collect ALL in-batch dependencies for a link.
-    // Pre-0.19 only `Vlan { parent }` and `Macvlan { parent }`
-    // were modeled, missing:
+    // Plan 207c M5 — ALL in-batch dependencies for a link. Pre-0.19 only
+    // `Vlan { parent }` and `Macvlan { parent }` were modeled, missing:
     //   - VXLAN `underlay_dev` (Plan 190 §2.1 added the field but
     //     forgot to wire it into topo-sort — same shape as the
     //     original Plan 186 bug)
     //   - `master` references (declaring `dummy0.master("br0")`
     //     before `br0` in the same batch silently failed at apply)
-    fn deps_of(link: &DeclaredLink, names_in_batch: &HashSet<String>) -> Vec<String> {
-        let mut deps = Vec::new();
-        match &link.link_type {
-            DeclaredLinkType::Vlan { parent, .. } => deps.push(parent.clone()),
-            DeclaredLinkType::Macvlan { parent, .. } => deps.push(parent.clone()),
-            DeclaredLinkType::Vxlan {
-                underlay_dev: Some(dev),
-                ..
-            } => deps.push(dev.clone()),
-            _ => {}
-        }
-        // `master` is a separate field on the link itself —
-        // applies to any link type (Dummy, Veth, Bond member,
-        // etc. enslaved to a bridge / bond / VRF master).
-        if let Some(master) = link.master.name() {
-            deps.push(master.to_string());
-        }
-        deps.retain(|d| names_in_batch.contains(d));
-        deps
-    }
-
-    // Stable Kahn's algorithm. Iterate `links` in current order;
-    // emit a link only once all its in-batch dependencies have
-    // been emitted. Use a simple two-pass loop — for the link
-    // counts we expect (single-digit to low-double-digit), the
-    // cost is negligible and the implementation stays obvious.
-    let mut emitted: HashSet<String> = HashSet::new();
-    let mut out: Vec<DeclaredLink> = Vec::with_capacity(links.len());
-    let mut remaining: Vec<DeclaredLink> = std::mem::take(links);
-
-    while !remaining.is_empty() {
-        let before = remaining.len();
-        let mut next_remaining = Vec::with_capacity(remaining.len());
-        for link in remaining.into_iter() {
-            let deps = deps_of(&link, &names_in_batch);
-            let ready = deps.iter().all(|d| emitted.contains(d));
-            if ready {
-                emitted.insert(link.name.clone());
-                out.push(link);
-            } else {
-                next_remaining.push(link);
-            }
-        }
-        // No progress this round — cycle or unresolvable
-        // dependency. Append the remainder in declared order
-        // so the apply still attempts them (the kernel will
-        // give the canonical error).
-        if next_remaining.len() == before {
-            out.extend(next_remaining);
-            break;
-        }
-        remaining = next_remaining;
-    }
-    *links = out;
+    // `master` is a separate field on the link itself — it applies to any
+    // link type (Dummy, Veth, Bond member, etc. enslaved to a bridge / bond
+    // / VRF master).
+    stable_topo_sort(
+        links,
+        |link| link.name.as_str(),
+        |link| {
+            declared_lower(link)
+                .into_iter()
+                .chain(link.master.name())
+                .map(str::to_string)
+                .collect()
+        },
+    );
 }
 
 /// Refuse a VLAN declared up on a lower device declared down (#437). The
@@ -2649,6 +2722,44 @@ mod tests {
         d.routes_to_remove.push(declared_route("10.1.0.0", 24));
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 2);
+    }
+
+    // ---- #473 — the order of link modifications ----
+
+    /// Lower devices are modified first, whatever the declaration order,
+    /// and the MTU of every lower device under a link this apply creates —
+    /// directly or through another — goes in before the creates.
+    #[test]
+    fn modifications_go_lower_device_first_and_new_links_get_their_mtu_first() {
+        let config = NetworkConfig::new()
+            .link("m0", |l| l.macvlan("v10").mtu(9000))
+            .link("v10", |l| l.vlan("p0", 10).mtu(9000))
+            .link("p0", |l| l.dummy().mtu(9000))
+            .link("d1", |l| l.dummy().mtu(1400));
+        let mtu = |m| LinkChanges {
+            set_mtu: Some(m),
+            ..LinkChanges::default()
+        };
+        let mut diff = ConfigDiff {
+            links_to_add: vec![config.links[0].clone()],
+            links_to_modify: vec![
+                ("v10".to_string(), mtu(9000)),
+                ("d1".to_string(), mtu(1400)),
+                ("p0".to_string(), mtu(9000)),
+            ],
+            ..ConfigDiff::default()
+        };
+        order_link_modifications(&config, &HashMap::new(), &HashMap::new(), &mut diff);
+        let order: Vec<&str> = diff
+            .links_to_modify
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(order, ["d1", "p0", "v10"]);
+        assert_eq!(
+            diff.mtus_first,
+            [("p0".to_string(), 9000), ("v10".to_string(), 9000)]
+        );
     }
 
     // ---- #469 — a route in a place nlink does not own ----
