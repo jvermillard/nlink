@@ -302,6 +302,10 @@ mod wireguard_echo;
 #[path = "integration/recipes_echo.rs"]
 mod recipes_echo;
 
+// Declared TC trees: classes, leaves, filters and the IFB redirect (#514).
+#[path = "integration/tc_tree.rs"]
+mod tc_tree;
+
 // The helpers in `common/` checked against themselves, including where
 // each must fail: a helper that cannot fail turns every test built on it
 // into a pass.

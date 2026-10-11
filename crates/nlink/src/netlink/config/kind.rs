@@ -1848,6 +1848,14 @@ pub(crate) fn plan(
                     blocked_by.push(route_label(r, name, how));
                 }
             }
+            // What a declared TC tree owns, it puts back; what the previous
+            // config's owned, the purge removes (#514).
+            let trees: Vec<&super::tc_tree::DeclaredTc> = config
+                .tc
+                .iter()
+                .chain(previous.iter().flat_map(|p| p.tc.iter()))
+                .filter(|t| t.dev == name)
+                .collect();
             for q in qdiscs.iter().filter(|q| q.ifindex() == l.ifindex()) {
                 // A qdisc with handle 0: is the kernel's default for the
                 // device, recreated with it.
@@ -1859,10 +1867,13 @@ pub(crate) fn plan(
                 } else if q.parent().is_ingress() {
                     QdiscParent::Ingress
                 } else {
-                    // A qdisc under a class — an HTB leaf, say. Only a root
-                    // or ingress qdisc can be declared, so a declared root
-                    // never covers one: it was ignored, and the recreate
-                    // took it (#472).
+                    // A qdisc under a class — an HTB leaf, say. A declared
+                    // root never covers one: it was ignored, and the
+                    // recreate took it (#472). A TC tree that owns the
+                    // class puts it back, or removes it (#514).
+                    if trees.iter().any(|t| t.owns_leaf(q.parent())) {
+                        continue;
+                    }
                     blocked_by.push(Blocker::Qdisc {
                         dev: name.to_string(),
                         qdisc: q.kind().unwrap_or("?").to_string(),
@@ -1891,6 +1902,7 @@ pub(crate) fn plan(
             for c in extras.classes.iter().filter(|c| {
                 c.ifindex() == l.ifindex()
                     && matches!(c.kind(), Some("htb" | "hfsc" | "drr" | "qfq" | "cbq"))
+                    && !trees.iter().any(|t| t.owns_class(c.handle()))
             }) {
                 blocked_by.push(Blocker::Class {
                     dev: name.to_string(),
@@ -1898,7 +1910,9 @@ pub(crate) fn plan(
                     handle: c.handle(),
                 });
             }
-            for f in extras.filters.iter().filter(|f| f.ifindex() == l.ifindex()) {
+            for f in extras.filters.iter().filter(|f| {
+                f.ifindex() == l.ifindex() && !trees.iter().any(|t| t.owns_filter(f.parent()))
+            }) {
                 blocked_by.push(Blocker::Filter {
                     dev: name.to_string(),
                     filter: f.kind().unwrap_or("?").to_string(),

@@ -706,6 +706,50 @@ Inspect the diff first (`addresses_to_remove` / `routes_to_remove`, or
 the `Display` output) — purge is reachable only through the explicit
 `*_with_*` entry points, never the plain `diff`/`apply`.
 
+### TC trees
+
+A device's root and ingress qdiscs are declared with `qdisc`; what hangs
+under them — HTB classes, the leaf qdisc in a class, filters with their
+actions, and the redirect of everything a device receives to an IFB — is
+declared with `tc`. The tree is owned: under a qdisc it declares classes
+for, and at a parent it hangs filters off, what it does not declare is
+removed. A link recreated for a kind change gets its tree back.
+
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
+use nlink::{EthProto, FilterPriority, Rate, TcHandle};
+use nlink::netlink::config::NetworkConfig;
+use nlink::netlink::filter::FlowerFilter;
+use nlink::netlink::tc::{FqCodelConfig, HtbClassConfig};
+
+let desired = NetworkConfig::new()
+    .link("ifb0", |l| l.ifb().up())
+    .qdisc("ifb0", |q| q.tbf(Rate::mbit(20), nlink::Bytes::kib(32)).limit_bytes(nlink::Bytes::kib(64)))
+    .qdisc("eth0", |q| q.htb().default_class(0x20))
+    .qdisc("eth0", |q| q.ingress())
+    .tc("eth0", |t| {
+        t.class(TcHandle::major_only(1), TcHandle::new(1, 1), HtbClassConfig::new(Rate::mbit(100)))
+            .class(TcHandle::new(1, 1), TcHandle::new(1, 0x10), HtbClassConfig::new(Rate::mbit(60)))
+            .class(TcHandle::new(1, 1), TcHandle::new(1, 0x20), HtbClassConfig::new(Rate::mbit(40)))
+            .leaf(TcHandle::new(1, 0x10), TcHandle::major_only(0x10), FqCodelConfig::new())
+            .filter(
+                TcHandle::major_only(1),
+                FilterPriority::new(1),
+                EthProto::IP,
+                FlowerFilter::new().ip_proto_tcp().dst_port(22).classid(TcHandle::new(1, 0x10)),
+            )
+            // Inbound traffic, shaped by ifb0's root.
+            .redirect_ingress_to("ifb0")
+    });
+desired.apply(&conn).await?;
+# Ok(())
+# }
+```
+
+Trees are not in the JSON/YAML form yet: a filter's actions have no
+document shape.
+
 ### JSON Schema (feature `schemars`)
 
 Generate a JSON Schema (draft 7) for the config format so editors and

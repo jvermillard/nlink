@@ -308,6 +308,21 @@ pub struct ConfigDiff {
     /// Not shown or serialized.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) owner: Option<String>,
+    /// The declared TC trees that differ from the kernel's, one per device
+    /// (#514). Not serialized yet: a filter's actions have no document
+    /// form.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub tc: Vec<super::tc_tree::TcTreeDiff>,
+    /// Every declared tree, with the one the previous config declared on
+    /// its device, which the apply diffs again after the qdisc step: a
+    /// root qdisc replaced or a link recreated takes its tree with it. Not
+    /// shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) tc_declared: Vec<(
+        super::tc_tree::DeclaredTc,
+        Option<super::tc_tree::DeclaredTc>,
+    )>,
 }
 
 impl ConfigDiff {
@@ -372,6 +387,7 @@ impl ConfigDiff {
             && self.qdiscs_to_remove.is_empty()
             && self.addresses_to_remove.is_empty()
             && self.routes_to_remove.is_empty()
+            && self.tc.is_empty()
     }
 
     /// Get the total number of changes.
@@ -389,6 +405,7 @@ impl ConfigDiff {
             + self.qdiscs_to_remove.len()
             + self.addresses_to_remove.len()
             + self.routes_to_remove.len()
+            + self.tc.iter().map(|t| t.len()).sum::<usize>()
     }
 
     /// Get a human-readable summary of the changes.
@@ -477,6 +494,10 @@ impl ConfigDiff {
                 qdisc.dev,
                 qdisc.effective_parent()
             ));
+        }
+        // TC trees
+        for tree in &self.tc {
+            lines.push(tree.to_string());
         }
 
         // Purge removals (only present under `DiffOptions::purge`).
@@ -702,6 +723,11 @@ pub struct Snapshot {
     /// What a recreate destroys: read by [`read`](Self::read), and by
     /// `read_for` only when its config recreates a link.
     extras: Option<kind::LinkExtras>,
+    /// Classes and filters by ifindex (#514): read by [`read`](Self::read)
+    /// for every link with a qdisc of its own, and by `read_for` for the
+    /// links its config declares a TC tree on. A link without one has
+    /// neither.
+    tc: HashMap<u32, super::tc_tree::TcLive>,
 }
 
 impl Snapshot {
@@ -710,7 +736,30 @@ impl Snapshot {
     pub async fn read(conn: &Connection<Route>) -> Result<Self> {
         let mut snapshot = Self::read_base(conn).await?;
         snapshot.extras = Some(kind::LinkExtras::read(conn, &snapshot.qdiscs).await?);
+        let mut tc_links: Vec<u32> = snapshot
+            .qdiscs
+            .iter()
+            .filter(|q| q.handle().major() != 0)
+            .map(|q| q.ifindex())
+            .collect();
+        tc_links.sort_unstable();
+        tc_links.dedup();
+        snapshot.read_tc(conn, tc_links).await?;
         Ok(snapshot)
+    }
+
+    async fn read_tc(&mut self, conn: &Connection<Route>, ifindexes: Vec<u32>) -> Result<()> {
+        for ifindex in ifindexes {
+            let qdiscs: Vec<TcMessage> = self
+                .qdiscs
+                .iter()
+                .filter(|q| q.ifindex() == ifindex)
+                .cloned()
+                .collect();
+            let live = super::tc_tree::read_live(conn, ifindex, &qdiscs).await?;
+            self.tc.insert(ifindex, live);
+        }
+        Ok(())
     }
 
     /// What a diff of `config` needs: what a deletion destroys is read
@@ -724,6 +773,20 @@ impl Snapshot {
         if kind::deletes_any(config, opts, &snapshot.links) {
             snapshot.extras = Some(kind::LinkExtras::read(conn, &snapshot.qdiscs).await?);
         }
+        // Every device a tree is declared on, by this config or the
+        // previous one, whose tree's removal is this diff's.
+        let tree_links: Vec<u32> = super::tc_tree::with_previous(config, opts)
+            .iter()
+            .map(|(t, _)| t)
+            .filter_map(|t| {
+                snapshot
+                    .links
+                    .iter()
+                    .find(|l| l.name() == Some(t.dev.as_str()))
+                    .map(|l| l.ifindex())
+            })
+            .collect();
+        snapshot.read_tc(conn, tree_links).await?;
         Ok(snapshot)
     }
 
@@ -734,6 +797,7 @@ impl Snapshot {
             routes: conn.get_routes().await?,
             qdiscs: conn.get_qdiscs().await?,
             extras: None,
+            tc: HashMap::new(),
         })
     }
 
@@ -887,6 +951,36 @@ pub(crate) fn diff_snapshot(
 
     // Diff qdiscs
     diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, opts, &mut diff);
+
+    // TC trees (#514), against what the recreates leave: a recreated link
+    // has none. The apply diffs each again after the qdisc step.
+    let names = super::tc_tree::ifindexes(&current_links);
+    let no_tc = super::tc_tree::TcLive::default();
+    diff.tc_declared = super::tc_tree::with_previous(config, opts);
+    for (tree, previous) in &diff.tc_declared {
+        let (live, qdiscs) = match link_by_name.get(tree.dev.as_str()) {
+            Some(l) => (
+                snapshot.tc.get(&l.ifindex()).unwrap_or(&no_tc),
+                current_qdiscs
+                    .iter()
+                    .filter(|q| q.ifindex() == l.ifindex())
+                    .cloned()
+                    .collect(),
+            ),
+            None => (&no_tc, Vec::new()),
+        };
+        let tree_diff = super::tc_tree::diff_tree(
+            tree,
+            previous.as_ref(),
+            &live.classes,
+            &qdiscs,
+            &live.filters,
+            &names,
+        );
+        if !tree_diff.is_empty() {
+            diff.tc.push(tree_diff);
+        }
+    }
 
     Ok(diff)
 }

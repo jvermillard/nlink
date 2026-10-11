@@ -512,6 +512,49 @@ All notable changes to this project will be documented in this file.
   - `Connection::del_qdisc_kind_by_index` is the kind-checked delete
     underneath.
 
+- **Declared TC trees: classes, leaves, filters and the IFB redirect
+  (#514).** `NetworkConfig::tc(dev, |t| …)` declares what hangs under a
+  device's qdiscs:
+  - HTB classes (`class(parent, id, HtbClassConfig)`);
+  - the leaf qdisc in a class (`leaf(class, handle, spec)`, any
+    `QdiscSpec`);
+  - filters with their actions: flower, matchall, fw or u32, named by
+    parent, priority and protocol;
+  - `redirect_ingress_to(ifb)`: everything the device receives, sent out
+    of an IFB by name, so the IFB's root qdisc shapes inbound traffic. The
+    target is resolved again at every apply, so a recreated IFB is followed.
+
+  The tree is owned. Under a qdisc it declares classes for, and at a
+  parent it hangs filters off, what it does not declare is removed. With
+  `previous`, a tree the previous config declared and this one drops is
+  removed too. A filter is compared against its dump attribute by
+  attribute, and its actions by what they do (mirred target, gact verdict,
+  police rate), so a filter that differs is replaced and one that matches
+  is left alone.
+
+  `ConfigDiff::tc` lists the changes per device and `Display` prints
+  them. The apply diffs each tree again after the qdisc step, since a
+  root qdisc replaced or a link recreated takes its tree with it. Classes
+  and filters a tree declares no longer block a recreate: the apply puts
+  them back. `validate()` reports:
+  - a class declared twice;
+  - a parent class or a leaf's class that is not declared;
+  - a class under another qdisc's major;
+  - two filters with one name;
+  - a redirect on a device with no ingress or clsact qdisc.
+
+  Root tests cover:
+  - a tree changed A→B in place and then cut down, with every step
+    converging and checked through `tc -j`;
+  - an IFB redirect into a 100% netem loss, which drops every datagram and
+    goes away with `previous`;
+  - a VLAN recreated for an id change, which gets its tree back.
+
+  Both the recreate test (without the blocker change) and the transition
+  test (without the `TC_H_ROOT` parent of a top HTB class) fail against
+  the code without their fixes. Trees are not in the JSON/YAML form yet: a
+  filter's actions have no document shape.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
