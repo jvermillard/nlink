@@ -1443,6 +1443,128 @@ async fn a_netdev_chain_moves_to_the_declared_device() -> nlink::Result<()> {
 }
 
 // ============================================================================
+// #479 — table flags and flowtables, changed in place
+// ============================================================================
+
+/// A table's dormant flag goes on and off in place, rules and all. The
+/// update was sent with `NLM_F_EXCL` (`EEXIST`), and without its flags
+/// attribute when clearing one (a silent no-op) (#479). Persist cannot be
+/// changed on a live table, and the diff says so instead of trying.
+#[tokio::test]
+async fn table_flags_change_in_place() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{NFT_TABLE_F_DORMANT, NFT_TABLE_F_PERSIST};
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let table = |flags: u32| {
+        NftablesConfig::new().table("t", Family::Inet, move |t| {
+            t.flags(flags)
+                .chain("c", |c| c)
+                .rule_keyed("c", "ok", |r| r.accept())
+        })
+    };
+    let ns = TestNamespace::new("nft-table-flags")?;
+    let steps = [table(0), table(NFT_TABLE_F_DORMANT), table(0)];
+    assert_transition(&ns, &steps, false, async |i, nft_conn| {
+        let tables = nft_conn.list_tables().await.map_err(|e| e.to_string())?;
+        let t = tables
+            .iter()
+            .find(|t| t.name == "t")
+            .ok_or("table t is gone")?;
+        let want = [0, NFT_TABLE_F_DORMANT, 0][i];
+        if t.flags != want {
+            return Err(format!(
+                "want flags {want:#x}, the table has {:#x}",
+                t.flags
+            ));
+        }
+        Ok(())
+    })
+    .await?;
+
+    let nft_conn = ns.connection_for::<Nftables>()?;
+    let diff = table(NFT_TABLE_F_PERSIST).diff(&nft_conn).await?;
+    assert_eq!(diff.tables_refused.len(), 1, "{diff}");
+    let err = diff
+        .apply(&nft_conn)
+        .await
+        .expect_err("persist cannot change");
+    assert!(err.is_not_supported(), "{err}");
+    Ok(())
+}
+
+/// A flowtable's devices and counter flag change in place, and a new
+/// priority recreates it with the rule that offloads to it moved out of
+/// the way. Every change used to go to `flowtables_to_add`, which the
+/// kernel refused with `EEXIST`; a device could never be removed, and the
+/// device list was compared in order (#479).
+#[tokio::test]
+async fn flowtable_changes_apply() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nf_flow_table", "nft_flow_offload", "dummy");
+
+    let ft = |devs: &'static [&'static str], counter: bool, priority: i32| {
+        NftablesConfig::new().table("t", Family::Inet, move |t| {
+            t.flowtable("ft", move |f| {
+                let f = devs.iter().fold(f, |f, d| f.device(*d));
+                f.counter(counter).priority(priority)
+            })
+            .chain("forward", |c| {
+                c.hook(Hook::Forward)
+                    .priority(Priority::Filter)
+                    .chain_type(ChainType::Filter)
+            })
+            .rule_keyed("forward", "offload", |r| r.flow_offload("ft"))
+        })
+    };
+    let ns = TestNamespace::new("nft-flowtable")?;
+    for dev in ["d0", "d1", "d2"] {
+        ns.exec("ip", &["link", "add", dev, "type", "dummy"])?;
+    }
+    let steps = [
+        ft(&["d0", "d1"], false, 0),
+        ft(&["d2", "d1"], false, 0),
+        ft(&["d1", "d2"], true, 0),
+        ft(&["d1", "d2"], false, 10),
+    ];
+    let want: [(&[&str], bool, i32); 4] = [
+        (&["d0", "d1"], false, 0),
+        (&["d1", "d2"], false, 0),
+        (&["d1", "d2"], true, 0),
+        (&["d1", "d2"], false, 10),
+    ];
+    assert_transition(&ns, &steps, false, async |i, nft_conn| {
+        let fts = nft_conn
+            .list_flowtables()
+            .await
+            .map_err(|e| e.to_string())?;
+        let f = fts
+            .iter()
+            .find(|f| f.name == "ft")
+            .ok_or("flowtable ft is gone")?;
+        let mut devs = f.devs.clone();
+        devs.sort();
+        let counter = f.flags & nlink::netlink::nftables::NFT_FLOWTABLE_COUNTER != 0;
+        let (want_devs, want_counter, want_priority) = want[i];
+        if devs != want_devs || counter != want_counter || f.priority != want_priority {
+            return Err(format!(
+                "want {want:?}, the flowtable has {devs:?}, counter {counter}, priority {}",
+                f.priority,
+                want = want[i]
+            ));
+        }
+        let shown = nft(&ns, "list flowtable inet t ft").map_err(|e| e.to_string())?;
+        for dev in want_devs {
+            if !shown.contains(dev) {
+                return Err(format!("nft does not show {dev}:\n{shown}"));
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+// ============================================================================
 // #460 — removing something a rule used
 // ============================================================================
 

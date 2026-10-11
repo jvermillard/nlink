@@ -164,22 +164,7 @@ impl Connection<Nftables> {
         builder.append_attr_str(NFTA_FLOWTABLE_TABLE, &ft.table);
         builder.append_attr_str(NFTA_FLOWTABLE_NAME, &ft.name);
 
-        // Nested NFTA_FLOWTABLE_HOOK with hook-num, priority, devs.
-        let hook = builder.nest_start(NFTA_FLOWTABLE_HOOK | 0x8000);
-        builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_NUM, NF_NETDEV_INGRESS);
-        builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_PRIORITY, ft.priority as u32);
-        if !ft.devs.is_empty() {
-            let devs = builder.nest_start(NFTA_FLOWTABLE_HOOK_DEVS | 0x8000);
-            for dev in &ft.devs {
-                // Each device is a nested attribute carrying
-                // NFTA_DEVICE_NAME = 1 (string).
-                let dev_nest = builder.nest_start(1u16 | 0x8000); // NFTA_LIST_ELEM
-                builder.append_attr_str(NFTA_DEVICE_NAME, dev);
-                builder.nest_end(dev_nest);
-            }
-            builder.nest_end(devs);
-        }
-        builder.nest_end(hook);
+        append_flowtable_hook(&mut builder, ft.priority, &ft.devs);
 
         if ft.flags != 0 {
             builder.append_attr_u32_be(NFTA_FLOWTABLE_FLAGS, ft.flags);
@@ -2071,6 +2056,22 @@ impl Transaction {
         self
     }
 
+    /// Change an existing table's flags: `NFT_MSG_NEWTABLE` without
+    /// `NLM_F_EXCL`, which the kernel treats as an update, and with
+    /// `NFTA_TABLE_FLAGS` even when it is 0 — `nf_tables_updtable` changes
+    /// nothing when the attribute is absent, so clearing a flag that way
+    /// was a silent no-op (#479). Only `NFT_TABLE_F_DORMANT` can change on
+    /// a live table; a persist or owner change is `EOPNOTSUPP`.
+    pub fn update_table(mut self, name: &str, family: Family, flags: u32) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWTABLE), NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_TABLE_NAME, name);
+        builder.append_attr_u32_be(NFTA_TABLE_FLAGS, flags);
+        self.push(builder);
+        self
+    }
+
     /// Add a chain deletion to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::del_chain`](Connection) shape.
     pub fn del_chain(mut self, table: &str, name: &str, family: Family) -> Self {
@@ -2109,24 +2110,53 @@ impl Transaction {
         builder.append_attr_str(NFTA_FLOWTABLE_TABLE, &ft.table);
         builder.append_attr_str(NFTA_FLOWTABLE_NAME, &ft.name);
 
-        let hook = builder.nest_start(NFTA_FLOWTABLE_HOOK | 0x8000);
-        builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_NUM, NF_NETDEV_INGRESS);
-        builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_PRIORITY, ft.priority as u32);
-        if !ft.devs.is_empty() {
-            let devs = builder.nest_start(NFTA_FLOWTABLE_HOOK_DEVS | 0x8000);
-            for dev in &ft.devs {
-                let dev_nest = builder.nest_start(1u16 | 0x8000); // NFTA_LIST_ELEM
-                builder.append_attr_str(NFTA_DEVICE_NAME, dev);
-                builder.nest_end(dev_nest);
-            }
-            builder.nest_end(devs);
-        }
-        builder.nest_end(hook);
+        append_flowtable_hook(&mut builder, ft.priority, &ft.devs);
 
         if ft.flags != 0 {
             builder.append_attr_u32_be(NFTA_FLOWTABLE_FLAGS, ft.flags);
         }
 
+        self.push(builder);
+        self
+    }
+
+    /// Update an existing flowtable: `NFT_MSG_NEWFLOWTABLE` without
+    /// `NLM_F_EXCL`. The kernel **adds** `ft.devs` to the flowtable's
+    /// devices and takes its flags; remove devices with
+    /// [`del_flowtable_devices`](Self::del_flowtable_devices). Its priority
+    /// and `NFT_FLOWTABLE_HW_OFFLOAD` cannot change (`EOPNOTSUPP`) — those
+    /// need the flowtable deleted and added again (#479).
+    pub fn update_flowtable(mut self, ft: &super::types::Flowtable) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWFLOWTABLE), NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg::new(ft.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_FLOWTABLE_TABLE, &ft.table);
+        builder.append_attr_str(NFTA_FLOWTABLE_NAME, &ft.name);
+        append_flowtable_hook(&mut builder, ft.priority, &ft.devs);
+        // Always: an update without FLAGS keeps the old ones, so turning
+        // `counter` off was never sent.
+        builder.append_attr_u32_be(NFTA_FLOWTABLE_FLAGS, ft.flags);
+        self.push(builder);
+        self
+    }
+
+    /// Take `devs` off an existing flowtable, leaving it and its other
+    /// devices: `NFT_MSG_DELFLOWTABLE` with an `NFTA_FLOWTABLE_HOOK` that
+    /// names them (`nft_delflowtable_hook`). `priority` is the flowtable's.
+    pub fn del_flowtable_devices(
+        mut self,
+        family: Family,
+        table: &str,
+        name: &str,
+        priority: i32,
+        devs: &[String],
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELFLOWTABLE), NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_FLOWTABLE_TABLE, table);
+        builder.append_attr_str(NFTA_FLOWTABLE_NAME, name);
+        append_flowtable_hook(&mut builder, priority, devs);
         self.push(builder);
         self
     }
@@ -2556,6 +2586,29 @@ fn append_set_elements(
 }
 
 /// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
+/// A flowtable's devices: one `NFTA_DEVICE_NAME` each, directly in the
+/// `NFTA_FLOWTABLE_HOOK_DEVS` nest (`nf_tables_parse_netdev_hooks`). They
+/// were wrapped in an `NFTA_LIST_ELEM` nest, whose bytes the kernel read as
+/// the name, so a flowtable with any device failed with `ENOENT` (#479).
+fn append_flowtable_devs(builder: &mut MessageBuilder, devs: &[String]) {
+    for dev in devs {
+        builder.append_attr_str(NFTA_DEVICE_NAME, dev);
+    }
+}
+
+/// `NFTA_FLOWTABLE_HOOK`: the ingress hook, `priority` and `devs`.
+fn append_flowtable_hook(builder: &mut MessageBuilder, priority: i32, devs: &[String]) {
+    let hook = builder.nest_start(NFTA_FLOWTABLE_HOOK | 0x8000);
+    builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_NUM, NF_NETDEV_INGRESS);
+    builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_PRIORITY, priority as u32);
+    if !devs.is_empty() {
+        let nest = builder.nest_start(NFTA_FLOWTABLE_HOOK_DEVS | 0x8000);
+        append_flowtable_devs(builder, devs);
+        builder.nest_end(nest);
+    }
+    builder.nest_end(hook);
+}
+
 pub(crate) fn parse_flowtable(data: &[u8], family: Family) -> Option<super::types::Flowtable> {
     let mut ft = super::types::Flowtable {
         family,
@@ -2595,17 +2648,13 @@ pub(crate) fn parse_flowtable(data: &[u8], family: Family) -> Option<super::type
                             );
                         }
                         NFTA_FLOWTABLE_HOOK_DEVS => {
-                            // List of nested NFTA_LIST_ELEM each
-                            // carrying NFTA_DEVICE_NAME.
-                            for (_le_attr, le_payload) in AttrIter::new(h_payload) {
-                                for (d_attr, d_payload) in AttrIter::new(le_payload) {
-                                    if d_attr & 0x7FFF == NFTA_DEVICE_NAME
-                                        && let Some(s) = attr_str(d_payload)
-                                    {
-                                        ft.devs.push(s);
-                                    }
-                                }
-                            }
+                            // One NFTA_DEVICE_NAME string per device,
+                            // directly in the nest (`nft_dump_basechain_hook`
+                            // / `nf_tables_fill_flowtable_info`).
+                            ft.devs = AttrIter::new(h_payload)
+                                .filter(|(t, _)| t & 0x7FFF == NFTA_DEVICE_NAME)
+                                .filter_map(|(_, name)| attr_str(name))
+                                .collect();
                         }
                         _ => {}
                     }

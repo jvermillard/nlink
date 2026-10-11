@@ -225,6 +225,9 @@ pub enum MoveReason {
     /// It uses a named object this diff deletes and recreates (a limit
     /// whose rate changed); same `EBUSY`.
     BoundToRecreatedObject,
+    /// It offloads to a flowtable this diff deletes and recreates (its
+    /// priority or hardware offload changed); same `EBUSY` (#479).
+    BoundToRecreatedFlowtable,
     /// It is installed out of declared order.
     Reorder,
     /// Its chain is deleted and created again, because what changed — the
@@ -256,6 +259,45 @@ pub struct RuleMove {
     /// See [`RuleAdd`].
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) seq: usize,
+}
+
+/// A flowtable changed in place: devices added and removed, flags set
+/// (#479). A new priority or hardware-offload setting cannot be changed on
+/// a live flowtable, so that is a delete and add instead
+/// ([`NftablesDiff::flowtables_to_delete`] and
+/// [`NftablesDiff::flowtables_to_add`] both name it).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FlowtableUpdate {
+    /// The flowtable as declared.
+    pub flowtable: DeclaredFlowtable,
+    /// Devices to add to it.
+    pub add_devs: Vec<String>,
+    /// Devices to take off it.
+    pub remove_devs: Vec<String>,
+}
+
+impl std::fmt::Display for FlowtableUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ft = &self.flowtable;
+        write!(
+            f,
+            "~ flowtable {:?} {}/{} (",
+            ft.family(),
+            ft.table(),
+            ft.name()
+        )?;
+        let mut parts = Vec::new();
+        if !self.add_devs.is_empty() {
+            parts.push(format!("+devices {}", self.add_devs.join(",")));
+        }
+        if !self.remove_devs.is_empty() {
+            parts.push(format!("-devices {}", self.remove_devs.join(",")));
+        }
+        parts.push(format!("flags={:#x}", ft.flags()));
+        write!(f, "{})", parts.join(" "))
+    }
 }
 
 /// A chain the diff deletes and creates again, with its declared rules put
@@ -438,6 +480,12 @@ pub struct NftablesDiff {
     pub tables_to_modify: Vec<(Family, String, u32)>,
     /// Tables to delete (family, name).
     pub tables_to_delete: Vec<(Family, String)>,
+    /// Table flag changes the kernel refuses on a live table — `(family,
+    /// name, why)`. Only `NFT_TABLE_F_DORMANT` can change; turning persist
+    /// or owner on or off needs the table deleted with everything in it,
+    /// which the diff will not do. The apply fails on the first, with
+    /// [`Error::NotSupported`](crate::Error::NotSupported) (#479).
+    pub tables_refused: Vec<(Family, String, String)>,
     /// Chains to create — (owning table, owning family, chain).
     pub chains_to_add: Vec<(String, Family, DeclaredChain)>,
     /// Chains whose policy drifted — (owning table, owning family, chain).
@@ -489,8 +537,13 @@ pub struct NftablesDiff {
     pub rules_to_move: Vec<RuleMove>,
     /// Flowtables to add.
     pub flowtables_to_add: Vec<DeclaredFlowtable>,
-    /// Flowtables to delete — (family, table, name).
+    /// Flowtables to delete — (family, table, name). A flowtable also in
+    /// [`Self::flowtables_to_add`] is recreated, its rules moved out of the
+    /// way first.
     pub flowtables_to_delete: Vec<(Family, String, String)>,
+    /// Flowtables whose devices or counter flag changed, updated in place
+    /// (#479).
+    pub flowtables_to_update: Vec<FlowtableUpdate>,
     /// Sets to create — (owning table, owning family, set).
     pub sets_to_add: Vec<(String, Family, DeclaredSet)>,
     /// Sets to delete — (table, family, name).
@@ -539,6 +592,7 @@ impl NftablesDiff {
         self.tables_to_add.is_empty()
             && self.tables_to_modify.is_empty()
             && self.tables_to_delete.is_empty()
+            && self.tables_refused.is_empty()
             && self.chains_to_add.is_empty()
             && self.chains_to_modify.is_empty()
             && self.chains_to_delete.is_empty()
@@ -549,6 +603,7 @@ impl NftablesDiff {
             && self.rules_to_move.is_empty()
             && self.flowtables_to_add.is_empty()
             && self.flowtables_to_delete.is_empty()
+            && self.flowtables_to_update.is_empty()
             && self.sets_to_add.is_empty()
             && self.sets_to_delete.is_empty()
             && self.sets_to_update.is_empty()
@@ -564,6 +619,7 @@ impl NftablesDiff {
         self.tables_to_add.len()
             + self.tables_to_modify.len()
             + self.tables_to_delete.len()
+            + self.tables_refused.len()
             + self.chains_to_add.len()
             + self.chains_to_modify.len()
             + self.chains_to_delete.len()
@@ -574,6 +630,7 @@ impl NftablesDiff {
             + self.rules_to_move.len()
             + self.flowtables_to_add.len()
             + self.flowtables_to_delete.len()
+            + self.flowtables_to_update.len()
             + self.sets_to_add.len()
             + self.sets_to_delete.len()
             + self.sets_to_update.len()
@@ -605,6 +662,9 @@ impl NftablesDiff {
         }
         for (fam, name) in &self.tables_to_delete {
             lines.push(format!("- table {fam:?} {name}"));
+        }
+        for (fam, name, why) in &self.tables_refused {
+            lines.push(format!("! table {fam:?} {name} (refused: {why})"));
         }
         for (tbl, fam, c) in &self.chains_to_add {
             lines.push(format!("+ chain {fam:?} {tbl}/{}", c.name()));
@@ -654,6 +714,7 @@ impl NftablesDiff {
             let why = match m.reason {
                 MoveReason::BoundToRecreatedSet => "its set is recreated",
                 MoveReason::BoundToRecreatedObject => "its object is recreated",
+                MoveReason::BoundToRecreatedFlowtable => "its flowtable is recreated",
                 MoveReason::Reorder => "out of declared order",
                 MoveReason::ChainRecreated => "its chain is recreated",
             };
@@ -676,6 +737,9 @@ impl NftablesDiff {
         }
         for (fam, tbl, name) in &self.flowtables_to_delete {
             lines.push(format!("- flowtable {fam:?} {tbl}/{name}"));
+        }
+        for update in &self.flowtables_to_update {
+            lines.push(update.to_string());
         }
         for (tbl, fam, s) in &self.sets_to_add {
             lines.push(format!(
@@ -1372,8 +1436,24 @@ impl NftablesConfig {
             {
                 None => diff.tables_to_add.push(declared.clone()),
                 Some(current) if current.flags != declared.flags() => {
-                    diff.tables_to_modify
-                        .push((declared.family(), declared.name().to_string(), declared.flags()));
+                    // Only dormant changes on a live table:
+                    // `nf_tables_updtable` refuses an owner or persist
+                    // change with EOPNOTSUPP (#479).
+                    let changed = current.flags ^ declared.flags();
+                    let at = (declared.family(), declared.name().to_string());
+                    if changed & !super::super::NFT_TABLE_F_DORMANT != 0 {
+                        diff.tables_refused.push((
+                            at.0,
+                            at.1,
+                            format!(
+                                "flags {:#x} -> {:#x}: only dormant can change on a live table",
+                                current.flags,
+                                declared.flags()
+                            ),
+                        ));
+                    } else {
+                        diff.tables_to_modify.push((at.0, at.1, declared.flags()));
+                    }
                 }
                 Some(_) => {}
             }
@@ -1549,6 +1629,7 @@ impl NftablesConfig {
                 .unwrap_or(&[]);
             let declared_ft_names: HashSet<&str> =
                 declared.flowtables().iter().map(|f| f.name()).collect();
+            let mut recreated_flowtables: Vec<String> = Vec::new();
             for f in declared.flowtables() {
                 match fts_in_table.iter().find(|k| k.name == f.name()) {
                     None => diff.flowtables_to_add.push(f.clone()),
@@ -1558,16 +1639,46 @@ impl NftablesConfig {
                     // compared them. Adding a device to a declared flowtable,
                     // or toggling hw_offload, produced an empty diff (#208).
                     //
-                    // NFT_MSG_NEWFLOWTABLE updates an existing flowtable, so
-                    // this reuses the add path.
-                    Some(current)
-                        if f.devs() != current.devs.as_slice()
-                            || f.priority() != current.priority
-                            || f.flags() != current.flags =>
-                    {
-                        diff.flowtables_to_add.push(f.clone());
+                    // NFT_MSG_NEWFLOWTABLE updates an existing flowtable,
+                    // but sent through the add path it carried NLM_F_EXCL
+                    // (EEXIST), and an update only adds devices. The
+                    // devices are compared as a set: the kernel lists
+                    // added ones first (#479).
+                    Some(current) => {
+                        let offload = super::super::NFT_FLOWTABLE_HW_OFFLOAD;
+                        let want: HashSet<&str> = f.devs().iter().map(String::as_str).collect();
+                        let have: HashSet<&str> = current.devs.iter().map(String::as_str).collect();
+                        if f.priority() != current.priority
+                            || (f.flags() ^ current.flags) & offload != 0
+                        {
+                            diff.flowtables_to_delete.push((
+                                declared.family(),
+                                declared.name().to_string(),
+                                f.name().to_string(),
+                            ));
+                            diff.flowtables_to_add.push(f.clone());
+                            recreated_flowtables.push(f.name().to_string());
+                        } else if want != have || f.flags() != current.flags {
+                            let mut add_devs: Vec<String> = f
+                                .devs()
+                                .iter()
+                                .filter(|d| !have.contains(d.as_str()))
+                                .cloned()
+                                .collect();
+                            add_devs.dedup();
+                            let remove_devs: Vec<String> = current
+                                .devs
+                                .iter()
+                                .filter(|d| !want.contains(d.as_str()))
+                                .cloned()
+                                .collect();
+                            diff.flowtables_to_update.push(FlowtableUpdate {
+                                flowtable: f.clone(),
+                                add_devs,
+                                remove_devs,
+                            });
+                        }
                     }
-                    Some(_) => {}
                 }
             }
             for f in fts_in_table {
@@ -1843,7 +1954,10 @@ impl NftablesConfig {
                         let bound_object = recreated_objects
                             .iter()
                             .any(|(name, ty)| references_object(kr, name, *ty));
-                        let bound = bound_set || bound_object;
+                        let bound_flowtable = recreated_flowtables
+                            .iter()
+                            .any(|name| references_flowtable(kr, name));
+                        let bound = bound_set || bound_object || bound_flowtable;
                         if bound && kr.key.is_none() && !exclusive {
                             // nlink cannot put it back, so the DELSET will be
                             // EBUSY. Say why before it happens.
@@ -1863,6 +1977,9 @@ impl NftablesConfig {
                                 (false, ..) => None,
                                 (true, true, _) => Some(MoveReason::BoundToRecreatedSet),
                                 (true, false, true) => Some(MoveReason::BoundToRecreatedObject),
+                                (true, false, false) if bound_flowtable => {
+                                    Some(MoveReason::BoundToRecreatedFlowtable)
+                                }
                                 (true, false, false) => None,
                             },
                         }
