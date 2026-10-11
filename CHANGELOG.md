@@ -46,6 +46,24 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The tc recipes could not shrink past 100 rules, and "fixed" a wrong
+  HTB default with an operation HTB does not have (#491).**
+  - `PerPeerImpairer` puts rule `i` at priority `100 + i`, so rules 100
+    and up sit above the recipe band. Reconcile told its filters by the
+    band, so when the rules shrank it left those filters behind, still
+    bound to the classes it was deleting (`EBUSY`, "HTB class in use").
+    It now tells its filters by the class they send to, as
+    `PerHostLimiter` does.
+  - When the live HTB `1:` had another default class, `PerPeerImpairer`
+    and `PerHostLimiter` reconciles sent a change, which HTB does not
+    support (always `EINVAL`), and `fallback_to_apply` was ignored. That
+    happens on a pre-0.26 tree, or where another recipe built the HTB.
+    It is now handled like a wrong root: rebuilt under
+    `fallback_to_apply`, otherwise an error that names the default class.
+  - `RateLimiter` never checked the default class, so it added its
+    classes into another recipe's tree. It now checks it the same way.
+  - CI's module lists gain `sch_fq_codel`.
+
 - **nftables set and object edge cases that failed every apply, or
   dropped what was declared (#483).**
   - A rule using an object map (`counter name ip daddr map @m`) was not

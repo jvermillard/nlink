@@ -83,9 +83,8 @@ use super::{
     tc_handle::{FilterPriority, TcHandle},
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
-        DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_matches,
-        htb_class_rates_match, netem_matches,
-        root_htb_options,
+        DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_classid,
+        flower_matches, htb_class_rates_match, netem_matches, root_conflict,
     },
 };
 use crate::util::Rate;
@@ -506,8 +505,11 @@ impl PerPeerImpairer {
                 report.root_modified = true;
             }
             Some(q) => {
-                let kind_ok = q.kind() == Some("htb") && q.handle() == root_handle;
-                if !kind_ok {
+                // HTB has no change operation, so neither another root nor
+                // another default class can be fixed in place. A change
+                // was always EINVAL; the default differs on a pre-0.26
+                // tree, or under an HTB `1:` another recipe built (#491).
+                if let Some(conflict) = root_conflict(q, &tree, root_handle, default_minor) {
                     if opts.fallback_to_apply {
                         if opts.dry_run {
                             // In dry-run with fallback: just report it
@@ -515,7 +517,7 @@ impl PerPeerImpairer {
                             report.changes_made += 1;
                             report.root_modified = true;
                             // We can't usefully diff the rest of the
-                            // tree under a non-HTB root.
+                            // tree under a foreign root.
                             return Ok(report);
                         }
                         // Destructive fallback.
@@ -523,34 +525,9 @@ impl PerPeerImpairer {
                     }
                     return Err(Error::InvalidMessage(format!(
                         "PerPeerImpairer::reconcile: root qdisc on ifindex {ifindex} is \
-                         {:?} (handle {}), not HTB at 1:; pass \
-                         ReconcileOptions::with_fallback_to_apply(true) to rebuild",
-                        q.kind(),
-                        q.handle()
+                         {conflict}; pass ReconcileOptions::with_fallback_to_apply(true) to \
+                         rebuild"
                     )));
-                }
-                // Same kind/handle — check default class minor.
-                let default_ok = root_htb_options(&tree)
-                    .map(|opts| opts.default_class == default_minor as u32)
-                    .unwrap_or(false);
-                if !default_ok {
-                    if !opts.dry_run {
-                        let cfg = HtbQdiscConfig::new()
-                            .default_class(default_minor as u32)
-                            .build();
-                        conn.change_qdisc_by_index_full(
-                            ifindex,
-                            TcHandle::ROOT,
-                            Some(root_handle),
-                            cfg,
-                        )
-                        .await
-                        .map_err(|e| {
-                            e.with_context("PerPeerImpairer::reconcile: update HTB root")
-                        })?;
-                    }
-                    report.changes_made += 1;
-                    report.root_modified = true;
                 }
             }
         }
@@ -902,16 +879,22 @@ impl PerPeerImpairer {
         //
         // so removing a rule used to fail with EBUSY partway through
         // (#291) — the class went first and its filter was still bound.
-        // Stale filters: filters at root parent priority in our band
-        // [100, 100+n) where the desired rule's classid disagrees, OR
-        // priorities >= 100+n that are still installed.
-        let recipe_band = FilterPriority::RECIPE_BAND_START..FilterPriority::APP_BAND_START;
+        // Stale filters: a filter at a priority no rule installs any
+        // more, that sends traffic into one of our classes (`1:M`, M >=
+        // 2). Rule `i` sits at `100 + i`, so past 100 rules the
+        // priorities leave the recipe band; telling ours apart by the band
+        // left those filters behind when the rules shrank, still bound to
+        // the classes this reconcile deletes — EBUSY (#491). A filter that
+        // targets something else is not ours.
+        let desired: std::collections::HashSet<u16> = (0..n).map(filter_priority).collect();
         let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
         for f in &tree.root_filters {
             let prio = f.priority();
-            // Recipe band priority assignments are 100 + i for i in 0..n.
-            if !recipe_band.contains(&prio) {
-                // Outside recipe band → unmanaged.
+            if desired.contains(&prio) {
+                continue;
+            }
+            let ours = flower_classid(f).is_some_and(|c| c.major() == 1 && c.minor() >= 2);
+            if !ours {
                 report.unmanaged.push(UnmanagedObject {
                     kind: "filter",
                     handle: f.parent(),
@@ -919,10 +902,10 @@ impl PerPeerImpairer {
                 });
                 continue;
             }
-            let i_opt: Option<usize> =
-                (prio as usize).checked_sub(FilterPriority::RECIPE_BAND_START as usize);
-            let in_desired_range = i_opt.map(|i| i < n).unwrap_or(false);
-            if !in_desired_range {
+            if !stale_filters
+                .iter()
+                .any(|(p, proto, _)| *p == prio && *proto == f.protocol())
+            {
                 stale_filters.push((prio, f.protocol(), f.parent()));
             }
         }

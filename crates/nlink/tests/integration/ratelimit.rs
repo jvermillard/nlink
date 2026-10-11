@@ -431,3 +431,35 @@ async fn test_per_host_reconcile_dry_run() -> nlink::Result<()> {
     assert!(qdiscs.iter().all(|q| q.kind() != Some("htb")));
     Ok(())
 }
+
+/// A `RateLimiter` meeting an HTB `1:` another recipe built (here a
+/// `PerPeerImpairer`'s, default class `0xffff`) says so, instead of adding
+/// its classes into that tree (#491).
+#[tokio::test]
+async fn test_rate_limiter_refuses_another_recipes_htb() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "sch_fq_codel", "cls_flower", "sch_netem");
+    use nlink::netlink::impair::PerPeerImpairer;
+    use nlink::netlink::tc::NetemConfig;
+
+    let ns = TestNamespace::new("rl_other_htb")?;
+    let conn = ns.connection()?;
+    conn.add_link(nlink::netlink::link::DummyLink::new("test0"))
+        .await?;
+    conn.set_link_up("test0").await?;
+    PerPeerImpairer::new("test0")
+        .impair_dst_ip(
+            std::net::Ipv4Addr::new(10, 0, 0, 1).into(),
+            NetemConfig::new().delay(Duration::from_millis(5)).build(),
+        )
+        .apply(&conn)
+        .await?;
+
+    let err = RateLimiter::new("test0")
+        .egress(Rate::mbit(10))
+        .reconcile(&conn)
+        .await
+        .expect_err("another recipe's HTB");
+    assert!(err.to_string().contains("default class 0xffff"), "{err}");
+    Ok(())
+}

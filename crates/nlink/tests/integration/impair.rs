@@ -591,3 +591,83 @@ async fn test_get_filters_by_parent_filters_correctly() -> nlink::Result<()> {
 
     Ok(())
 }
+
+/// Shrinking more than 100 rules. Rule `i` sits at priority `100 + i`, so
+/// rules 100 and up are above the recipe band. Reconcile told its filters
+/// by the band, left those behind, and deleting the classes they were
+/// bound to was EBUSY (#491).
+#[tokio::test]
+async fn test_reconcile_shrinks_past_the_recipe_band() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
+
+    let ns = TestNamespace::new("impair_shrink_band")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+    let ifindex = conn
+        .get_link_by_name("test0")
+        .await?
+        .expect("dummy")
+        .ifindex();
+
+    let peers = |n: u8| {
+        (0..n).fold(PerPeerImpairer::new("test0"), |p, i| {
+            p.impair_dst_ip(Ipv4Addr::new(10, 0, 1, i).into(), netem_50ms())
+        })
+    };
+    let built = peers(105).reconcile(&conn).await?;
+    assert_eq!(built.rules_added, 105, "{built:?}");
+    let shrunk = peers(2).reconcile(&conn).await?;
+    assert!(shrunk.rules_removed >= 103, "{shrunk:?}");
+    let again = peers(2).reconcile(&conn).await?;
+    assert_eq!(again.changes_made, 0, "{again:?}");
+    let filters = conn.get_filters_by_index(ifindex).await?;
+    let left: Vec<u16> = filters
+        .iter()
+        .map(|f| f.priority())
+        .filter(|p| *p > 101)
+        .collect();
+    assert!(left.is_empty(), "filters left behind at {left:?}");
+    Ok(())
+}
+
+/// An HTB `1:` with another default class — another recipe's tree, or one
+/// from before 0.26 — cannot be changed in place: HTB has no change
+/// operation, so the change reconcile sent was EINVAL every time. Without
+/// fallback it now says what is in the way; with it, it rebuilds (#491).
+#[tokio::test]
+async fn test_reconcile_over_an_htb_with_another_default() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
+    use nlink::ReconcileOptions;
+    use nlink::netlink::tc::HtbQdiscConfig;
+
+    let ns = TestNamespace::new("impair_other_default")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+    conn.add_qdisc_full(
+        "test0",
+        nlink::TcHandle::ROOT,
+        Some(nlink::TcHandle::major_only(1)),
+        HtbQdiscConfig::new().default_class(0x10).build(),
+    )
+    .await?;
+
+    let impairer = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms());
+    let err = impairer
+        .reconcile(&conn)
+        .await
+        .expect_err("another default class");
+    assert!(err.to_string().contains("default class 0x10"), "{err}");
+
+    let rebuilt = impairer
+        .reconcile_with_options(&conn, ReconcileOptions::new().with_fallback_to_apply(true))
+        .await?;
+    assert!(rebuilt.root_modified, "{rebuilt:?}");
+    let again = impairer.reconcile(&conn).await?;
+    assert_eq!(again.changes_made, 0, "{again:?}");
+    Ok(())
+}
