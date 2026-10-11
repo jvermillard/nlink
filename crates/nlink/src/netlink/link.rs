@@ -2220,6 +2220,8 @@ pub struct GeneveLink {
     name: String,
     vni: u32,
     mtu: Option<u32>,
+    /// MAC address
+    address: Option<[u8; 6]>,
     /// Remote IPv4 address
     remote: Option<Ipv4Addr>,
     /// Remote IPv6 address
@@ -2290,6 +2292,7 @@ impl GeneveLink {
             name: name.into(),
             vni,
             mtu: None,
+            address: None,
             remote: None,
             remote6: None,
             ttl: None,
@@ -2309,6 +2312,12 @@ impl GeneveLink {
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address.
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
         self
     }
 
@@ -2411,6 +2420,9 @@ impl LinkConfig for GeneveLink {
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
         }
+        if let Some(addr) = self.address {
+            builder.append_attr(IflaAttr::Address as u16, &addr);
+        }
 
         // IFLA_LINKINFO
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
@@ -2448,7 +2460,8 @@ impl LinkConfig for GeneveLink {
 
         // Flow label
         if let Some(label) = self.label {
-            builder.append_attr_u32(geneve::IFLA_GENEVE_LABEL, label);
+            // Big-endian, as `nla_get_be32` reads it (#516).
+            builder.append_attr_u32_be(geneve::IFLA_GENEVE_LABEL, label);
         }
 
         // Port

@@ -1651,3 +1651,37 @@ async fn ipv4_tunnels_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
+/// the link keeps its ifindex; a new VNI, which `geneve_changelink`
+/// refuses, recreates it. `ip -d link` shows each step.
+#[tokio::test]
+async fn geneve_changes_in_place_and_recreates_for_the_vni() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("geneve");
+
+    let step = |vni: u32, last: u8, ttl: u8| {
+        NetworkConfig::new().link("gn1", move |l| {
+            l.geneve(vni).geneve_remote(v4(10, 70, 0, last)).geneve_ttl(ttl)
+        })
+    };
+    let steps = [step(5, 2, 10), step(5, 3, 20), step(6, 3, 20)];
+    let want = [(5, "10.70.0.2", 10), (5, "10.70.0.3", 20), (6, "10.70.0.3", 20)];
+    let ns = TestNamespace::new("tr-geneve")?;
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let link = &ip_json(&ns, &["-d", "link", "show", "gn1"])?[0];
+        let data = &link["linkinfo"]["info_data"];
+        let have = (data["id"].as_u64(), data["remote"].as_str(), data["ttl"].as_u64());
+        let (id, remote, ttl) = want[i];
+        if have != (Some(id), Some(remote), Some(ttl)) {
+            return Err(format!("step {}: want {:?}, have {have:?}", i + 1, want[i]));
+        }
+        ifindexes.push(link["ifindex"].as_u64());
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "a new remote and TTL change in place");
+    assert_ne!(ifindexes[1], ifindexes[2], "a new VNI recreates");
+    Ok(())
+}
