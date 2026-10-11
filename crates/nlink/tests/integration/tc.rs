@@ -2157,3 +2157,72 @@ async fn u32_port_filters_match_what_tc_installs() -> Result<()> {
     }
     Ok(())
 }
+
+/// `block` drops a direction's traffic with a matchall on a clsact hook,
+/// and leaves the root qdisc alone; `unblock` lets it through again. A
+/// boxed qdisc config installs like a typed one (#515).
+#[tokio::test]
+async fn block_drops_traffic_and_keeps_the_root_qdisc() -> Result<()> {
+    use std::net::SocketAddr;
+
+    use nlink::netlink::block::Direction;
+    use nlink::netlink::tc::{PrioConfig, QdiscConfig};
+
+    use crate::common::{topo::NsPair, traffic::deliver_udp};
+    require_root!();
+    nlink::require_modules!(
+        "sch_prio",
+        "sch_ingress",
+        "cls_matchall",
+        "act_gact",
+        "veth"
+    );
+
+    let pair = NsPair::new("block", 67).await?;
+    let conn_b = pair.b.connection()?;
+    let boxed: Box<dyn QdiscConfig> = Box::new(PrioConfig::new());
+    conn_b.replace_qdisc(pair.b_if, boxed).await?;
+    let dst = SocketAddr::new(pair.b_addr.into(), 9100);
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 10),
+        10,
+        "the pair must deliver first"
+    );
+
+    conn_b.block(pair.b_if, Direction::Ingress).await?;
+    conn_b.block(pair.b_if, Direction::Ingress).await?; // a second time is a no-op
+    assert!(conn_b.is_blocked(pair.b_if, Direction::Ingress).await?);
+    assert!(!conn_b.is_blocked(pair.b_if, Direction::Egress).await?);
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 10),
+        0,
+        "blocked ingress delivered"
+    );
+    let root = conn_b
+        .get_qdiscs_by_name(pair.b_if)
+        .await?
+        .into_iter()
+        .find(|q| q.parent() == TcHandle::ROOT)
+        .expect("a root qdisc");
+    assert_eq!(root.kind(), Some("prio"), "block replaced the root qdisc");
+
+    conn_b.unblock(pair.b_if, Direction::Ingress).await?;
+    assert!(!conn_b.is_blocked(pair.b_if, Direction::Ingress).await?);
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 10),
+        10,
+        "unblocked ingress dropped"
+    );
+
+    // Egress, from the sending side.
+    let conn_a = pair.a.connection()?;
+    conn_a.block(pair.a_if, Direction::Egress).await?;
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 10),
+        0,
+        "blocked egress delivered"
+    );
+    conn_a.unblock(pair.a_if, Direction::Egress).await?;
+    assert_eq!(deliver_udp(&pair.a, &pair.b, dst, 10), 10);
+    Ok(())
+}
