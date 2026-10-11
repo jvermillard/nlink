@@ -81,10 +81,31 @@ pub enum Hook {
 }
 
 impl Hook {
-    /// Returns the kernel hook number. Verified against
+    /// The kernel's number for this hook in a chain of `family`.
+    ///
+    /// The numbers are per family: the `arp` family has its own
+    /// (`NF_ARP_IN = 0`, `NF_ARP_OUT = 1`, `netfilter_arp.h`), so an `arp`
+    /// input chain sent as the inet `NF_INET_LOCAL_IN = 1` filtered
+    /// *outgoing* ARP, and an output chain was refused (#484).
+    pub fn number(self, family: Family) -> u32 {
+        match (family, self) {
+            (Family::Arp, Self::Input) => 0,  // NF_ARP_IN
+            (Family::Arp, Self::Output) => 1, // NF_ARP_OUT
+            #[allow(deprecated)]
+            _ => self.to_u32(),
+        }
+    }
+
+    /// Returns the kernel hook number for the `inet`, `ip`, `ip6`, `bridge`
+    /// and `netdev` families. Verified against
     /// `include/uapi/linux/netfilter.h` (`enum nf_inet_hooks`) and
     /// `include/uapi/linux/netfilter_netdev.h`
-    /// (`enum nf_dev_hooks`).
+    /// (`enum nf_dev_hooks`). Wrong for `arp`, which numbers its hooks
+    /// differently: use [`number`](Self::number).
+    #[deprecated(
+        since = "0.31.0",
+        note = "the number depends on the family; use `number(family)`"
+    )]
     pub fn to_u32(self) -> u32 {
         match self {
             Self::Prerouting => 0,    // NF_INET_PRE_ROUTING
@@ -103,21 +124,24 @@ impl Hook {
     /// the kernel rejects them with EINVAL.
     pub fn is_valid_for_family(self, family: Family) -> bool {
         match (self, family) {
-            // Netdev hooks need Netdev family.
+            // Netdev hooks need Netdev family. The bridge family has no
+            // ingress hook: `NetdevIngress` there encoded as 0, which is
+            // the bridge's prerouting (#484).
             (Self::NetdevIngress | Self::NetdevEgress, Family::Netdev) => true,
-            // NetdevIngress is also valid on Bridge family.
-            (Self::NetdevIngress, Family::Bridge) => true,
             // InetIngress needs an Inet/Ipv4/Ipv6 family.
             (Self::InetIngress, Family::Inet | Family::Ip | Family::Ip6) => true,
-            // Standard L3 hooks valid on Inet/Ip/Ip6/Bridge/Arp.
+            // Standard L3 hooks valid on Inet/Ip/Ip6/Bridge.
             (
                 Self::Prerouting
                 | Self::Input
                 | Self::Forward
                 | Self::Output
                 | Self::Postrouting,
-                Family::Inet | Family::Ip | Family::Ip6 | Family::Bridge | Family::Arp,
+                Family::Inet | Family::Ip | Family::Ip6 | Family::Bridge,
             ) => true,
+            // ARP has an input and an output hook, and nothing else
+            // (`nf_tables_arp`'s filter chain type).
+            (Self::Input | Self::Output, Family::Arp) => true,
             _ => false,
         }
     }
@@ -1306,8 +1330,15 @@ pub struct ChainInfo {
     pub chain_type: Option<ChainType>,
     /// Bound device name for netdev base chains. `None` on
     /// other families or when the chain wasn't dump-included
-    /// by the kernel (older kernels omit it for non-netdev).
+    /// by the kernel (older kernels omit it for non-netdev). Also
+    /// `None` when the chain is bound to more than one device: see
+    /// [`devices`](Self::devices).
     pub device: Option<String>,
+    /// Every device the chain is bound to (`NFTA_HOOK_DEVS`). A device
+    /// change sent as an update adds to this list, so a chain moved from
+    /// `eth0` to `eth1` ended up on both, with `device: None`, and drifted
+    /// on every apply (#484).
+    pub devices: Vec<String>,
     /// Default policy.
     pub policy: Option<u32>,
     /// Kernel handle.
@@ -1334,6 +1365,10 @@ pub struct Rule {
     /// The declarative identity (`nlink:<key>`), set by `NftablesDiff::apply`
     /// from the declared rule's key. Imperative rules have none.
     pub(crate) key: Option<String>,
+    /// The first thing a builder method could not encode — an interface
+    /// name too long to match anything. Adding the rule fails with it
+    /// (#484).
+    pub(crate) error: Option<String>,
 }
 
 impl Rule {
@@ -1347,7 +1382,48 @@ impl Rule {
             position: None,
             comment: None,
             key: None,
+            error: None,
         }
+    }
+
+    /// What a builder method could not encode, if anything.
+    pub(crate) fn check(&self) -> Result<()> {
+        match &self.error {
+            Some(e) => Err(Error::InvalidMessage(format!(
+                "{}/{}: {e}",
+                self.table, self.chain
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Match `meta iifname`/`oifname` against `name`: the whole name, or
+    /// with `prefix` only its first bytes (nft's `"eth*"`), with `op`.
+    fn match_ifname(mut self, key: MetaKey, name: &str, op: CmpOp, prefix: bool) -> Self {
+        use super::expr::Expr;
+        // IFNAMSIZ is 16 with the NUL. A longer name was cut to 15 bytes,
+        // which no interface has, so the rule matched nothing (#484).
+        if name.len() > 15 {
+            self.error.get_or_insert(format!(
+                "interface name `{name}` is longer than 15 bytes; no interface has it"
+            ));
+        }
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key,
+        });
+        let mut data = name.as_bytes().to_vec();
+        if !prefix {
+            // The whole name: NUL-terminated and padded to IFNAMSIZ.
+            data.push(0);
+            data.resize(16, 0);
+        }
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op,
+            data,
+        });
+        self
     }
 
     /// Set the address family.
@@ -1533,40 +1609,39 @@ impl Rule {
     }
 
     /// Match input interface by name.
-    pub fn match_iif(mut self, name: &str) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key: MetaKey::IifName,
-        });
-        let mut data = name.as_bytes().to_vec();
-        data.push(0); // null-terminate
-        // Pad to 16 bytes (IFNAMSIZ)
-        data.resize(16, 0);
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data,
-        });
-        self
+    ///
+    /// A name longer than 15 bytes makes adding the rule fail: the kernel's
+    /// limit is 15 plus the NUL.
+    pub fn match_iif(self, name: &str) -> Self {
+        self.match_ifname(MetaKey::IifName, name, CmpOp::Eq, false)
     }
 
-    /// Match output interface by name.
-    pub fn match_oif(mut self, name: &str) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key: MetaKey::OifName,
-        });
-        let mut data = name.as_bytes().to_vec();
-        data.push(0);
-        data.resize(16, 0);
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data,
-        });
-        self
+    /// Match packets that did not come in on `name` (`iifname != name`).
+    pub fn match_iif_not(self, name: &str) -> Self {
+        self.match_ifname(MetaKey::IifName, name, CmpOp::Neq, false)
+    }
+
+    /// Match an input interface whose name starts with `prefix`
+    /// (`iifname "prefix*"`).
+    pub fn match_iif_prefix(self, prefix: &str) -> Self {
+        self.match_ifname(MetaKey::IifName, prefix, CmpOp::Eq, true)
+    }
+
+    /// Match output interface by name. A name longer than 15 bytes makes
+    /// adding the rule fail.
+    pub fn match_oif(self, name: &str) -> Self {
+        self.match_ifname(MetaKey::OifName, name, CmpOp::Eq, false)
+    }
+
+    /// Match packets that do not go out on `name` (`oifname != name`).
+    pub fn match_oif_not(self, name: &str) -> Self {
+        self.match_ifname(MetaKey::OifName, name, CmpOp::Neq, false)
+    }
+
+    /// Match an output interface whose name starts with `prefix`
+    /// (`oifname "prefix*"`).
+    pub fn match_oif_prefix(self, prefix: &str) -> Self {
+        self.match_ifname(MetaKey::OifName, prefix, CmpOp::Eq, true)
     }
 
     /// Match connection tracking state.

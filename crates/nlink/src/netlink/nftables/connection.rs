@@ -358,7 +358,7 @@ impl Connection<Nftables> {
 
         if let Some(hook) = chain.hook {
             let hook_nest = builder.nest_start(NFTA_CHAIN_HOOK | 0x8000);
-            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
+            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
             if let Some(dev) = &chain.device {
@@ -488,6 +488,7 @@ impl Connection<Nftables> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: Rule) -> Result<()> {
+        rule.check()?;
         // NLM_F_APPEND is not optional. nf_tables_newrule() appends to the
         // chain tail only when it is set; without it the kernel *prepends*, so
         // rules land in reverse declaration order. nftables is first-match-wins,
@@ -1516,6 +1517,7 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
         policy: None,
         handle: 0,
         device: None,
+        devices: Vec::new(),
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -1542,6 +1544,12 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
                         }
                         NFTA_HOOK_DEV => {
                             chain.device = attr_str(hook_payload);
+                        }
+                        NFTA_HOOK_DEVS => {
+                            chain.devices = AttrIter::new(hook_payload)
+                                .filter(|(t, _)| t & 0x7FFF == NFTA_DEVICE_NAME)
+                                .filter_map(|(_, name)| attr_str(name))
+                                .collect();
                         }
                         _ => {}
                     }
@@ -1895,8 +1903,9 @@ impl Transaction {
     /// which `nf_tables_newchain` turns into `nf_tables_updchain` for an
     /// existing chain. That changes a base chain's **policy** and keeps its
     /// rules. The kernel refuses to change a live base chain's hook,
-    /// priority or type (`EEXIST`); those need the chain deleted and
-    /// created again (#456).
+    /// priority or type (`EOPNOTSUPP`, `EEXIST` before 6.x); those need the
+    /// chain deleted and created again, which the declarative diff does
+    /// (#456, #478).
     pub fn update_chain(self, chain: Chain) -> Self {
         self.push_newchain(chain, NLM_F_REQUEST | NLM_F_CREATE)
     }
@@ -1914,7 +1923,7 @@ impl Transaction {
 
         if let Some(hook) = chain.hook {
             let hook_nest = builder.nest_start(NFTA_CHAIN_HOOK | 0x8000);
-            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
+            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
             if let Some(dev) = &chain.device {
@@ -1951,6 +1960,10 @@ impl Transaction {
     }
 
     fn push_newrule(mut self, rule: Rule, flags: u16, position: Option<u64>) -> Self {
+        if let Err(e) = rule.check() {
+            self.defer(e);
+            return self;
+        }
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWRULE), flags);
         let nfgenmsg = NfGenMsg::new(rule.family);
         builder.append(&nfgenmsg);
@@ -1991,6 +2004,10 @@ impl Transaction {
     ///
     /// Plan 157b v2.
     pub fn replace_rule(mut self, rule: Rule, handle: u64) -> Self {
+        if let Err(e) = rule.check() {
+            self.defer(e);
+            return self;
+        }
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWRULE),
             NLM_F_REQUEST | NLM_F_REPLACE,

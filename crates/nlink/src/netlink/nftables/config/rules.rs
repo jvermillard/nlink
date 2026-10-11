@@ -72,14 +72,34 @@ impl super::types::NftablesConfig {
     ///   comment;
     /// - a declared rule cannot carry a [`position`](crate::netlink::nftables::Rule::position):
     ///   the diff places rules in declared order;
-    /// - every declared set element must fit its set.
+    /// - every declared set element must fit its set;
+    /// - a rule's chain must be declared: an undeclared chain is deleted;
+    /// - a base chain needs a hook its family has (`arp` has input and
+    ///   output; `bridge` no ingress), a `netdev` or inet
+    ///   `ingress` chain needs a device, a `route` chain hooks output, and a
+    ///   `nat` chain's priority is above -200;
+    /// - a regular chain (no hook) has no policy.
+    ///
+    /// The kernel refuses each of these chains, or — for a hook of another
+    /// family — installs something else (#484).
     ///
     /// [`diff`]: Self::diff
     pub fn validate(&self) -> Result<()> {
         for table in self.tables() {
+            for chain in table.chains() {
+                validate_chain(table.name(), table.family(), chain)?;
+            }
             let mut seen: HashSet<(&str, &str)> = HashSet::new();
             for rule in table.rules() {
                 let chain = rule.chain();
+                if !table.chains().iter().any(|c| c.name() == chain) {
+                    return Err(Error::InvalidMessage(format!(
+                        "{}/{chain}: a rule in a chain the table does not declare, which the \
+                         diff deletes; declare the chain",
+                        table.name()
+                    )));
+                }
+                rule.body.check()?;
                 if rule.body.position.is_some() {
                     return Err(Error::InvalidMessage(format!(
                         "{}/{chain}: a declared rule cannot carry a position; the diff \
@@ -115,6 +135,41 @@ impl super::types::NftablesConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// The chain checks of [`validate`](super::types::NftablesConfig::validate).
+fn validate_chain(
+    table: &str,
+    family: crate::netlink::nftables::Family,
+    chain: &super::types::DeclaredChain,
+) -> Result<()> {
+    use crate::netlink::nftables::{ChainType, Family, Hook, Priority};
+
+    let at = format!("{table}/{}", chain.name());
+    let refuse = |why: String| Err(Error::InvalidMessage(format!("{at}: {why}")));
+    let Some(hook) = chain.hook() else {
+        if chain.policy().is_some() {
+            return refuse("a policy needs a base chain; a chain without a hook has none".into());
+        }
+        return Ok(());
+    };
+    if !hook.is_valid_for_family(family) {
+        return refuse(format!("the {family:?} family has no {hook:?} hook"));
+    }
+    if (family == Family::Netdev || hook == Hook::InetIngress) && chain.device().is_none() {
+        return refuse(format!("a {hook:?} chain needs a device"));
+    }
+    // No type is `filter`: the kernel's default.
+    match chain.chain_type().unwrap_or(ChainType::Filter) {
+        ChainType::Route if hook != Hook::Output => {
+            refuse("a route chain hooks output only".into())
+        }
+        // `NF_IP_PRI_CONNTRACK`: NAT needs the connection tracked first.
+        ChainType::Nat if chain.priority().unwrap_or(Priority::Filter).to_i32() <= -200 => {
+            refuse("a nat chain's priority must be above -200 (conntrack)".into())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -407,6 +462,102 @@ fn longest_increasing(seq: &[usize]) -> HashSet<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each chain the kernel would refuse, or read as another chain, and
+    /// a rule in an undeclared chain, fail `validate()` (#484).
+    #[test]
+    fn validate_refuses_chains_the_kernel_would_not_take() {
+        use crate::netlink::nftables::config::{DeclaredChainBuilder, NftablesConfig};
+        use crate::netlink::nftables::{ChainType, Family, Hook, Policy, Priority};
+
+        let check = |family: Family, chain: fn(DeclaredChainBuilder) -> DeclaredChainBuilder| {
+            NftablesConfig::new()
+                .table("t", family, move |t| t.chain("c", chain))
+                .validate()
+                .map_err(|e| e.to_string())
+        };
+        let refused = [
+            (
+                Family::Arp,
+                check(Family::Arp, |c| c.hook(Hook::Forward)),
+                "no Forward hook",
+            ),
+            (
+                Family::Bridge,
+                check(Family::Bridge, |c| c.hook(Hook::NetdevIngress).device("d0")),
+                "no NetdevIngress hook",
+            ),
+            (
+                Family::Inet,
+                check(Family::Inet, |c| c.policy(Policy::Drop)),
+                "a policy needs",
+            ),
+            (
+                Family::Netdev,
+                check(Family::Netdev, |c| c.hook(Hook::NetdevIngress)),
+                "needs a device",
+            ),
+            (
+                Family::Inet,
+                check(Family::Inet, |c| c.hook(Hook::InetIngress)),
+                "needs a device",
+            ),
+            (
+                Family::Ip,
+                check(Family::Ip, |c| {
+                    c.hook(Hook::Input).chain_type(ChainType::Route)
+                }),
+                "hooks output only",
+            ),
+            (
+                Family::Ip,
+                check(Family::Ip, |c| {
+                    c.hook(Hook::Prerouting)
+                        .chain_type(ChainType::Nat)
+                        .priority(Priority::Raw)
+                }),
+                "above -200",
+            ),
+        ];
+        for (family, outcome, want) in refused {
+            let err = outcome.expect_err(want);
+            assert!(err.contains(want), "{family:?}: {err}");
+        }
+        type Chain = fn(DeclaredChainBuilder) -> DeclaredChainBuilder;
+        let accepted: [(Family, Chain); 6] = [
+            (Family::Arp, |c| c.hook(Hook::Input)),
+            (Family::Arp, |c| c.hook(Hook::Output)),
+            (Family::Ip, |c| {
+                c.hook(Hook::Output).chain_type(ChainType::Route)
+            }),
+            (Family::Ip, |c| {
+                c.hook(Hook::Prerouting)
+                    .chain_type(ChainType::Nat)
+                    .priority(Priority::DstNat)
+            }),
+            (Family::Netdev, |c| c.hook(Hook::NetdevIngress).device("d0")),
+            (Family::Inet, |c| c),
+        ];
+        for (family, chain) in accepted {
+            assert_eq!(check(family, chain), Ok(()), "{family:?}");
+        }
+
+        let stray = NftablesConfig::new()
+            .table("t", Family::Inet, |t| t.rule("c", |r| r.accept()))
+            .validate()
+            .expect_err("a rule in an undeclared chain")
+            .to_string();
+        assert!(stray.contains("does not declare"), "{stray}");
+        let long = NftablesConfig::new()
+            .table("t", Family::Inet, |t| {
+                t.chain("c", |c| c)
+                    .rule("c", |r| r.match_iif("sixteen-bytes-xx").accept())
+            })
+            .validate()
+            .expect_err("a 16-byte interface name")
+            .to_string();
+        assert!(long.contains("longer than 15 bytes"), "{long}");
+    }
 
     #[test]
     fn a_timeout_and_its_read_back_share_a_20ms_step_at_every_hz() {
