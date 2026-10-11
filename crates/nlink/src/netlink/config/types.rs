@@ -229,13 +229,14 @@ impl NetworkConfig {
             // The kernel gives every namespace a fallback device per tunnel
             // module, which nothing can configure (`ip_tunnel_changelink`
             // refuses it, EINVAL).
-            const FALLBACK: [(&str, &str); 6] = [
+            const FALLBACK: [(&str, &str); 7] = [
                 ("gre0", "gre"),
                 ("gretap0", "gretap"),
                 ("erspan0", "erspan"),
                 ("tunl0", "ipip"),
                 ("sit0", "sit"),
                 ("ip_vti0", "vti"),
+                ("ip6tnl0", "ip6tnl"),
             ];
             if let Some((_, kind)) = FALLBACK
                 .iter()
@@ -249,6 +250,35 @@ impl NetworkConfig {
                         l.name
                     ),
                 ));
+            }
+            match &l.link_type {
+                // `ip6_tnl_locate` finds a tunnel by its ends and underlay,
+                // so one with none is the fallback's (EEXIST).
+                DeclaredLinkType::Ip6tnl(p)
+                    if p.local.is_none() && p.remote.is_none() && p.underlay_dev.is_none() =>
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        "an ip6tnl tunnel with no local end, remote end or underlay device is the \
+                         fallback ip6tnl0's, and the kernel refuses it",
+                    ));
+                }
+                DeclaredLinkType::Xfrm { if_id: 0, .. } => {
+                    errors.push(ValidationErrorInfo::new(at(), "an xfrm interface's if_id is not 0"));
+                }
+                // `xfrmi_locate` finds an interface by its if_id alone.
+                DeclaredLinkType::Xfrm { if_id, .. } => {
+                    if let Some(other) = self.links.iter().find(|o| {
+                        o.name != l.name
+                            && matches!(o.link_type, DeclaredLinkType::Xfrm { if_id: id, .. } if id == *if_id)
+                    }) {
+                        errors.push(ValidationErrorInfo::new(
+                            at(),
+                            format!("xfrm if_id {if_id} is also {}'s; a namespace has one interface per if_id", other.name),
+                        ));
+                    }
+                }
+                _ => {}
             }
             if l.bridge.is_some() && !matches!(l.link_type, DeclaredLinkType::Bridge) {
                 errors.push(ValidationErrorInfo::new(at(), "bridge options on a link that is not a bridge"));
@@ -1170,6 +1200,8 @@ impl DeclaredLink {
             | DeclaredLinkType::Ipip(_)
             | DeclaredLinkType::Sit(_)
             | DeclaredLinkType::Vti(_)
+            | DeclaredLinkType::Ip6tnl(_)
+            | DeclaredLinkType::Xfrm { .. }
             | DeclaredLinkType::Bareudp { .. } => Some(
                 "a MAC address is declared, but an L3 tunnel has no hardware address (gretap has one)",
             ),
@@ -1360,6 +1392,17 @@ pub enum DeclaredLinkType {
     Sit(TunnelParams),
     /// IPsec virtual tunnel interface (#516).
     Vti(TunnelParams),
+    /// IPv6 tunnel, IPv6 or IPv4 over IPv6 (#516).
+    Ip6tnl(Ip6tnlParams),
+    /// XFRM (IPsec) interface (#516): routed traffic meets the IPsec
+    /// policies with its `if_id`. The if_id changes in place; a new
+    /// underlay, which `xfrmi_changelink` refuses, recreates it.
+    Xfrm {
+        /// The policies' interface id; not 0.
+        if_id: u32,
+        /// The device its packets leave through.
+        underlay_dev: Option<String>,
+    },
     /// Geneve tunnel (#516). The VNI, port and the remote's family are
     /// fixed at create; the remote, TTL and TOS change in place.
     Geneve {
@@ -1466,6 +1509,8 @@ impl DeclaredLinkType {
             Self::Ipip(_) => Some("ipip"),
             Self::Sit(_) => Some("sit"),
             Self::Vti(_) => Some("vti"),
+            Self::Ip6tnl(_) => Some("ip6tnl"),
+            Self::Xfrm { .. } => Some("xfrm"),
             Self::Geneve { .. } => Some("geneve"),
             Self::Bareudp { .. } => Some("bareudp"),
             Self::Macsec { .. } => Some("macsec"),
@@ -1544,6 +1589,36 @@ pub struct TunnelParams {
     /// The key, both ways (gre, gretap and vti only).
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub key: Option<u32>,
+    /// The device the tunnel's packets leave through.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub underlay_dev: Option<String>,
+}
+
+/// An ip6tnl tunnel's parameters (#516). Each one unset is the kernel's
+/// default (no address, hop limit inherited, an encapsulation limit of 0,
+/// no underlay device) and is not compared; a change sends them all, since
+/// `ip6_tnl_changelink` takes the whole configuration from the request.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Ip6tnlParams {
+    /// The local end.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub local: Option<std::net::Ipv6Addr>,
+    /// The remote end.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub remote: Option<std::net::Ipv6Addr>,
+    /// The outer hop limit.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub hoplimit: Option<u8>,
+    /// The tunnel encapsulation limit (RFC 2473).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub encap_limit: Option<u8>,
+    /// What it carries; either by default.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mode: crate::netlink::link::Ip6tnlMode,
     /// The device the tunnel's packets leave through.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub underlay_dev: Option<String>,
@@ -1889,11 +1964,67 @@ impl LinkBuilder {
         self
     }
 
-    /// The device a tunnel's packets leave through.
+    /// The device a tunnel's packets leave through: a gre, gretap, ipip,
+    /// sit, vti, ip6tnl or xfrm link's.
     pub fn tunnel_underlay_dev(mut self, dev: &str) -> Self {
-        if let Some(p) = self.tunnel_params("tunnel_underlay_dev") {
-            p.underlay_dev = Some(dev.to_string());
+        match &mut self.link_type {
+            DeclaredLinkType::Ip6tnl(p) => p.underlay_dev = Some(dev.to_string()),
+            DeclaredLinkType::Xfrm { underlay_dev, .. } => *underlay_dev = Some(dev.to_string()),
+            _ => {
+                if let Some(p) = self.tunnel_params("tunnel_underlay_dev") {
+                    p.underlay_dev = Some(dev.to_string());
+                }
+            }
         }
+        self
+    }
+
+    /// Create an IPv6 tunnel (#516); set it with the `ip6tnl_*` setters.
+    pub fn ip6tnl(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Ip6tnl(Ip6tnlParams::default());
+        self
+    }
+
+    fn ip6tnl_params(mut self, setter: &str, set: impl FnOnce(&mut Ip6tnlParams)) -> Self {
+        if let DeclaredLinkType::Ip6tnl(p) = &mut self.link_type {
+            set(p);
+        } else {
+            self.wrong_kind(setter, "ip6tnl");
+        }
+        self
+    }
+
+    /// An ip6tnl tunnel's local end.
+    pub fn ip6tnl_local(self, addr: std::net::Ipv6Addr) -> Self {
+        self.ip6tnl_params("ip6tnl_local", |p| p.local = Some(addr))
+    }
+
+    /// An ip6tnl tunnel's remote end.
+    pub fn ip6tnl_remote(self, addr: std::net::Ipv6Addr) -> Self {
+        self.ip6tnl_params("ip6tnl_remote", |p| p.remote = Some(addr))
+    }
+
+    /// An ip6tnl tunnel's outer hop limit.
+    pub fn ip6tnl_hoplimit(self, hoplimit: u8) -> Self {
+        self.ip6tnl_params("ip6tnl_hoplimit", |p| p.hoplimit = Some(hoplimit))
+    }
+
+    /// An ip6tnl tunnel's encapsulation limit.
+    pub fn ip6tnl_encap_limit(self, limit: u8) -> Self {
+        self.ip6tnl_params("ip6tnl_encap_limit", |p| p.encap_limit = Some(limit))
+    }
+
+    /// What an ip6tnl tunnel carries.
+    pub fn ip6tnl_mode(self, mode: crate::netlink::link::Ip6tnlMode) -> Self {
+        self.ip6tnl_params("ip6tnl_mode", |p| p.mode = mode)
+    }
+
+    /// Create an XFRM interface with `if_id` (#516).
+    pub fn xfrm(mut self, if_id: u32) -> Self {
+        self.link_type = DeclaredLinkType::Xfrm {
+            if_id,
+            underlay_dev: None,
+        };
         self
     }
 
@@ -5129,6 +5260,53 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("end-station or SCB"), "{err}");
+    }
+
+    #[test]
+    fn ip6tnl_and_xfrm_roundtrip_and_validate() {
+        use crate::netlink::link::Ip6tnlMode;
+        use std::net::Ipv6Addr;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy())
+            .link("t61", |l| {
+                l.ip6tnl()
+                    .ip6tnl_local(Ipv6Addr::LOCALHOST)
+                    .ip6tnl_remote("fd00::2".parse().unwrap())
+                    .ip6tnl_hoplimit(64)
+                    .ip6tnl_encap_limit(4)
+                    .ip6tnl_mode(Ip6tnlMode::Ipip6)
+                    .tunnel_underlay_dev("d0")
+            })
+            .link("xf1", |l| l.xfrm(7).tunnel_underlay_dev("d0"));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""ip6tnl":{"local":"::1","remote":"fd00::2","hoplimit":64,"encap-limit":4,"mode":"ipip6","underlay-dev":"d0"}"#,
+            r#""xfrm":{"if_id":7,"underlay_dev":"d0"}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        for (cfg, says) in [
+            (NetworkConfig::new().link("t61", |l| l.ip6tnl()), "fallback ip6tnl0's"),
+            (
+                NetworkConfig::new().link("ip6tnl0", |l| l.ip6tnl().ip6tnl_remote(Ipv6Addr::LOCALHOST)),
+                "the kernel's fallback ip6tnl device",
+            ),
+            (NetworkConfig::new().link("d0", |l| l.dummy().ip6tnl_hoplimit(1)), "ip6tnl_hoplimit"),
+            (NetworkConfig::new().link("xf1", |l| l.xfrm(0)), "if_id is not 0"),
+            (
+                NetworkConfig::new().link("xf1", |l| l.xfrm(3)).link("xf2", |l| l.xfrm(3)),
+                "xfrm if_id 3 is also xf2's",
+            ),
+            (
+                NetworkConfig::new().link("xf1", |l| l.xfrm(3).address([2, 0, 0, 0, 0, 1])),
+                "an L3 tunnel has no hardware address",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
     }
 
     #[test]

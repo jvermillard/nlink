@@ -1462,6 +1462,8 @@ pub(crate) fn declared_lower(link: &DeclaredLink) -> Option<&str> {
         | DeclaredLinkType::Ipip(p)
         | DeclaredLinkType::Sit(p)
         | DeclaredLinkType::Vti(p) => p.underlay_dev.as_deref(),
+        DeclaredLinkType::Ip6tnl(p) => p.underlay_dev.as_deref(),
+        DeclaredLinkType::Xfrm { underlay_dev, .. } => underlay_dev.as_deref(),
         _ => None,
     }
 }

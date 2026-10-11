@@ -963,6 +963,38 @@ All notable changes to this project will be documented in this file.
     `ip -d -j link` on iproute2 6.15 and 6.1. It fails with the SCI
     uncompared.
 
+- **`Ip6tnlLink` and `XfrmLink`, and declared ip6tnl and xfrm links
+  (#516, row 7, last batch).**
+  - **Imperative builders.**
+    - `Ip6tnlLink` carries IPv6 or IPv4 over IPv6. It takes the ends,
+      `hoplimit`, `encap_limit` and an `Ip6tnlMode` (`any` by default,
+      as in `ip link`).
+    - `XfrmLink` is an IPsec interface with an `if_id`.
+    - Each is bound to its underlay through its own link attribute.
+  - **Builder.** `LinkBuilder::ip6tnl()` with `ip6tnl_local`,
+    `ip6tnl_remote`, `ip6tnl_hoplimit`, `ip6tnl_encap_limit` and
+    `ip6tnl_mode`, and `LinkBuilder::xfrm(if_id)`. Both take
+    `tunnel_underlay_dev`.
+  - **Changes.**
+    - Any ip6tnl difference sends the whole declared set, since
+      `ip6_tnl_changelink` rebuilds the configuration from the request.
+    - An xfrm interface's if_id changes in place. A new underlay, which
+      `xfrmi_changelink` refuses, recreates it.
+  - **Validation errors:**
+    - an ip6tnl with no ends and no underlay, which is the fallback
+      `ip6tnl0`'s tunnel, so the kernel refuses it with `EEXIST`;
+    - a link named `ip6tnl0`;
+    - an `if_id` of 0;
+    - two xfrm interfaces with one `if_id`.
+  - **CI.** `ip6_tunnel` and `xfrm_interface` join CI's module lists.
+  - **Tests.**
+    - A root test checks every builder parameter through `ip -d -j link`.
+    - A transition test changes every ip6tnl parameter and the if_id in
+      place (same ifindexes), then the xfrm underlay (recreated). It
+      passes on iproute2 6.15 and 6.1.
+    - It fails if the ip6tnl change sends only the mode (`EEXIST`), or
+      if the xfrm change leaves out the underlay (`EINVAL`).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
