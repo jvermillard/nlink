@@ -16,6 +16,7 @@ mod attr_ids {
     pub const IFLA_MTU: u16 = 4;
     pub const IFLA_LINK: u16 = 5;
     pub const IFLA_QDISC: u16 = 6;
+    pub const IFLA_IFALIAS: u16 = 20;
     pub const IFLA_MASTER: u16 = 10;
     pub const IFLA_TXQLEN: u16 = 13;
     pub const IFLA_OPERSTATE: u16 = 16;
@@ -75,6 +76,8 @@ pub struct LinkMessage {
     pub(crate) link_netnsid: Option<i32>,
     /// Qdisc name (IFLA_QDISC).
     pub(crate) qdisc: Option<String>,
+    /// Interface alias (IFLA_IFALIAS), `ip link set dev X alias Y`.
+    pub(crate) alias: Option<String>,
     /// Master device index (IFLA_MASTER).
     pub(crate) master: Option<u32>,
     /// Transmit queue length (IFLA_TXQLEN).
@@ -318,6 +321,11 @@ impl LinkMessage {
     /// Get the qdisc name.
     pub fn qdisc(&self) -> Option<&str> {
         self.qdisc.as_deref()
+    }
+
+    /// The interface's alias (`IFLA_IFALIAS`), if it has one.
+    pub fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
     }
 
     /// Get the master device index.
@@ -593,6 +601,10 @@ impl FromNetlink for LinkMessage {
             match attr_type & 0x3FFF {
                 attr_ids::IFLA_IFNAME => {
                     msg.name = Some(parse_string_from_bytes(attr_data));
+                }
+                attr_ids::IFLA_IFALIAS => {
+                    let alias = parse_string_from_bytes(attr_data);
+                    msg.alias = (!alias.is_empty()).then_some(alias);
                 }
                 attr_ids::IFLA_ADDRESS => {
                     msg.address = Some(attr_data.to_vec());

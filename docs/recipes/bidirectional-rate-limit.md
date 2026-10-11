@@ -95,9 +95,11 @@ RateLimiter::new("eth0")
 # }
 ```
 
-`burst_to` sets the HTB `ceil` so the shaper can briefly overshoot the
-committed rate before clamping — important for interactive traffic on
-slow links.
+`burst_to` sets the HTB `ceil`: the shaper guarantees the rate and lets
+traffic borrow up to the ceiling — important for interactive traffic on
+slow links. (Before 0.31 the ceiling was out of reach: the class under
+the qdisc carried the rate too, and a class there has nothing to borrow
+from.)
 
 ## Code: teardown
 
@@ -105,7 +107,9 @@ slow links.
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 # use nlink::netlink::ratelimit::RateLimiter;
 # let conn = nlink::Connection::<nlink::Route>::new()?;
-// Removes root qdiscs on both eth0 *and* ifb_eth0, and deletes the IFB.
+// Removes what this limiter built: its HTB root on eth0, the redirect to
+// ifb_eth0, the ingress qdisc once nothing else is on it, and the IFB.
+// Another recipe's tree, a clsact, or a device it did not create stay.
 RateLimiter::new("eth0").remove(&conn).await?;
 # Ok(())
 # }
@@ -177,10 +181,14 @@ tc qdisc show dev ifb_eth0
 
 ## Caveats
 
-- The IFB device is named `ifb_<dev>` by convention in our helper. If
-  the name collides with something you already have (another IFB or a
-  dummy), teardown will refuse to delete an unfamiliar interface.
-  Remove the collision first.
+- The IFB device is named `ifb_<dev>` by convention in our helper, and
+  carries the alias `nlink:ratelimit:<dev>` to mark it. If the name
+  collides with something you already have (a dummy, or an IFB another
+  limiter tagged), `apply` and `reconcile` refuse it and `remove` leaves
+  it alone. Remove the collision first.
+- With a `clsact` on the interface, the ingress redirect goes on its
+  ingress hook, next to whatever BPF programs are there; it is never
+  replaced or deleted.
 - `ingress` qdisc requires the `sch_ingress` module, and IFB requires
   `ifb.ko`. Both are typically built into mainline kernels, but stripped
   kernels (embedded, some cloud images) may be missing them.

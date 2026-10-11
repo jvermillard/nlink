@@ -463,3 +463,306 @@ async fn test_rate_limiter_refuses_another_recipes_htb() -> nlink::Result<()> {
     assert!(err.to_string().contains("default class 0xffff"), "{err}");
     Ok(())
 }
+
+// ============================================================================
+// #490 — a RateLimiter touches what it owns
+// ============================================================================
+
+async fn dummy(
+    conn: &nlink::netlink::Connection<nlink::netlink::Route>,
+    name: &str,
+) -> nlink::Result<u32> {
+    conn.add_link(nlink::netlink::link::DummyLink::new(name))
+        .await?;
+    conn.set_link_up(name).await?;
+    Ok(conn
+        .get_link_by_name(name)
+        .await?
+        .expect("dummy exists")
+        .ifindex())
+}
+
+/// A `clsact` hook with a filter of its own on it — what a BPF program
+/// looks like to tc.
+async fn clsact_with_a_filter(
+    conn: &nlink::netlink::Connection<nlink::netlink::Route>,
+    ifindex: u32,
+) -> nlink::Result<()> {
+    use nlink::netlink::action::{ActionList, GactAction};
+    use nlink::netlink::filter::MatchallFilter;
+    conn.add_qdisc_by_index(ifindex, nlink::netlink::tc::ClsactConfig::new())
+        .await?;
+    conn.add_filter_by_index_full(
+        ifindex,
+        nlink::TcHandle::CLSACT_INGRESS,
+        None,
+        0x0003,
+        7,
+        MatchallFilter::new().actions(ActionList::new().with(GactAction::pass())),
+    )
+    .await
+}
+
+/// `remove()` takes only what the limiter built. It deleted whatever root
+/// and ingress qdiscs were there — a netem, a clsact with its programs —
+/// and threw away every error (#490).
+#[tokio::test]
+async fn remove_leaves_what_the_limiter_did_not_build() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "sch_netem",
+        "sch_ingress",
+        "cls_matchall",
+        "act_gact",
+        "dummy"
+    );
+
+    let ns = TestNamespace::new("rl_rm_own")?;
+    let conn = ns.connection()?;
+    let ifindex = dummy(&conn, "test0").await?;
+    conn.add_qdisc_by_index(ifindex, nlink::netlink::tc::NetemConfig::new().build())
+        .await?;
+    clsact_with_a_filter(&conn, ifindex).await?;
+
+    RateLimiter::new("test0").remove(&conn).await?;
+    let kinds: Vec<String> = conn
+        .get_qdiscs_by_index(ifindex)
+        .await?
+        .iter()
+        .filter_map(|q| q.kind().map(str::to_string))
+        .collect();
+    assert!(kinds.contains(&"netem".to_string()), "{kinds:?}");
+    assert!(kinds.contains(&"clsact".to_string()), "{kinds:?}");
+    let on_hook = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::CLSACT_INGRESS)
+        .await?;
+    assert_eq!(on_hook.len(), 1, "the clsact's own filter is gone");
+    Ok(())
+}
+
+/// The ingress half hangs its redirect off a clsact that is there, instead
+/// of deleting it (a clsact sits at `ffff:` too) and its programs with it,
+/// and converges; removing it leaves the clsact as it found it (#490).
+#[tokio::test]
+async fn ingress_shaping_keeps_a_clsact() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_fq_codel",
+        "sch_ingress",
+        "ifb",
+        "act_mirred",
+        "cls_matchall",
+        "act_gact",
+        "dummy"
+    );
+
+    let ns = TestNamespace::new("rl_clsact")?;
+    let conn = ns.connection()?;
+    let ifindex = dummy(&conn, "test0").await?;
+    clsact_with_a_filter(&conn, ifindex).await?;
+
+    let limiter = RateLimiter::new("test0").ingress(Rate::mbit(10));
+    limiter.apply(&conn).await?;
+    let again = limiter.reconcile(&conn).await?;
+    assert_eq!(again.changes_made, 0, "{again:?}");
+    let on_hook = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::CLSACT_INGRESS)
+        .await?;
+    assert_eq!(on_hook.len(), 2, "the clsact's own filter and the redirect");
+
+    limiter.remove(&conn).await?;
+    let kinds: Vec<String> = conn
+        .get_qdiscs_by_index(ifindex)
+        .await?
+        .iter()
+        .filter_map(|q| q.kind().map(str::to_string))
+        .collect();
+    assert!(kinds.contains(&"clsact".to_string()), "{kinds:?}");
+    let on_hook = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::CLSACT_INGRESS)
+        .await?;
+    assert_eq!(
+        on_hook.len(),
+        1,
+        "the redirect is gone, the clsact's own filter stays"
+    );
+    assert!(conn.get_link_by_name("ifb_test0").await?.is_none());
+    Ok(())
+}
+
+/// A direction the limiter no longer declares is taken down by reconcile.
+/// It stayed: only the declared halves were looked at (#490).
+#[tokio::test]
+async fn reconcile_takes_down_a_half_that_left() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_fq_codel",
+        "sch_ingress",
+        "ifb",
+        "act_mirred",
+        "cls_matchall",
+        "dummy"
+    );
+
+    let ns = TestNamespace::new("rl_half")?;
+    let conn = ns.connection()?;
+    let ifindex = dummy(&conn, "test0").await?;
+
+    let both = RateLimiter::new("test0")
+        .egress(Rate::mbit(10))
+        .ingress(Rate::mbit(20));
+    let built = both.reconcile(&conn).await?;
+    assert!(built.changes_made > 0);
+
+    let egress_only = RateLimiter::new("test0").egress(Rate::mbit(10));
+    let r = egress_only.reconcile(&conn).await?;
+    assert!(r.changes_made > 0, "{r:?}");
+    assert!(
+        conn.get_link_by_name("ifb_test0").await?.is_none(),
+        "the IFB stayed"
+    );
+    assert!(
+        !conn
+            .get_qdiscs_by_index(ifindex)
+            .await?
+            .iter()
+            .any(|q| q.kind() == Some("ingress")),
+        "the ingress hook stayed"
+    );
+    assert_eq!(egress_only.reconcile(&conn).await?.changes_made, 0);
+
+    let ingress_only = RateLimiter::new("test0").ingress(Rate::mbit(20));
+    let swapped = ingress_only.reconcile(&conn).await?;
+    assert!(swapped.changes_made > 0, "{swapped:?}");
+    assert!(
+        !conn
+            .get_qdiscs_by_index(ifindex)
+            .await?
+            .iter()
+            .any(|q| q.kind() == Some("htb")),
+        "the egress HTB stayed"
+    );
+    assert_eq!(ingress_only.reconcile(&conn).await?.changes_made, 0);
+    Ok(())
+}
+
+/// The IFB is used, and deleted, only when it is this limiter's: an IFB
+/// by kind, carrying its tag. A dummy that happens to have the name was
+/// reused (#490).
+#[tokio::test]
+async fn an_ifb_name_taken_by_something_else_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_fq_codel",
+        "sch_ingress",
+        "ifb",
+        "act_mirred",
+        "cls_matchall",
+        "dummy"
+    );
+
+    let ns = TestNamespace::new("rl_ifb_own")?;
+    let conn = ns.connection()?;
+    dummy(&conn, "test0").await?;
+    dummy(&conn, "ifb_test0").await?;
+
+    let limiter = RateLimiter::new("test0").ingress(Rate::mbit(10));
+    let err = limiter
+        .apply(&conn)
+        .await
+        .expect_err("ifb_test0 is a dummy");
+    assert!(err.to_string().contains("not an IFB"), "{err}");
+    limiter.remove(&conn).await?;
+    let still = conn
+        .get_link_by_name("ifb_test0")
+        .await?
+        .expect("the dummy is left alone");
+    assert_eq!(still.kind(), Some("dummy"));
+    Ok(())
+}
+
+/// A burst or a latency dropped from the declaration is reset. Reconcile
+/// compared rate and ceiling only, and any AQM target passed (#490).
+#[tokio::test]
+async fn reconcile_resets_a_dropped_burst_and_latency() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "sch_fq_codel", "dummy");
+
+    let ns = TestNamespace::new("rl_drift")?;
+    let conn = ns.connection()?;
+    dummy(&conn, "test0").await?;
+
+    let tuned = RateLimiter::new("test0")
+        .egress(Rate::mbit(10))
+        .burst_size(Bytes::kib(64))
+        .latency(Duration::from_millis(20));
+    let built = tuned.reconcile(&conn).await?;
+    assert!(built.changes_made > 0, "{built:?}");
+    assert_eq!(tuned.reconcile(&conn).await?.changes_made, 0);
+
+    let plain = RateLimiter::new("test0").egress(Rate::mbit(10));
+    let reset = plain.reconcile(&conn).await?;
+    assert!(
+        reset.changes_made >= 3,
+        "two classes and the leaf: {reset:?}"
+    );
+    assert_eq!(plain.reconcile(&conn).await?.changes_made, 0);
+    Ok(())
+}
+
+/// `burst_to` lets the limiter reach its ceiling. Class `1:1` sits straight
+/// under the qdisc, with no parent to borrow from, so with `rate 1mbit,
+/// ceil 8mbit` there the leaf never passed 1 Mbit/s — measured, 1.1 Mbit/s
+/// (#490). Two seconds of datagrams now arrive at about 8 Mbit/s.
+#[tokio::test]
+async fn burst_to_reaches_the_ceiling() -> nlink::Result<()> {
+    use std::net::{SocketAddr, UdpSocket};
+    require_root!();
+    nlink::require_modules!("sch_htb", "sch_fq_codel", "veth");
+
+    let pair = crate::common::topo::NsPair::new("rl-ceil", 91).await?;
+    RateLimiter::new(pair.a_if)
+        .egress(Rate::mbit(1))
+        .burst_to(Rate::mbit(8))
+        .apply(&pair.a.connection()?)
+        .await?;
+
+    let dst = SocketAddr::from((pair.b_addr, 9100));
+    let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+    let b_name = pair.b.name().to_string();
+    let receiver = std::thread::spawn(move || {
+        let _ns = nlink::netlink::namespace::enter(&b_name).expect("enter b");
+        let socket = UdpSocket::bind(dst).expect("bind");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        bound_tx.send(()).expect("bound");
+        let mut buf = [0u8; 2048];
+        let mut bytes = 0usize;
+        while let Ok(n) = socket.recv(&mut buf) {
+            bytes += n;
+        }
+        bytes
+    });
+    bound_rx.recv().expect("receiver bound");
+    crate::common::traffic::in_ns(&pair.a, move || {
+        let socket = UdpSocket::bind("0.0.0.0:0").expect("bind sender");
+        let payload = [0u8; 1200];
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            if socket.send_to(&payload, dst).is_err() {
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        }
+    });
+    let bytes = receiver.join().expect("receiver");
+    // 1 Mbit/s for 2 s is 250 kB; 8 Mbit/s is 2 MB.
+    assert!(
+        bytes > 1_000_000,
+        "{bytes} bytes in 2 s: the ceiling is out of reach"
+    );
+    Ok(())
+}

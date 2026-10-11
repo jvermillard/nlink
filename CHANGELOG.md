@@ -46,6 +46,38 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`RateLimiter` touched what it did not own, and its ceiling was out of
+  reach (#490).**
+  - **`remove()`** deleted whatever root and ingress qdiscs were there,
+    such as another recipe's tree or a clsact with its BPF programs, and
+    discarded every error. It now removes only what the limiter built:
+    - the root qdisc, if it is the HTB `1:` with the limiter's default
+      class;
+    - its redirect;
+    - the `ingress` qdisc, once nothing else is on it (never a clsact);
+    - its IFB.
+
+    It returns real errors (something already gone is not one). The new
+    `remove_egress()` and `remove_ingress()` take one half.
+  - **Clsact:** the ingress half deleted whatever sat at `ffff:` first.
+    That includes a clsact, and with it its programs. It now hangs its
+    redirect off the clsact's ingress hook.
+  - **Undeclared halves:** a direction that left the declaration was never
+    taken down by `reconcile`. It is now.
+  - **IFB ownership:** the IFB was reused if anything had its name. It
+    must now be an IFB carrying the limiter's alias tag
+    (`nlink:ratelimit:<dev>`; untagged ones from before 0.31 are adopted).
+    New: `LinkMessage::alias()` and `Connection::set_link_alias{,_by_index}`.
+  - **Drift:** reconcile ignored the burst, and accepted any AQM target
+    when none was declared. A burst or latency dropped from the
+    declaration now resets to the default, which is sent explicitly,
+    because a replace keeps what it is not sent. `PerHostLimiter`'s leaves
+    get the same.
+  - **Ceiling:** with `burst_to`, class `1:1` sat under the qdisc at `rate`
+    and so could never pass it. Measured: 1.1 Mbit/s through a
+    `1mbit`-to-`8mbit` limiter. `1:1` now takes the ceiling as its rate,
+    and the limiter reaches it.
+
 - **The tc recipes could not shrink past 100 rules, and "fixed" a wrong
   HTB default with an operation HTB does not have (#491).**
   - `PerPeerImpairer` puts rule `i` at priority `100 + i`, so rules 100
@@ -1093,6 +1125,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`RateLimiter::{remove_egress, remove_ingress}`, `LinkMessage::alias()`
+  and `Connection::set_link_alias{,_by_index}`** (#490).
 
 - **`Transaction::{update_table, update_flowtable, del_flowtable_devices}`,
   `NftablesDiff::{tables_refused, flowtables_to_update}` and

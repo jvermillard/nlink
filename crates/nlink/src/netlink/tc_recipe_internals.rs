@@ -316,12 +316,10 @@ pub(crate) fn fq_codel_target_matches(desired_target_us: Option<u32>, live: &TcM
     let Some(QdiscOptions::FqCodel(opts)) = live.options() else {
         return false;
     };
-    match desired_target_us {
-        // Recipe didn't set a target: any live value is acceptable.
-        None => true,
-        // Recipe set a target: compare in the kernel's own units.
-        Some(want) => codel_round_trip_us(want) == opts.target_us,
-    }
+    // No target is the kernel's default, 5 ms: accepting any live one meant
+    // a latency removed from the recipe was never reset (#490). Compared in
+    // the kernel's own units.
+    codel_round_trip_us(desired_target_us.unwrap_or(5_000)) == opts.target_us
 }
 
 /// Microseconds as they come back out of a `codel` time field.
@@ -505,6 +503,16 @@ pub(crate) fn flower_classid(live: &TcMessage) -> Option<TcHandle> {
 /// MTU when not explicitly set. Two classes that round-trip through
 /// the recipe's defaults will match here even when the kernel has
 /// filled in derived burst/cburst values.
+/// [`htb_class_rates_match`], and the burst too: a recipe that sets one
+/// compares it, and one that does not compares against the default it
+/// writes, so a burst removed from the recipe is reset (#490).
+pub(crate) fn htb_class_matches(class: &TcMessage, desired: &super::tc::HtbClassConfig) -> bool {
+    let Some(opts) = htb_class_options(class) else {
+        return false;
+    };
+    (opts.rate, opts.ceil) == desired.rates_bps() && opts.burst == desired.burst_as_dumped()
+}
+
 pub(crate) fn htb_class_rates_match(
     class: &TcMessage,
     desired_rate_bps: u64,
@@ -568,8 +576,15 @@ mod tests {
         assert!(fq_codel_target_matches(Some(20_000), &live));
         // A genuinely different target still registers as drift.
         assert!(!fq_codel_target_matches(Some(50_000), &live));
-        // No target asked for: anything goes.
-        assert!(fq_codel_target_matches(None, &live));
+        // No target asked for is the kernel's default, 5 ms, not "anything
+        // goes": a dropped latency is reset (#490).
+        assert!(!fq_codel_target_matches(None, &live));
+        let default = TcMessage {
+            kind: Some("fq_codel".to_string()),
+            options: Some(fq_codel_options(4999)),
+            ..TcMessage::default()
+        };
+        assert!(fq_codel_target_matches(None, &default));
     }
 
     /// A `TCA_FQ_CODEL_TARGET`-only options blob.
