@@ -402,6 +402,7 @@ pub struct NexthopBuilder {
     blackhole: bool,
     onlink: bool,
     fdb: bool,
+    ipv6: bool,
     protocol: Option<u8>,
 }
 
@@ -418,8 +419,17 @@ impl NexthopBuilder {
             blackhole: false,
             onlink: false,
             fdb: false,
+            ipv6: false,
             protocol: None,
         }
+    }
+
+    /// An IPv6 nexthop, for one with no gateway to say so: a blackhole, or
+    /// a device alone. Without a gateway it is IPv4 otherwise, as with `ip
+    /// nexthop` (#673).
+    pub fn ipv6(mut self) -> Self {
+        self.ipv6 = true;
+        self
     }
 
     /// Set the gateway (next-hop) address.
@@ -484,10 +494,13 @@ impl NexthopBuilder {
     /// Write the netlink message with resolved interface index.
     pub(crate) fn write_to(&self, builder: &mut MessageBuilder, ifindex: Option<u32>) {
         // Determine address family
+        // The kernel takes `AF_UNSPEC` only for a group: a blackhole or a
+        // device alone sent it failed "Invalid address family" (#673).
         let family = match &self.gateway {
             Some(IpAddr::V4(_)) => libc::AF_INET as u8,
             Some(IpAddr::V6(_)) => libc::AF_INET6 as u8,
-            None => libc::AF_UNSPEC as u8,
+            None if self.ipv6 => libc::AF_INET6 as u8,
+            None => libc::AF_INET as u8,
         };
 
         let mut nh_flags = 0u32;

@@ -440,6 +440,14 @@ All notable changes to this project will be documented in this file.
   - **Tests.** A root test checks both directions against iproute2, and
     fails without the fix.
 
+- **A blackhole nexthop, or one with a device alone, can be made (#673).**
+  - **The bug.** `NexthopBuilder` sent `AF_UNSPEC` when there was no
+    gateway. The kernel takes that only for a group, so both kinds
+    failed with "Invalid address family".
+  - **The fix.** Without a gateway the builder now sends `AF_INET`, as
+    `ip nexthop` does. `NexthopBuilder::ipv6()` makes an IPv6 one.
+  - **Test.** A root test creates both, and fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
