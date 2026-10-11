@@ -967,6 +967,12 @@ impl BridgeLink {
         self
     }
 
+    /// Set the ageing time in milliseconds (kept in 1/100 s).
+    pub fn ageing_time_ms(mut self, ms: u32) -> Self {
+        self.ageing_time = Some(ms / 10);
+        self
+    }
+
     /// Set the bridge priority.
     pub fn priority(mut self, priority: u16) -> Self {
         self.priority = Some(priority);

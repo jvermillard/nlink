@@ -676,6 +676,12 @@ pub struct LinkChanges {
     pub set_addr_gen_mode: Option<crate::netlink::devconf::AddrGenMode>,
     /// New IPv6 token (#516).
     pub set_ipv6_token: Option<std::net::Ipv6Addr>,
+    /// Bridge port options to change, one `name value` each (#516).
+    pub set_port_options: Vec<String>,
+    /// The config behind `set_port_options`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) port_update: Option<crate::netlink::link::BridgePortConfig>,
     /// The attributes behind `set_kind_params`.
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
@@ -761,6 +767,7 @@ impl LinkChanges {
             && self.set_ipv6_conf.is_empty()
             && self.set_addr_gen_mode.is_none()
             && self.set_ipv6_token.is_none()
+            && self.port_update.is_none()
     }
 
     /// Get a summary of the changes.
@@ -821,6 +828,7 @@ impl LinkChanges {
         if let Some(token) = self.set_ipv6_token {
             parts.push(format!("token {token}"));
         }
+        parts.extend(self.set_port_options.iter().map(|o| format!("port {o}")));
         parts.join(", ")
     }
 }
@@ -1497,6 +1505,7 @@ fn new_peer_changes(declared: &DeclaredLink, bonds: &HashSet<&str>) -> LinkChang
         set_mtu: declared.mtu,
         set_address: declared.address,
         set_master,
+        port_update: declared.port.as_ref().map(|p| p.to_config()),
         ..LinkChanges::declaring(&declared.attrs)
     }
 }
@@ -1598,6 +1607,11 @@ fn compute_link_changes(
         {
             changes.set_ipv4_conf.push((d, *want));
         }
+    }
+    if let Some(port) = &declared.port {
+        let (lines, config) = super::kind::port_changes(port, existing);
+        changes.set_port_options = lines;
+        changes.port_update = config;
     }
     for (name, want) in &a.ipv6_conf {
         if let Some(d) = crate::netlink::devconf::Ipv6Devconf::from_name(name)
@@ -2423,6 +2437,8 @@ mod tests {
             master: MasterSpec::Unmanaged,
             address: None,
             attrs: Default::default(),
+            bridge: None,
+            port: None,
         }
     }
 

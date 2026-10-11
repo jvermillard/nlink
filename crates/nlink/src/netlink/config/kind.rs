@@ -829,6 +829,7 @@ pub(crate) struct KindUpdate {
 #[derive(Debug, Clone)]
 pub(crate) enum KindAttr {
     U8(u16, u8),
+    U16(u16, u16),
     U32(u16, u32),
     Bytes(u16, Vec<u8>),
     /// A link's ifindex, resolved by name when the change is applied — the
@@ -865,6 +866,12 @@ struct InfoData<'a>(HashMap<u16, &'a [u8]>);
 impl<'a> InfoData<'a> {
     fn of(link: &'a LinkMessage) -> Self {
         let data = link.link_info().and_then(|i| i.data()).unwrap_or(&[]);
+        Self(AttrIter::new(data).collect())
+    }
+
+    /// The link's `IFLA_INFO_SLAVE_DATA`: a bridge port's options.
+    fn slave_of(link: &'a LinkMessage) -> Self {
+        let data = link.link_info().and_then(|i| i.slave_data()).unwrap_or(&[]);
         Self(AttrIter::new(data).collect())
     }
 
@@ -1276,9 +1283,68 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 }
             }
         }
+        // A bridge's declared options, changed in place (`br_changelink`,
+        // #516). The timers are kept in 1/100 s (`clock_t`).
+        DeclaredLinkType::Bridge => {
+            const FORWARD_DELAY: u16 = 1;
+            const HELLO_TIME: u16 = 2;
+            const MAX_AGE: u16 = 3;
+            const AGEING_TIME: u16 = 4;
+            const STP_STATE: u16 = 5;
+            const PRIORITY: u16 = 6;
+            const VLAN_FILTERING: u16 = 7;
+            const VLAN_DEFAULT_PVID: u16 = 39;
+            if let Some(b) = &declared.bridge {
+                if let Some(want) = b.vlan_filtering
+                    && data.u8(VLAN_FILTERING).map(|v| v != 0) != Some(want)
+                {
+                    d.update(
+                        "bridge",
+                        KindAttr::U8(VLAN_FILTERING, u8::from(want)),
+                        format!("vlan_filtering -> {}", u8::from(want)),
+                    );
+                }
+                if let Some(want) = b.vlan_default_pvid
+                    && data.u16_ne(VLAN_DEFAULT_PVID) != Some(want)
+                {
+                    d.update(
+                        "bridge",
+                        KindAttr::U16(VLAN_DEFAULT_PVID, want),
+                        format!("vlan_default_pvid -> {want}"),
+                    );
+                }
+                if let Some(want) = b.stp
+                    && data.u32(STP_STATE).map(|v| v != 0) != Some(want)
+                {
+                    d.update(
+                        "bridge",
+                        KindAttr::U32(STP_STATE, u32::from(want)),
+                        format!("stp_state -> {}", u32::from(want)),
+                    );
+                }
+                if let Some(want) = b.priority
+                    && data.u16_ne(PRIORITY) != Some(want)
+                {
+                    d.update("bridge", KindAttr::U16(PRIORITY, want), format!("priority -> {want}"));
+                }
+                for (name, attr, want) in [
+                    ("ageing_time", AGEING_TIME, b.ageing_time),
+                    ("forward_delay", FORWARD_DELAY, b.forward_delay),
+                    ("hello_time", HELLO_TIME, b.hello_time),
+                    ("max_age", MAX_AGE, b.max_age),
+                ] {
+                    let Some(want) = want.map(|t| u32::try_from(t.as_millis() / 10).unwrap_or(u32::MAX))
+                    else {
+                        continue;
+                    };
+                    if data.u32(attr) != Some(want) {
+                        d.update("bridge", KindAttr::U32(attr, want), format!("{name} -> {want}cs"));
+                    }
+                }
+            }
+        }
         DeclaredLinkType::Dummy
         | DeclaredLinkType::Veth { .. }
-        | DeclaredLinkType::Bridge
         | DeclaredLinkType::Ifb
         | DeclaredLinkType::Ovpn
         | DeclaredLinkType::Physical => {}
@@ -2135,6 +2201,52 @@ pub(crate) fn plan(
             .is_none_or(|l| !plan.gone.contains(&l.ifindex()))
     });
     plan
+}
+
+/// How a bridge port differs from its declared options (#516): the changes,
+/// and the config that makes them. Read from the dump's slave data, which a
+/// link enslaved to a bridge carries.
+pub(crate) fn port_changes(
+    declared: &super::types::PortOptions,
+    live: &LinkMessage,
+) -> (Vec<String>, Option<crate::netlink::link::BridgePortConfig>) {
+    use crate::netlink::types::link::brport::*;
+    let data = InfoData::slave_of(live);
+    let is_bridge_port = live.link_info().and_then(|i| i.slave_kind()) == Some("bridge");
+    let mut lines = Vec::new();
+    let mut want = super::types::PortOptions::default();
+    let mut flag = |name: &str, attr: u16, decl: Option<bool>, slot: &mut Option<bool>| {
+        if let Some(on) = decl
+            && (!is_bridge_port || data.u8(attr).map(|v| v != 0) != Some(on))
+        {
+            lines.push(format!("{name} {}", if on { "on" } else { "off" }));
+            *slot = Some(on);
+        }
+    };
+    flag("learning", IFLA_BRPORT_LEARNING, declared.learning, &mut want.learning);
+    flag("flood", IFLA_BRPORT_UNICAST_FLOOD, declared.flood, &mut want.flood);
+    flag("mcast_flood", IFLA_BRPORT_MCAST_FLOOD, declared.mcast_flood, &mut want.mcast_flood);
+    flag("bcast_flood", IFLA_BRPORT_BCAST_FLOOD, declared.bcast_flood, &mut want.bcast_flood);
+    flag("isolated", IFLA_BRPORT_ISOLATED, declared.isolated, &mut want.isolated);
+    flag("neigh_suppress", IFLA_BRPORT_NEIGH_SUPPRESS, declared.neigh_suppress, &mut want.neigh_suppress);
+    flag("hairpin", IFLA_BRPORT_MODE, declared.hairpin, &mut want.hairpin);
+    flag("proxy_arp", IFLA_BRPORT_PROXYARP, declared.proxy_arp, &mut want.proxy_arp);
+    flag("bpdu_guard", IFLA_BRPORT_GUARD, declared.bpdu_guard, &mut want.bpdu_guard);
+    flag("root_block", IFLA_BRPORT_PROTECT, declared.root_block, &mut want.root_block);
+    if let Some(cost) = declared.cost
+        && (!is_bridge_port || data.u32(IFLA_BRPORT_COST) != Some(cost))
+    {
+        lines.push(format!("cost {cost}"));
+        want.cost = Some(cost);
+    }
+    if let Some(prio) = declared.priority
+        && (!is_bridge_port || data.u16_ne(IFLA_BRPORT_PRIORITY) != Some(prio))
+    {
+        lines.push(format!("port priority {prio}"));
+        want.priority = Some(prio);
+    }
+    let config = (!lines.is_empty()).then(|| want.to_config());
+    (lines, config)
 }
 
 #[cfg(test)]
