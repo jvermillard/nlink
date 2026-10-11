@@ -1234,6 +1234,16 @@ All notable changes to this project will be documented in this file.
   kernel error with a VLAN on loopback, since VLAN id 4095 no longer
   reaches the kernel.
 
+- **`purge_address_devs` was dropped by the reconcile loop and by `Stack`
+  (#601).** `ApplyOptions::purge_address_devs` (#470) took effect only
+  through `apply_with_options`. `NetworkConfig::apply_reconcile_with_options`
+  and `Stack`'s pre-flight and dry-run diff built their `DiffOptions` by
+  hand and left it out. So a stray address on a listed, undeclared link
+  stayed, and a dry run did not show its removal. All three paths now go
+  through the new `ApplyOptions::diff_options()`, so a future purge
+  option cannot be dropped the same way. A root test runs a `Stack` dry
+  run and a reconcile with the option set.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it

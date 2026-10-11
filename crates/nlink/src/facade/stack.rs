@@ -160,10 +160,9 @@ impl Stack {
         opts: ApplyOptions,
     ) -> Result<StackApplyReport> {
         // The pre-flight diff sees the same options the network layer
-        // will apply with — `purge_tables` was dropped (#501).
-        let diff_opts = DiffOptions::default()
-            .purge(opts.purge)
-            .purge_tables(opts.purge_tables.iter().copied());
+        // will apply with: `purge_tables` was dropped (#501), and then
+        // `purge_address_devs` (#601).
+        let diff_opts = opts.diff_options();
         if opts.dry_run {
             return Ok(StackApplyReport {
                 dry_run: Some(self.diff_in_with(ns, diff_opts).await?),

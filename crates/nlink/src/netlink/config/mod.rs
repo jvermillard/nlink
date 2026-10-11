@@ -276,9 +276,7 @@ impl NetworkConfig {
         // Cumulative `change_count` across attempts is the sum of
         // each successful apply pass. An empty diff at start of an
         // attempt is treated as "done", short-circuiting.
-        let diff_opts = DiffOptions::default()
-            .purge(apply.purge)
-            .purge_tables(apply.purge_tables.iter().copied());
+        let diff_opts = apply.diff_options();
         let mut attempt: usize = 0;
         let mut cumulative_changes: usize = 0;
         loop {
