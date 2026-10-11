@@ -766,6 +766,34 @@ pub(crate) fn link_config(
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
+            // The declared options, at create (#516).
+            if let Some(b) = &link.bridge {
+                let ms = |t: std::time::Duration| u32::try_from(t.as_millis()).unwrap_or(u32::MAX);
+                if let Some(on) = b.vlan_filtering {
+                    config = config.vlan_filtering(on);
+                }
+                if let Some(vid) = b.vlan_default_pvid {
+                    config = config.vlan_default_pvid(vid);
+                }
+                if let Some(on) = b.stp {
+                    config = config.stp(on);
+                }
+                if let Some(p) = b.priority {
+                    config = config.priority(p);
+                }
+                if let Some(t) = b.ageing_time {
+                    config = config.ageing_time_ms(ms(t));
+                }
+                if let Some(t) = b.forward_delay {
+                    config = config.forward_delay_ms(ms(t));
+                }
+                if let Some(t) = b.hello_time {
+                    config = config.hello_time_ms(ms(t));
+                }
+                if let Some(t) = b.max_age {
+                    config = config.max_age_ms(ms(t));
+                }
+            }
             Box::new(config)
         }
         DeclaredLinkType::Vlan {
@@ -965,6 +993,11 @@ async fn create_link(
     if let Some(master) = link.master.name() {
         enslave(conn, &link.name, master).await?;
     }
+    // A port's options, once it is one (#516).
+    if let Some(port) = &link.port {
+        conn.set_bridge_port(link.name.as_str(), port.to_config())
+            .await?;
+    }
 
     match link.state {
         super::types::LinkState::Up => conn.set_link_up(&link.name).await?,
@@ -1008,6 +1041,10 @@ async fn modify_link(
     }
     if changes.unset_master {
         conn.set_link_nomaster(name).await?;
+    }
+    // A port's options, after it joined its bridge (#516).
+    if let Some(port) = &changes.port_update {
+        conn.set_bridge_port(name, port.clone()).await?;
     }
     // After the master: a bond gives the port it enslaves its own MTU, and a
     // declared one wins.
@@ -1144,6 +1181,7 @@ async fn change_kind_params(
         for attr in &update.attrs {
             match attr {
                 KindAttr::U8(t, v) => b.append_attr_u8(*t, *v),
+                KindAttr::U16(t, v) => b.append_attr_u16(*t, *v),
                 KindAttr::U32(t, v) => b.append_attr_u32(*t, *v),
                 KindAttr::Bytes(t, v) => b.append_attr(*t, v),
                 KindAttr::Ifindex(..) => {}
@@ -1567,6 +1605,8 @@ mod tests {
             master: crate::netlink::config::MasterSpec::Unmanaged,
             address,
             attrs: Default::default(),
+            bridge: None,
+            port: None,
         }
     }
 

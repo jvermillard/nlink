@@ -1438,3 +1438,68 @@ async fn ipv6_devconf_changes_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A bridge's options and a port's changed A→B (#516): VLAN filtering, the
+/// default PVID, STP, priority and ageing on the bridge, changed in place
+/// with `changelink`; learning, flooding, isolation, ARP suppression,
+/// hairpin and cost on the port. `ip -d link` shows each step.
+#[tokio::test]
+async fn bridge_and_port_options_change_in_place() -> nlink::Result<()> {
+    use std::time::Duration;
+    require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    let step = |on: bool| {
+        let (pvid, prio, ageing, cost) = if on { (10, 100, 100, 50) } else { (20, 200, 200, 100) };
+        NetworkConfig::new()
+            .link("br0", move |l| {
+                l.bridge().up().bridge_options(|b| {
+                    b.vlan_filtering(on)
+                        .vlan_default_pvid(pvid)
+                        .stp(on)
+                        .priority(prio)
+                        .ageing_time(Duration::from_secs(ageing))
+                })
+            })
+            .link("d0", move |l| {
+                l.dummy().master("br0").up().port_options(|p| {
+                    p.learning(!on)
+                        .isolated(on)
+                        .neigh_suppress(on)
+                        .hairpin(on)
+                        .flood(!on)
+                        .cost(cost)
+                })
+            })
+    };
+    let ns = TestNamespace::new("tr-bridgeopt")?;
+    crate::common::converge::assert_transition(&ns, &[step(true), step(false)], false, async |i, _conn| {
+        let on = i == 0;
+        let br = &ip_json(&ns, &["-d", "link", "show", "br0"])?[0]["linkinfo"]["info_data"];
+        let port = &ip_json(&ns, &["-d", "link", "show", "d0"])?[0]["linkinfo"]["info_slave_data"];
+        let (pvid, prio, ageing, cost) = if on { (10, 100, 10000, 50) } else { (20, 200, 20000, 100) };
+        let have = (
+            br["vlan_filtering"].as_u64(),
+            br["vlan_default_pvid"].as_u64(),
+            br["stp_state"].as_u64().map(|s| s != 0),
+            br["priority"].as_u64(),
+            br["ageing_time"].as_u64(),
+            (port["learning"].as_bool(), port["isolated"].as_bool(), port["neigh_suppress"].as_bool()),
+            (port["hairpin"].as_bool(), port["flood"].as_bool(), port["cost"].as_u64()),
+        );
+        let want = (
+            Some(u64::from(on)),
+            Some(pvid),
+            Some(on),
+            Some(prio),
+            Some(ageing),
+            (Some(!on), Some(on), Some(on)),
+            (Some(on), Some(!on), Some(cost)),
+        );
+        if have != want {
+            return Err(format!("step {}: want {want:?}, have {have:?}", i + 1));
+        }
+        Ok(())
+    })
+    .await
+}

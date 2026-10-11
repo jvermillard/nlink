@@ -809,6 +809,35 @@ All notable changes to this project will be documented in this file.
     creates. It reads them back from `/proc/sys`, and fails with the
     write skipped.
 
+- **Declared bridge and bridge-port options (#516, row 6, first part).**
+  A link's `bridge` section (`LinkBuilder::bridge_options`) declares:
+  - VLAN filtering and the default PVID;
+  - STP and the bridge priority;
+  - the ageing time, forward delay, hello time and max age.
+
+  It is a separate section, so `"link-type": "bridge"` stays a bare
+  string. A link's `port` section (`port_options`) declares, for a bridge
+  port:
+  - learning;
+  - unicast, multicast and broadcast flooding;
+  - isolation and `neigh_suppress`;
+  - hairpin, proxy ARP, BPDU guard and root block;
+  - cost and priority.
+
+  How they apply:
+  - **Bridge options** go in at create. On a live bridge they are compared
+    with the dump's `IFLA_INFO_DATA` and changed in place with
+    `changelink`, the timers in the kernel's 1/100 s.
+  - **Port options** are read from the dump's slave data and set with
+    `set_bridge_port` after the link joins its bridge, at create or later.
+  - **Validation.** Bridge options on a link that isn't a bridge, and port
+    options on a link with no master or one that isn't a bridge, are
+    validation errors. A misspelled option in a document is refused.
+  - **Test.** A transition test changes both sides A→B, reads them back
+    through `ip -d -j link` on iproute2 6.15 and 6.1, and fails when they
+    aren't compared.
+  - **Still to do.** Port VLANs are the second part of row 6.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

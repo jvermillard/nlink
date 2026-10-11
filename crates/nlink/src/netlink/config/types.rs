@@ -185,6 +185,27 @@ impl NetworkConfig {
                     ));
                 }
             }
+            // Port options need a bridge master (#516).
+            if l.port.is_some() {
+                let master = l.master.name();
+                let master_kind = master.and_then(|m| self.links.iter().find(|x| x.name == m));
+                match (master, master_kind) {
+                    (None, _) => errors.push(ValidationErrorInfo::new(
+                        at(),
+                        "port options without a master: a port is a bridge's",
+                    )),
+                    (Some(m), Some(x)) if !matches!(x.link_type, DeclaredLinkType::Bridge) => {
+                        errors.push(ValidationErrorInfo::new(
+                            at(),
+                            format!("port options, but its master {m} is not a bridge"),
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+            if l.bridge.is_some() && !matches!(l.link_type, DeclaredLinkType::Bridge) {
+                errors.push(ValidationErrorInfo::new(at(), "bridge options on a link that is not a bridge"));
+            }
             for name in l.attrs.ipv4_conf.keys() {
                 if crate::netlink::devconf::Ipv4Devconf::from_name(name).is_none() {
                     errors.push(ValidationErrorInfo::new(
@@ -763,6 +784,199 @@ pub struct DeclaredLink {
     /// protodown and alternative names (#516). Unset ones are left alone.
     #[cfg_attr(feature = "serde", serde(flatten, default))]
     pub(crate) attrs: LinkAttrs,
+    /// A bridge's own options (#516): VLAN filtering, STP, timers.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) bridge: Option<BridgeOptions>,
+    /// A bridge port's options (#516): learning, flooding, isolation, …
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) port: Option<PortOptions>,
+}
+
+/// A bridge's options: a link's `bridge` section (#516). Each one unset is
+/// the kernel's and not compared. Build with [`LinkBuilder::bridge_options`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BridgeOptions {
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) vlan_filtering: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) vlan_default_pvid: Option<u16>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) stp: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) priority: Option<u16>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none", with = "crate::util::serde_units::option_duration")
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub(crate) ageing_time: Option<std::time::Duration>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none", with = "crate::util::serde_units::option_duration")
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub(crate) forward_delay: Option<std::time::Duration>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none", with = "crate::util::serde_units::option_duration")
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub(crate) hello_time: Option<std::time::Duration>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none", with = "crate::util::serde_units::option_duration")
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub(crate) max_age: Option<std::time::Duration>,
+}
+
+impl BridgeOptions {
+    /// VLAN filtering on or off.
+    pub fn vlan_filtering(mut self, on: bool) -> Self {
+        self.vlan_filtering = Some(on);
+        self
+    }
+    /// The PVID a port joining gets (`vlan_default_pvid`; 0 for none).
+    pub fn vlan_default_pvid(mut self, vid: u16) -> Self {
+        self.vlan_default_pvid = Some(vid);
+        self
+    }
+    /// The spanning tree on or off.
+    pub fn stp(mut self, on: bool) -> Self {
+        self.stp = Some(on);
+        self
+    }
+    /// The bridge's STP priority.
+    pub fn priority(mut self, priority: u16) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+    /// How long an FDB entry lives unrefreshed. The kernel keeps 1/100 s.
+    pub fn ageing_time(mut self, t: std::time::Duration) -> Self {
+        self.ageing_time = Some(t);
+        self
+    }
+    /// The STP forward delay.
+    pub fn forward_delay(mut self, t: std::time::Duration) -> Self {
+        self.forward_delay = Some(t);
+        self
+    }
+    /// The STP hello time.
+    pub fn hello_time(mut self, t: std::time::Duration) -> Self {
+        self.hello_time = Some(t);
+        self
+    }
+    /// The STP max age.
+    pub fn max_age(mut self, t: std::time::Duration) -> Self {
+        self.max_age = Some(t);
+        self
+    }
+}
+
+/// A bridge port's options: a link's `port` section (#516), for a link
+/// whose master is a bridge. Each one unset is the kernel's and not
+/// compared. Build with [`LinkBuilder::port_options`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PortOptions {
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) learning: Option<bool>,
+    /// Unknown-unicast flooding (`flood`).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) flood: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) mcast_flood: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) bcast_flood: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) isolated: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) neigh_suppress: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) hairpin: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) proxy_arp: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) bpdu_guard: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) root_block: Option<bool>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) cost: Option<u32>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) priority: Option<u16>,
+}
+
+macro_rules! port_bool {
+    ($($(#[$m:meta])* $name:ident),*) => {$(
+        $(#[$m])*
+        pub fn $name(mut self, on: bool) -> Self {
+            self.$name = Some(on);
+            self
+        }
+    )*};
+}
+
+impl PortOptions {
+    port_bool!(
+        /// MAC learning.
+        learning,
+        /// Unknown-unicast flooding.
+        flood,
+        /// Multicast flooding.
+        mcast_flood,
+        /// Broadcast flooding.
+        bcast_flood,
+        /// Isolated: talks only to non-isolated ports.
+        isolated,
+        /// ARP/ND suppression.
+        neigh_suppress,
+        /// Hairpin: frames may leave the port they came in.
+        hairpin,
+        /// Proxy ARP.
+        proxy_arp,
+        /// BPDU guard.
+        bpdu_guard,
+        /// Root block.
+        root_block
+    );
+
+    /// The STP path cost.
+    pub fn cost(mut self, cost: u32) -> Self {
+        self.cost = Some(cost);
+        self
+    }
+
+    /// The STP port priority.
+    pub fn priority(mut self, priority: u16) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    /// The imperative config that sets these.
+    pub(crate) fn to_config(&self) -> crate::netlink::link::BridgePortConfig {
+        crate::netlink::link::BridgePortConfig {
+            learning: self.learning,
+            unicast_flood: self.flood,
+            mcast_flood: self.mcast_flood,
+            bcast_flood: self.bcast_flood,
+            isolated: self.isolated,
+            neigh_suppress: self.neigh_suppress,
+            hairpin: self.hairpin,
+            proxy_arp: self.proxy_arp,
+            bpdu_guard: self.bpdu_guard,
+            root_block: self.root_block,
+            cost: self.cost,
+            priority: self.priority,
+            ..Default::default()
+        }
+    }
 }
 
 /// What a link carries besides kind, state, MTU, master and MAC (#516).
@@ -1157,6 +1371,8 @@ pub struct LinkBuilder {
     master: MasterSpec,
     address: Option<[u8; 6]>,
     attrs: LinkAttrs,
+    bridge: Option<BridgeOptions>,
+    port: Option<PortOptions>,
     /// Setters called for another kind, which did nothing. `link` moves
     /// them into the config, where `validate()` reports them (#518).
     errors: Vec<String>,
@@ -1172,6 +1388,8 @@ impl LinkBuilder {
             master: MasterSpec::Unmanaged,
             address: None,
             attrs: LinkAttrs::default(),
+            bridge: None,
+            port: None,
             errors: Vec::new(),
         }
     }
@@ -1187,6 +1405,8 @@ impl LinkBuilder {
             master: link.master,
             address: link.address,
             attrs: link.attrs,
+            bridge: link.bridge,
+            port: link.port,
             errors: Vec::new(),
         }
     }
@@ -1711,7 +1931,34 @@ impl LinkBuilder {
             master: self.master,
             address: self.address,
             attrs: self.attrs,
+            bridge: self.bridge,
+            port: self.port,
         }
+    }
+
+    /// A bridge's options (#516). Only for [`bridge`](Self::bridge) links.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use nlink::netlink::config::NetworkConfig;
+    /// let cfg = NetworkConfig::new()
+    ///     .link("br0", |l| l.bridge().bridge_options(|b| b.vlan_filtering(true).stp(true)))
+    ///     .link("swp1", |l| l.master("br0").port_options(|p| p.learning(false).isolated(true)));
+    /// cfg.validate().unwrap();
+    /// ```
+    pub fn bridge_options(mut self, f: impl FnOnce(BridgeOptions) -> BridgeOptions) -> Self {
+        if !matches!(self.link_type, DeclaredLinkType::Bridge) {
+            self.errors
+                .push("bridge_options set on a link that is not a bridge".into());
+        }
+        self.bridge = Some(f(self.bridge.take().unwrap_or_default()));
+        self
+    }
+
+    /// A bridge port's options (#516), for a link whose master is a bridge.
+    pub fn port_options(mut self, f: impl FnOnce(PortOptions) -> PortOptions) -> Self {
+        self.port = Some(f(self.port.take().unwrap_or_default()));
+        self
     }
 }
 
@@ -4276,6 +4523,57 @@ mod serde_roundtrip_tests {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(says), "{says}: {err}");
         }
+    }
+
+    #[test]
+    fn bridge_and_port_options_roundtrip_and_validate() {
+        use std::time::Duration;
+        let cfg = NetworkConfig::new()
+            .link("br0", |l| {
+                l.bridge().bridge_options(|b| {
+                    b.vlan_filtering(true)
+                        .vlan_default_pvid(10)
+                        .stp(true)
+                        .ageing_time(Duration::from_secs(100))
+                })
+            })
+            .link("d0", |l| {
+                l.dummy()
+                    .master("br0")
+                    .port_options(|p| p.learning(false).isolated(true).cost(50))
+            });
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""link-type":"bridge""#,
+            r#""bridge":{"vlan-filtering":true,"vlan-default-pvid":10,"stp":true,"ageing-time":"100s"}"#,
+            r#""port":{"learning":false,"isolated":true,"cost":50}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        for (cfg, says) in [
+            (
+                NetworkConfig::new().link("d0", |l| l.dummy().bridge_options(|b| b.stp(true))),
+                "not a bridge",
+            ),
+            (
+                NetworkConfig::new().link("d0", |l| l.dummy().port_options(|p| p.learning(false))),
+                "port options without a master",
+            ),
+            (
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond())
+                    .link("d0", |l| l.dummy().master("bond0").port_options(|p| p.learning(false))),
+                "its master bond0 is not a bridge",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        let doc = r#"{"links":[{"name":"br0","link-type":"bridge","bridge":{"stp-on":true}}]}"#;
+        let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();
+        assert!(err.contains("stp-on"), "{err}");
     }
 
     #[test]
