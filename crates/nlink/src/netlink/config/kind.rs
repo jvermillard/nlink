@@ -76,6 +76,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use super::diff::{DiffOptions, purgeable_address, purgeable_route};
 use super::types::{DeclaredLink, DeclaredLinkType, NetworkConfig, QdiscParent};
 use crate::netlink::{
     attr::AttrIter,
@@ -880,6 +881,7 @@ fn undeclarable_on(
 /// work out what a recreate takes with it.
 pub(crate) fn plan(
     config: &NetworkConfig,
+    opts: &DiffOptions,
     links: &[LinkMessage],
     addresses: &[AddressMessage],
     routes: &[RouteMessage],
@@ -905,6 +907,15 @@ pub(crate) fn plan(
     let nh_devs = nexthop_devices(&extras.nexthops);
     let declared: HashMap<&str, &DeclaredLink> =
         config.links.iter().map(|l| (l.name.as_str(), l)).collect();
+    // What a purging apply deletes anyway does not hold a recreate back:
+    // refusing over it made an edit that changes a VLAN id and drops one of
+    // its addresses take two applies (#471).
+    let address_scope = opts.purge_address_scope(config);
+    let purged_address = |name: &str, a: &AddressMessage| {
+        opts.purge && address_scope.contains(name) && purgeable_address(a)
+    };
+    let route_tables = opts.purge_table_scope(config);
+    let purged_route = |r: &RouteMessage| opts.purge && purgeable_route(r, &route_tables);
 
     let mut seeds = Vec::new();
     for link in &config.links {
@@ -978,6 +989,17 @@ pub(crate) fn plan(
         let mut blocked_by = refuse;
         for (l, lower) in &closure {
             let name = name_of(l.ifindex());
+            // A veth's (or vxcan's) peer in another namespace is not in the
+            // closure — nothing here can declare it — and the kernel
+            // deletes it with the link all the same (#471).
+            if matches!(l.kind(), Some("veth" | "vxcan"))
+                && let Some(netnsid) = l.link_netnsid
+            {
+                blocked_by.push(format!(
+                    "the peer of {name}, in another namespace (netnsid {netnsid}), which the \
+                     kernel deletes with it"
+                ));
+            }
             if let Some(lower) = lower {
                 let kind = l.kind().unwrap_or("link");
                 match declared.get(name) {
@@ -995,7 +1017,7 @@ pub(crate) fn plan(
             }
             for a in addresses.iter().filter(|a| a.ifindex() == l.ifindex()) {
                 let Some(addr) = a.address else { continue };
-                if a.scope() != Scope::Universe {
+                if a.scope() != Scope::Universe || purged_address(name, a) {
                     continue;
                 }
                 let is_declared = config.addresses.iter().any(|d| {
@@ -1006,7 +1028,9 @@ pub(crate) fn plan(
                 }
             }
             for r in routes {
-                if r.protocol() == RouteProtocol::Kernel || declared_routes.contains(&route_key(r))
+                if r.protocol() == RouteProtocol::Kernel
+                    || declared_routes.contains(&route_key(r))
+                    || purged_route(r)
                 {
                     continue;
                 }
@@ -1107,7 +1131,7 @@ pub(crate) fn plan(
             let name = name_of(ifindex);
             for a in addresses.iter().filter(|a| a.ifindex() == ifindex) {
                 let Some(addr) = a.address.filter(|a| a.is_ipv6()) else { continue };
-                if a.scope() != Scope::Universe {
+                if a.scope() != Scope::Universe || purged_address(name, a) {
                     continue;
                 }
                 let is_declared = config.addresses.iter().any(|d| {
@@ -1121,6 +1145,7 @@ pub(crate) fn plan(
                 if r.protocol() == RouteProtocol::Kernel
                     || declared_routes.contains(&route_key(r))
                     || old_tables.contains(&r.table_id())
+                    || purged_route(r)
                 {
                     continue;
                 }

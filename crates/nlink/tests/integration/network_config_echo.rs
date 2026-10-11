@@ -42,6 +42,90 @@ fn dummy_up(name: &str) -> NetworkConfig {
 // Links
 // ============================================================================
 
+/// A purging apply does not refuse a recreate over what it deletes anyway:
+/// an address on the link, or a route through it, that left the config.
+/// Changing a VLAN id and dropping one of its addresses took two applies
+/// (#471).
+#[tokio::test]
+async fn a_purging_recreate_is_not_held_back_by_what_the_purge_removes() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let at = |id: u16, more: bool| {
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v1", move |l| l.vlan("d0", id).up())
+            .address("v1", "10.5.0.1/24")
+            .unwrap();
+        if !more {
+            return cfg;
+        }
+        cfg.address("v1", "10.5.0.2/24")
+            .unwrap()
+            .address("v1", "fd00:5::2/64")
+            .unwrap()
+            .route("10.55.0.0/16", |r| r.via("10.5.0.254"))
+            .unwrap()
+    };
+    let cases = vec![
+        case("vlan-id-and-drop", vec![at(10, true), at(20, false)])
+            .purging()
+            .check(|ns| {
+                let link = &ip_json(ns, &["-d", "link", "show", "dev", "v1"])?[0];
+                let id = link["linkinfo"]["info_data"]["id"].as_u64();
+                let held = global_addrs(ns, "v1")?;
+                if id != Some(20) || held != ["10.5.0.1/24"] {
+                    return Err(format!("v1: vlan id {id:?}, addresses {held:?}"));
+                }
+                if !routes_at(ns, "-4", "10.55.0.0/16")?.is_empty() {
+                    return Err("10.55.0.0/16 survived".to_string());
+                }
+                Ok(())
+            }),
+    ];
+    assert_converges("nce-recreate-purge", cases).await
+}
+
+/// A kind change on a veth whose peer is in another namespace is refused.
+/// The recreate deletes the peer, which no declaration here can describe,
+/// and it was not in the closure, so it went without a word (#471).
+#[tokio::test]
+async fn a_recreate_that_would_delete_a_peer_in_another_namespace_is_refused() -> nlink::Result<()>
+{
+    require_root!();
+    nlink::require_modules!("veth", "dummy");
+
+    let ns = TestNamespace::new("nce-xns-a")?;
+    let other = TestNamespace::new("nce-xns-b")?;
+    ns.exec(
+        "ip",
+        &[
+            "link",
+            "add",
+            "v0",
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "v1",
+            "netns",
+            other.name(),
+        ],
+    )?;
+    let conn = ns.connection()?;
+    let cfg = NetworkConfig::new().link("v0", |l| l.dummy());
+    let shown = cfg.diff(&conn).await?.to_string();
+    assert!(
+        shown.contains("the peer of v0, in another namespace"),
+        "{shown}"
+    );
+    let err = cfg.apply(&conn).await.expect_err("the recreate is refused");
+    assert!(err.is_not_supported(), "{err}");
+    let peer = ip_json(&other, &["link", "show", "dev", "v1"]).expect("the peer was deleted");
+    assert_eq!(peer[0]["link_type"], "ether");
+    Ok(())
+}
+
 /// Link modifications go lower device first, and a new link's lower device
 /// gets its MTU before the create. Declaration order decided it, so raising
 /// a parent and a VLAN together was ERANGE, creating a VLAN at an MTU its
