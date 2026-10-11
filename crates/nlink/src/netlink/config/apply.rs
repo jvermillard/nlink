@@ -85,6 +85,9 @@ pub struct ApplyOptions {
     /// [`Error::NotConverged`](crate::Error::NotConverged) if anything is
     /// left (#518). Off by default; ignored on a dry run.
     pub verify: bool,
+    /// The config applied before this one: what it declared and this one
+    /// does not is removed. See [`DiffOptions::previous`] (#512).
+    pub previous: Option<std::sync::Arc<super::NetworkConfig>>,
 }
 
 impl ApplyOptions {
@@ -134,6 +137,16 @@ impl ApplyOptions {
         self
     }
 
+    /// Remove what `previous` declared and this config no longer does;
+    /// see [`DiffOptions::previous`] (#512).
+    pub fn with_previous(
+        mut self,
+        previous: impl Into<std::sync::Arc<super::NetworkConfig>>,
+    ) -> Self {
+        self.previous = Some(previous.into());
+        self
+    }
+
     /// Diff again after the apply and fail if anything is left; see
     /// [`Self::verify`].
     pub fn with_verify(mut self, on: bool) -> Self {
@@ -147,10 +160,14 @@ impl ApplyOptions {
     /// `Stack` did with [`purge_address_devs`](Self::purge_address_devs)
     /// (#601).
     pub fn diff_options(&self) -> DiffOptions {
-        DiffOptions::default()
+        let opts = DiffOptions::default()
             .purge(self.purge)
             .purge_tables(self.purge_tables.iter().copied())
-            .purge_address_devs(self.purge_address_devs.iter().cloned())
+            .purge_address_devs(self.purge_address_devs.iter().cloned());
+        match &self.previous {
+            Some(previous) => opts.previous(previous.clone()),
+            None => opts,
+        }
     }
 }
 
@@ -579,6 +596,41 @@ pub async fn apply_diff(
                     } else {
                         return Err(e);
                     }
+                }
+            }
+        }
+    }
+
+    // 5. Qdiscs the previous config declared and this one does not (#512):
+    //    the kernel puts its default back.
+    for qdisc in &diff.qdiscs_to_remove {
+        let op = format!("delete qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev);
+        if options.dry_run {
+            result.summary.push(format!("Would {op}"));
+            result.changes_made += 1;
+            continue;
+        }
+        let parent = match qdisc.effective_parent() {
+            QdiscParent::Root => crate::TcHandle::ROOT,
+            QdiscParent::Ingress => crate::TcHandle::INGRESS,
+        };
+        match conn.del_qdisc_if_exists(qdisc.dev.as_str(), parent).await {
+            Ok(_) => {
+                result.summary.push(format!(
+                    "Deleted qdisc {} on {}",
+                    qdisc.qdisc_type.kind(),
+                    qdisc.dev
+                ));
+                result.changes_made += 1;
+            }
+            Err(e) => {
+                if options.continue_on_error {
+                    result.errors.push(ApplyError {
+                        operation: op,
+                        error: e,
+                    });
+                } else {
+                    return Err(e);
                 }
             }
         }

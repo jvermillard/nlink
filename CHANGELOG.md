@@ -133,6 +133,22 @@ All notable changes to this project will be documented in this file.
     a change the kernel did not take as expected, or a concurrent
     change. `ErrorKind::NotConverged` goes with it.
 
+- **Purge by the previous config (#512, part 1).**
+  `DiffOptions::previous(cfg)` and `ApplyOptions::with_previous(cfg)`
+  take the config applied before. The diff then removes exactly what
+  that config declared and this one does not, while the kernel still
+  has it, and nothing undeclared:
+  - its addresses;
+  - its routes, in whatever table they were. A route moved from table
+    100 to table 200 no longer leaves its old copy, which `purge` could
+    not reach once nothing declared into table 100;
+  - its root and ingress qdiscs, through the new
+    `ConfigDiff::qdiscs_to_remove`. The apply deletes them, and the
+    kernel puts its default back.
+
+  It works with or without `purge`; with both, the diff removes the
+  union. Deleting links the previous config declared is part 2.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
