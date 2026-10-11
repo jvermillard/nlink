@@ -13,6 +13,7 @@ use super::{
     },
 };
 pub use crate::netlink::reconcile::ExecOptions;
+use super::plan::{Plan, Step};
 use crate::netlink::{
     addr::{Ipv4Address, Ipv6Address},
     connection::Connection,
@@ -198,12 +199,38 @@ pub struct ApplyResult {
     /// What the apply's recreates and removals destroyed that the caller
     /// owns or the recreate policy let go: what to put back (#513).
     pub destroyed: Vec<super::Blocker>,
+    /// Each step that changed something, in order, with its inverse where
+    /// one can be known (#518). Empty for a dry run.
+    pub journal: Vec<super::plan::JournalEntry>,
 }
 
 impl ApplyResult {
     /// Check if the application was fully successful.
     pub fn is_success(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    /// The plan that undoes this apply as far as it can be undone (#518):
+    /// the [journal](Self::journal)'s inverses, last step first. A step
+    /// with no inverse — a deleted link, a kind change, a replaced qdisc, a
+    /// TC tree — is left out; [`irreversible`](Self::irreversible) lists
+    /// them. Routes come back with protocol `boot`.
+    pub fn undo(&self) -> Plan {
+        Plan::new(
+            self.journal
+                .iter()
+                .rev()
+                .filter_map(|entry| entry.inverse.clone())
+                .collect(),
+        )
+    }
+
+    /// The steps [`undo`](Self::undo) cannot put back.
+    pub fn irreversible(&self) -> impl Iterator<Item = &Step> {
+        self.journal
+            .iter()
+            .filter(|entry| entry.inverse.is_none())
+            .map(|entry| &entry.step)
     }
 
     /// Get a human-readable summary.
@@ -286,630 +313,399 @@ async fn apply_steps(
     conn: &Connection<Route>,
     options: ExecOptions,
 ) -> Result<ApplyResult> {
-    let mut result = ApplyResult::default();
-
     // If no changes needed, return early
     if diff.is_empty() {
-        return Ok(result);
+        return Ok(ApplyResult::default());
     }
+    execute_plan(&diff.plan(), conn, options).await
+}
 
-    // Apply changes in the correct order:
-    // 0. Delete links to be recreated (a kind parameter the kernel cannot
-    //    change in place)
-    // 1. Create new links (so they exist for addresses/routes)
-    // 2. Modify existing links (state, MTU, master)
-    // 3. Add addresses
-    // 4. Add routes
-    // 5. Configure qdiscs, then the TC trees under them
-    // 6. Remove old resources (if purge enabled)
+impl Plan {
+    /// Run the steps, in order (#518). What
+    /// [`ConfigDiff::apply`](super::ConfigDiff::apply) runs, and how a plan
+    /// from [`ApplyResult::undo`] is applied.
+    ///
+    /// A refusal step fails the apply, or with
+    /// [`ExecOptions::continue_on_error`] is recorded and skipped, as a
+    /// failed step is. `verify` is not done here: a plan does not know the
+    /// config it came from.
+    pub async fn apply(
+        &self,
+        conn: &Connection<Route>,
+        options: impl Into<ExecOptions>,
+    ) -> Result<ApplyResult> {
+        execute_plan(self, conn, options.into()).await
+    }
+}
 
-    // A declared link that does not exist and that nothing in this apply
-    // creates: a typo, or a device not there yet (#475).
-    for name in &diff.links_missing {
-        let error = Error::interface_not_found(name.as_str());
-        if options.continue_on_error {
-            result.errors.push(ApplyError {
-                operation: format!("link {name}"),
+/// What running one step did.
+enum Outcome {
+    /// It changed the kernel: a summary line, and how many changes.
+    Changed(String, usize),
+    /// It found the state already right: an optional summary line.
+    Unchanged(Option<String>),
+}
+
+async fn execute_plan(plan: &Plan, conn: &Connection<Route>, options: ExecOptions) -> Result<ApplyResult> {
+    let mut result = ApplyResult::default();
+    for step in &plan.steps {
+        let outcome = if options.dry_run {
+            dry_run_step(step, &mut result)
+        } else {
+            // Boxed: one future per step kind, nested inline, made the
+            // layout of a caller's future overflow rustc's query depth
+            // (as #310 and #315 did).
+            Box::pin(run_step(step, plan, conn, &mut result)).await
+        };
+        match outcome {
+            Ok(Outcome::Changed(summary, n)) => {
+                result.summary.push(summary);
+                if !step.is_consequence() {
+                    result.changes_made += n;
+                }
+                if !options.dry_run {
+                    result.journal.push(super::plan::JournalEntry {
+                        step: step.clone(),
+                        inverse: step.inverse(),
+                    });
+                }
+            }
+            Ok(Outcome::Unchanged(summary)) => result.summary.extend(summary),
+            Err(error) if options.continue_on_error => result.errors.push(ApplyError {
+                operation: step_operation(step),
                 error,
-            });
-            continue;
+            }),
+            Err(error) => return Err(error),
         }
-        return Err(error);
     }
+    Ok(result)
+}
 
-    // A declared route whose place holds a route the config does not own
-    // — the kernel's connected route, an RA, DHCP or routing daemon's —
-    // would replace it (#469). Refused before anything changes.
-    for conflict in &diff.routes_refused {
-        let route = &conflict.route;
-        let error = Error::NotSupported(format!(
+/// The step as `ApplyError::operation` names it.
+fn step_operation(step: &Step) -> String {
+    match step {
+        Step::MissingLink { name } => format!("link {name}"),
+        Step::RefuseRoute(c) => format!("add route {}/{}", c.route.destination, c.route.prefix_len),
+        Step::RefuseRemoval(r) => format!("delete link {}", r.name),
+        Step::RefuseRecreate(r) => format!("recreate link {}", r.name),
+        Step::DeleteForRecreate(r) => {
+            format!("delete link {} to recreate it ({})", r.name, r.reason)
+        }
+        Step::RemoveLink(r) => format!("delete link {} ({})", r.name, r.link_kind),
+        Step::DeleteLink { name } => format!("delete link {name}"),
+        Step::RaiseMtuFirst { link, mtu } => format!("set link {link} mtu={mtu}"),
+        Step::CreateLink(link) => format!("create link {}", link.name),
+        Step::ModifyLink { name, changes, .. } => {
+            format!("modify link {} ({})", name, changes.summary())
+        }
+        Step::PinBridgeMtu { bridge, mtu } => format!("restore bridge {bridge} mtu={mtu}"),
+        Step::HoldVlanDown { vlan } => format!("take VLAN {vlan} down"),
+        Step::AddAddress(a) => format!("add address {}/{} on {}", a.address, a.prefix_len, a.dev),
+        Step::DeleteAddress { address: a, .. } => {
+            format!("remove address {}/{} on {}", a.address, a.prefix_len, a.dev)
+        }
+        Step::ReplaceRoute { after, .. } => {
+            format!("add route {}/{}", after.destination, after.prefix_len)
+        }
+        Step::DeleteRoute(r) => format!("remove route {}/{}", r.destination, r.prefix_len),
+        Step::DeleteQdisc(q) => format!("delete qdisc {} on {}", q.qdisc_type.kind(), q.dev),
+        Step::ReplaceQdisc(q) => format!("replace qdisc {} on {}", q.qdisc_type.kind(), q.dev),
+        Step::AddQdisc(q) => format!("add qdisc {} on {}", q.qdisc_type.kind(), q.dev),
+        Step::TcTree { dev, .. } => format!("tc tree on {dev}"),
+    }
+}
+
+/// The error a refusal step fails with.
+fn refusal(step: &Step) -> Option<Error> {
+    Some(match step {
+        // A declared link that does not exist and that nothing in this
+        // apply creates: a typo, or a device not there yet (#475).
+        Step::MissingLink { name } => Error::interface_not_found(name.as_str()),
+        // A declared route whose place holds a route the config does not
+        // own — the kernel's connected route, an RA, DHCP or routing
+        // daemon's — would replace it (#469).
+        Step::RefuseRoute(conflict) => Error::NotSupported(format!(
             "route {}/{}: adding it would replace {}, which this config does not own. Give \
              the declared route another metric, or remove the other route, and apply again.",
-            route.destination, route.prefix_len, conflict.held_by
-        ));
-        if options.continue_on_error {
-            result.errors.push(ApplyError {
-                operation: format!("add route {}/{}", route.destination, route.prefix_len),
-                error,
-            });
-            continue;
-        }
-        return Err(error);
-    }
-
-    // A removal that would destroy what no config declares is refused
-    // before anything changes, as a recreate is (#512).
-    for removal in diff.links_to_remove.iter().filter(|r| r.is_refused()) {
-        let blockers: Vec<String> = removal.blocked_by.iter().map(ToString::to_string).collect();
-        let error = Error::NotSupported(format!(
+            conflict.route.destination, conflict.route.prefix_len, conflict.held_by
+        )),
+        // A removal that would destroy what no config declares (#512).
+        Step::RefuseRemoval(removal) => Error::NotSupported(format!(
             "link {}: the previous config declared it and this one does not, but deleting it \
              would destroy what no config declares: {}. Declare them, or remove them, and \
              apply again.",
             removal.name,
-            blockers.join(", ")
-        ));
-        if options.continue_on_error {
-            result.errors.push(ApplyError {
-                operation: format!("delete link {}", removal.name),
-                error,
-            });
-            continue;
-        }
+            removal
+                .blocked_by
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        // A recreate that would destroy what the config does not declare.
+        Step::RefuseRecreate(recreate) => Error::NotSupported(format!(
+            "link {}: {} cannot be changed on the live link, and recreating it would \
+             destroy what this config does not declare: {}. Declare them, or remove them \
+             (or the link), and apply again.",
+            recreate.name,
+            recreate.reason,
+            recreate
+                .blocked_by
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        _ => return None,
+    })
+}
+
+/// What a step would do: refusals fail as they would for real, a kernel
+/// side effect is not shown, everything else is a "Would …" line.
+fn dry_run_step(step: &Step, result: &mut ApplyResult) -> Result<Outcome> {
+    if let Some(error) = refusal(step) {
         return Err(error);
     }
-
-    // 0. Delete the links to be recreated. A refused recreate — one that
-    //    would destroy what the config does not declare — fails here,
-    //    before anything has changed. The links the kernel deletes along
-    //    with a recreated one are listed too, after it, and are already gone
-    //    by the time they come up.
-    for recreate in &diff.links_to_recreate {
-        if recreate.is_refused() {
-            let error = Error::NotSupported(format!(
-                "link {}: {} cannot be changed on the live link, and recreating it would \
-                 destroy what this config does not declare: {}. Declare them, or remove them \
-                 (or the link), and apply again.",
-                recreate.name,
-                recreate.reason,
-                recreate
-                    .blocked_by
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            if options.continue_on_error {
-                result.errors.push(ApplyError {
-                    operation: format!("recreate link {}", recreate.name),
-                    error,
-                });
-                continue;
-            }
-            return Err(error);
-        }
-        let op = format!("delete link {} to recreate it ({})", recreate.name, recreate.reason);
-        if options.dry_run {
-            result.summary.push(format!("Would {op}"));
-            result.changes_made += 1;
+    match step {
+        Step::DeleteForRecreate(recreate) => {
             result.recreated.push(recreate.clone());
             result.destroyed.extend(recreate.destroys.iter().cloned());
-            continue;
         }
-        match conn.del_link_if_exists(recreate.name.as_str()).await {
-            Ok(true) => {
-                result.summary.push(format!(
+        Step::RemoveLink(removal) => result.destroyed.extend(removal.destroys.iter().cloned()),
+        _ => {}
+    }
+    Ok(match step {
+        _ if step.is_consequence() => Outcome::Unchanged(None),
+        Step::TcTree { planned, .. } => {
+            let lines: Vec<String> = planned.iter().map(|l| format!("Would {l}")).collect();
+            if lines.is_empty() {
+                Outcome::Unchanged(None)
+            } else {
+                Outcome::Changed(lines.join("\n"), lines.len())
+            }
+        }
+        _ => Outcome::Changed(format!("Would {}", step_operation(step)), 1),
+    })
+}
+
+/// Run one step against the kernel.
+async fn run_step(
+    step: &Step,
+    plan: &Plan,
+    conn: &Connection<Route>,
+    result: &mut ApplyResult,
+) -> Result<Outcome> {
+    if let Some(error) = refusal(step) {
+        return Err(error);
+    }
+    Ok(match step {
+        Step::MissingLink { .. }
+        | Step::RefuseRoute(_)
+        | Step::RefuseRemoval(_)
+        | Step::RefuseRecreate(_) => unreachable!("a refusal fails above"),
+        // A link the kernel deleted along with a recreated one is already
+        // gone when its turn comes.
+        Step::DeleteForRecreate(recreate) => {
+            let deleted = conn.del_link_if_exists(recreate.name.as_str()).await?;
+            result.recreated.push(recreate.clone());
+            if !deleted {
+                return Ok(Outcome::Unchanged(None));
+            }
+            result.destroyed.extend(recreate.destroys.iter().cloned());
+            Outcome::Changed(
+                format!(
                     "Deleted link {} to recreate it ({})",
                     recreate.name, recreate.reason
-                ));
-                result.changes_made += 1;
-                result.recreated.push(recreate.clone());
-                result.destroyed.extend(recreate.destroys.iter().cloned());
-            }
-            // Deleted with the link it is stacked on.
-            Ok(false) => result.recreated.push(recreate.clone()),
-            Err(e) => {
-                if options.continue_on_error {
-                    result.errors.push(ApplyError {
-                        operation: op,
-                        error: e,
-                    });
-                } else {
-                    return Err(e);
-                }
-            }
+                ),
+                1,
+            )
         }
-    }
-
-    // 0b. Delete the links the previous config declared and this one does
-    //     not, before anything is created: a replacement can conflict with
-    //     them (the same VLAN id on the same parent, the same VNI and port).
-    //     The links stacked on one are listed after it, and gone with it by
-    //     the time they come up (#512).
-    for removal in diff.links_to_remove.iter().filter(|r| !r.is_refused()) {
-        let op = format!("delete link {} ({})", removal.name, removal.link_kind);
-        result.destroyed.extend(removal.destroys.iter().cloned());
-        if options.dry_run {
-            result.summary.push(format!("Would {op}"));
-            result.changes_made += 1;
-            continue;
-        }
-        match conn.del_link_if_exists(removal.name.as_str()).await {
-            Ok(true) => {
-                result.summary.push(format!(
-                    "Deleted link {} ({})",
-                    removal.name, removal.link_kind
-                ));
-                result.changes_made += 1;
+        // Before anything is created: a replacement can conflict with it
+        // (the same VLAN id on the same parent, the same VNI and port). The
+        // links stacked on one are gone with it (#512).
+        Step::RemoveLink(removal) => {
+            result.destroyed.extend(removal.destroys.iter().cloned());
+            if !conn.del_link_if_exists(removal.name.as_str()).await? {
+                return Ok(Outcome::Unchanged(None));
             }
-            Ok(false) => {}
-            Err(e) => {
-                if options.continue_on_error {
-                    result.errors.push(ApplyError {
-                        operation: op,
-                        error: e,
-                    });
-                } else {
-                    return Err(e);
-                }
-            }
+            Outcome::Changed(
+                format!("Deleted link {} ({})", removal.name, removal.link_kind),
+                1,
+            )
         }
-    }
-
-    // 1a. The MTU a link created below needs on the device it stacks on
-    //     (#473). `vlan_newlink` / `macvlan_common_newlink` refuse an MTU
-    //     above the lower device's, so its raise cannot wait for step 2.
-    if !options.dry_run {
-        for (name, mtu) in &diff.mtus_first {
-            match conn.set_link_mtu(name.as_str(), *mtu).await {
-                Ok(()) => {}
-                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
-                    operation: format!("set link {name} mtu={mtu}"),
-                    error: e,
-                }),
-                Err(e) => return Err(e),
+        Step::DeleteLink { name } => {
+            if !conn.del_link_if_exists(name.as_str()).await? {
+                return Ok(Outcome::Unchanged(None));
             }
+            Outcome::Changed(format!("Deleted link {name}"), 1)
         }
-    }
-
-    // 1. Create new links
-    for link in &diff.links_to_add {
-        let op = format!("create link {}", link.name);
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            match create_link(conn, link, diff.owner.as_deref()).await {
-                Ok(()) => {
-                    result.summary.push(format!("Created link {}", link.name));
-                    result.changes_made += 1;
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+        // `vlan_newlink` / `macvlan_common_newlink` refuse an MTU above
+        // the lower device's, so its raise cannot wait for the modify
+        // (#473).
+        Step::RaiseMtuFirst { link, mtu } => {
+            conn.set_link_mtu(link.as_str(), *mtu).await?;
+            Outcome::Unchanged(None)
         }
-    }
-
-    // 2. Modify existing links
-    for (name, changes) in &diff.links_to_modify {
-        let op = format!("modify link {} ({})", name, changes.summary());
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            let mtu_done = diff.mtus_first.iter().any(|(n, _)| n == name);
-            match modify_link(conn, name, changes, mtu_done).await {
-                Ok(()) => {
-                    result
-                        .summary
-                        .push(format!("Modified link {} ({})", name, changes.summary()));
-                    result.changes_made += 1;
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+        Step::CreateLink(link) => {
+            create_link(conn, link, plan.owner.as_deref()).await?;
+            Outcome::Changed(format!("Created link {}", link.name), 1)
         }
-    }
-
-    // 2b. Re-assert declared bridge MTUs the port changes above moved.
-    //     `br_mtu_auto_adjust()` sets a bridge to its smallest port's MTU
-    //     when a port joins or leaves, unless the MTU was set through
-    //     RTM_SETLINK — which this is, so it also sticks from now on.
-    if !options.dry_run && !diff.bridge_mtus.is_empty() {
-        let live = conn.get_links().await?;
-        for (name, mtu) in &diff.bridge_mtus {
-            let drifted = live
-                .iter()
-                .find(|l| l.name.as_deref() == Some(name.as_str()))
+        Step::ModifyLink {
+            name,
+            changes,
+            mtu_already_set,
+        } => {
+            modify_link(conn, name, changes, *mtu_already_set).await?;
+            Outcome::Changed(format!("Modified link {} ({})", name, changes.summary()), 1)
+        }
+        // `br_mtu_auto_adjust()` sets a bridge to its smallest port's MTU
+        // when a port joins or leaves, unless the MTU was set through
+        // RTM_SETLINK — which this is, so it also sticks from now on.
+        Step::PinBridgeMtu { bridge, mtu } => {
+            let drifted = conn
+                .get_link_by_name(bridge.as_str())
+                .await?
                 .is_some_and(|l| l.mtu != Some(*mtu));
             if !drifted {
-                continue;
+                return Ok(Outcome::Unchanged(None));
             }
-            match conn.set_link_mtu(name.as_str(), *mtu).await {
-                Ok(()) => result
-                    .summary
-                    .push(format!("Restored bridge {name} mtu={mtu} after its ports changed")),
-                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
-                    operation: format!("restore bridge {name} mtu={mtu}"),
-                    error: e,
-                }),
-                Err(e) => return Err(e),
-            }
+            conn.set_link_mtu(bridge.as_str(), *mtu).await?;
+            Outcome::Changed(
+                format!("Restored bridge {bridge} mtu={mtu} after its ports changed"),
+                1,
+            )
         }
-    }
-
-    // 2c. Take declared-down VLANs down again where their lower device came
-    //     up above: `vlan_device_event()` brings every VLAN on it up (#436).
-    if !options.dry_run && !diff.vlans_held_down.is_empty() {
-        let live = conn.get_links().await?;
-        for name in &diff.vlans_held_down {
-            let brought_up = live
-                .iter()
-                .find(|l| l.name.as_deref() == Some(name.as_str()))
+        // `vlan_device_event()` brings every VLAN on a device up (#436).
+        Step::HoldVlanDown { vlan } => {
+            let brought_up = conn
+                .get_link_by_name(vlan.as_str())
+                .await?
                 .is_some_and(|l| l.is_up());
             if !brought_up {
-                continue;
+                return Ok(Outcome::Unchanged(None));
             }
-            match conn.set_link_down(name.as_str()).await {
-                Ok(()) => result
-                    .summary
-                    .push(format!("Took VLAN {name} down again after its lower device came up")),
-                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
-                    operation: format!("take VLAN {name} down"),
-                    error: e,
-                }),
-                Err(e) => return Err(e),
-            }
+            conn.set_link_down(vlan.as_str()).await?;
+            Outcome::Changed(
+                format!("Took VLAN {vlan} down again after its lower device came up"),
+                1,
+            )
         }
-    }
-
-    // 3. Add addresses. An IPv6 address the diff also removes at another
-    //    prefix is the same address re-prefixed: the kernel knows it by the
-    //    address alone, so the old prefix is deleted right before the add,
-    //    not in step 6 after it (#461).
-    let mut removed_early: Vec<&DeclaredAddress> = Vec::new();
-    for addr in &diff.addresses_to_add {
-        let op = format!(
-            "add address {}/{} on {}",
-            addr.address, addr.prefix_len, addr.dev
-        );
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            for old in diff.addresses_to_remove.iter().filter(|old| {
-                addr.address.is_ipv6()
-                    && old.dev == addr.dev
-                    && old.address == addr.address
-                    && old.prefix_len != addr.prefix_len
-            }) {
-                match del_address(conn, old).await {
-                    Ok(()) => {}
-                    Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => {}
-                    Err(e) => return Err(e),
-                }
-                removed_early.push(old);
+        Step::AddAddress(addr) => match add_address(conn, addr).await {
+            Ok(()) => Outcome::Changed(
+                format!(
+                    "Added address {}/{} on {}",
+                    addr.address, addr.prefix_len, addr.dev
+                ),
+                1,
+            ),
+            // A re-add the diff scheduled because the link change was
+            // expected to flush it, where the kernel kept it after all
+            // (`keep_addr_on_down`): the state we wanted, not a change — if
+            // what is there is the declared prefix. An IPv6 address at
+            // another prefix is EEXIST too, and swallowing that left the
+            // wrong prefix in place forever (#461).
+            Err(e) if e.is_already_exists() && address_present(conn, addr).await? => {
+                Outcome::Unchanged(Some(format!(
+                    "Address {}/{} on {} already present",
+                    addr.address, addr.prefix_len, addr.dev
+                )))
             }
-            match add_address(conn, addr).await {
-                Ok(()) => {
-                    result.summary.push(format!(
-                        "Added address {}/{} on {}",
-                        addr.address, addr.prefix_len, addr.dev
-                    ));
-                    result.changes_made += 1;
-                }
-                // A re-add the diff scheduled because the link change was
-                // expected to flush it, where the kernel kept it after all
-                // (`keep_addr_on_down`): the state we wanted, not a change —
-                // if what is there is the declared prefix. An IPv6 address
-                // at another prefix is EEXIST too, and swallowing that left
-                // the wrong prefix in place forever (#461).
-                Err(e) if e.is_already_exists() && address_present(conn, addr).await? => {
-                    result.summary.push(format!(
-                        "Address {}/{} on {} already present",
-                        addr.address, addr.prefix_len, addr.dev
-                    ));
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
+            Err(e) => return Err(e),
+        },
+        Step::DeleteAddress { address: addr, .. } => match del_address(conn, addr).await {
+            Ok(()) => Outcome::Changed(
+                format!(
+                    "Removed address {}/{} on {}",
+                    addr.address, addr.prefix_len, addr.dev
+                ),
+                1,
+            ),
+            // Gone before we got to it — an IPv6 address the link change
+            // flushed, say. The state we wanted, as for a route (#335): not
+            // a change we made, and not an error.
+            Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => {
+                Outcome::Unchanged(Some(format!(
+                    "Address {}/{} on {} already absent",
+                    addr.address, addr.prefix_len, addr.dev
+                )))
             }
-        }
-    }
-
-    // 4. Add routes
-    for route in &diff.routes_to_add {
-        let op = format!("add route {}/{}", route.destination, route.prefix_len);
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
+            Err(e) => return Err(e),
+        },
+        Step::ReplaceRoute { after: route, .. } => {
             match add_route(
                 conn,
                 route,
-                diff.routes_protocol.unwrap_or(RouteProtocol::Boot),
+                plan.routes_protocol.unwrap_or(RouteProtocol::Boot),
             )
             .await
             {
-                Ok(()) => {
-                    result.summary.push(format!(
-                        "Added route {}/{}",
-                        route.destination, route.prefix_len
-                    ));
-                    result.changes_made += 1;
-                }
+                Ok(()) => Outcome::Changed(
+                    format!("Added route {}/{}", route.destination, route.prefix_len),
+                    1,
+                ),
                 // A re-add the diff scheduled because a link change was
                 // expected to flush the route (#427), where the kernel kept
-                // it: the state we wanted, not a change. `replace_route`
-                // asks for NLM_F_CREATE | NLM_F_REPLACE, which the kernel
-                // answers EEXIST only with NLM_F_EXCL, so this is the
-                // address step's rule kept for a route added any other way.
-                Err(e) if e.is_already_exists() => {
-                    result.summary.push(format!(
-                        "Route {}/{} already present",
-                        route.destination, route.prefix_len
-                    ));
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
+                // it: the state we wanted, not a change.
+                Err(e) if e.is_already_exists() => Outcome::Unchanged(Some(format!(
+                    "Route {}/{} already present",
+                    route.destination, route.prefix_len
+                ))),
+                Err(e) => return Err(e),
             }
         }
-    }
-
-    // 5. Qdiscs the previous config declared and this one does not (#512):
-    //    the kernel puts its default back.
-    for qdisc in &diff.qdiscs_to_remove {
-        let op = format!("delete qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev);
-        if options.dry_run {
-            result.summary.push(format!("Would {op}"));
-            result.changes_made += 1;
-            continue;
-        }
-        let parent = match qdisc.effective_parent() {
-            QdiscParent::Root => crate::TcHandle::ROOT,
-            QdiscParent::Ingress => crate::TcHandle::INGRESS,
-        };
-        match conn.del_qdisc_if_exists(qdisc.dev.as_str(), parent).await {
-            Ok(_) => {
-                result.summary.push(format!(
-                    "Deleted qdisc {} on {}",
-                    qdisc.qdisc_type.kind(),
-                    qdisc.dev
-                ));
-                result.changes_made += 1;
-            }
-            Err(e) => {
-                if options.continue_on_error {
-                    result.errors.push(ApplyError {
-                        operation: op,
-                        error: e,
-                    });
-                } else {
-                    return Err(e);
-                }
+        Step::DeleteRoute(route) => {
+            if del_route(conn, route).await? {
+                Outcome::Changed(
+                    format!("Removed route {}/{}", route.destination, route.prefix_len),
+                    1,
+                )
+            } else {
+                // Gone between diff and apply — the state we wanted (#335).
+                Outcome::Unchanged(Some(format!(
+                    "Route {}/{} already absent",
+                    route.destination, route.prefix_len
+                )))
             }
         }
-    }
-
-    // 5a. Replace qdiscs (remove and re-add with new config)
-    for qdisc in &diff.qdiscs_to_replace {
-        let op = format!("replace qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev);
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            match replace_qdisc(conn, qdisc).await {
-                Ok(()) => {
-                    result.summary.push(format!(
-                        "Replaced qdisc {} on {}",
-                        qdisc.qdisc_type.kind(),
-                        qdisc.dev
-                    ));
-                    result.changes_made += 1;
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+        // The kernel puts its default back (#512).
+        Step::DeleteQdisc(qdisc) => {
+            let parent = match qdisc.effective_parent() {
+                QdiscParent::Root => crate::TcHandle::ROOT,
+                QdiscParent::Ingress => crate::TcHandle::INGRESS,
+            };
+            conn.del_qdisc_if_exists(qdisc.dev.as_str(), parent).await?;
+            Outcome::Changed(
+                format!("Deleted qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev),
+                1,
+            )
         }
-    }
-
-    // 5b. Add new qdiscs
-    for qdisc in &diff.qdiscs_to_add {
-        let op = format!("add qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev);
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            match add_qdisc(conn, qdisc).await {
-                Ok(()) => {
-                    result.summary.push(format!(
-                        "Added qdisc {} on {}",
-                        qdisc.qdisc_type.kind(),
-                        qdisc.dev
-                    ));
-                    result.changes_made += 1;
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+        Step::ReplaceQdisc(qdisc) => {
+            replace_qdisc(conn, qdisc).await?;
+            Outcome::Changed(
+                format!("Replaced qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev),
+                1,
+            )
         }
-    }
-
-    // 5c. TC trees (#514), diffed again against the device as the steps
-    //     above left it: a root qdisc replaced or a link recreated took
-    //     its tree, and a redirect's target may have a new ifindex.
-    if options.dry_run {
-        for tree in &diff.tc {
-            for line in tree.to_string().lines() {
-                result.summary.push(format!("Would {line}"));
-            }
-            result.changes_made += tree.len();
+        Step::AddQdisc(qdisc) => {
+            add_qdisc(conn, qdisc).await?;
+            Outcome::Changed(
+                format!("Added qdisc {} on {}", qdisc.qdisc_type.kind(), qdisc.dev),
+                1,
+            )
         }
-    } else {
-        for (tree, previous) in &diff.tc_declared {
-            match super::tc_tree::apply_declared(conn, tree, previous.as_ref()).await {
-                Ok(0) => {}
-                Ok(n) => {
-                    result
-                        .summary
-                        .push(format!("Applied TC tree on {} ({n} changes)", tree.dev()));
-                    result.changes_made += n;
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: format!("tc tree on {}", tree.dev()),
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. Purge removals (only populated when the diff was computed
-    //    with `PlanOptions::purge` — see `compute_diff_with_options`).
-    //    Order: routes before addresses, since a route can depend on
-    //    the address's prefix being present (removing the address
-    //    first would let the kernel auto-flush the connected route and
-    //    race our explicit del). Links and qdiscs are never purged.
-
-    // 6a. Remove undeclared routes.
-    for route in &diff.routes_to_remove {
-        let op = format!("remove route {}/{}", route.destination, route.prefix_len);
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            match del_route(conn, route).await {
-                Ok(true) => {
-                    result.summary.push(format!(
-                        "Removed route {}/{}",
-                        route.destination, route.prefix_len
-                    ));
-                    result.changes_made += 1;
-                }
-                // Gone between diff and apply — the state we wanted.
-                // Not a change we made, and not an error (#335).
-                Ok(false) => {
-                    result.summary.push(format!(
-                        "Route {}/{} already absent",
-                        route.destination, route.prefix_len
-                    ));
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        }
-    }
-
-    // 6b. Remove undeclared addresses (but not the re-prefixed ones step 3
-    //     already removed).
-    for addr in &diff.addresses_to_remove {
-        if removed_early.iter().any(|done| std::ptr::eq(*done, addr)) {
-            result.changes_made += 1;
-            result.summary.push(format!(
-                "Removed address {}/{} on {}",
-                addr.address, addr.prefix_len, addr.dev
-            ));
-            continue;
-        }
-        let op = format!(
-            "remove address {}/{} on {}",
-            addr.address, addr.prefix_len, addr.dev
-        );
-        if options.dry_run {
-            result.summary.push(format!("Would {}", op));
-            result.changes_made += 1;
-        } else {
-            match del_address(conn, addr).await {
-                Ok(()) => {
-                    result.summary.push(format!(
-                        "Removed address {}/{} on {}",
-                        addr.address, addr.prefix_len, addr.dev
-                    ));
-                    result.changes_made += 1;
-                }
-                // Gone before we got to it — an IPv6 address the link
-                // change flushed, say. The state we wanted, as for a route
-                // (#335): not a change we made, and not an error.
-                Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => {
-                    result.summary.push(format!(
-                        "Address {}/{} on {} already absent",
-                        addr.address, addr.prefix_len, addr.dev
-                    ));
-                }
-                Err(e) => {
-                    if options.continue_on_error {
-                        result.errors.push(ApplyError {
-                            operation: op,
-                            error: e,
-                        });
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(result)
+        // Diffed again against the device as the steps above left it: a
+        // root qdisc replaced or a link recreated took its tree, and a
+        // redirect's target may have a new ifindex (#514).
+        Step::TcTree {
+            dev,
+            tree,
+            previous,
+            ..
+        } => match super::tc_tree::apply_declared(conn, tree, previous.as_deref()).await? {
+            0 => Outcome::Unchanged(None),
+            n => Outcome::Changed(format!("Applied TC tree on {dev} ({n} changes)"), n),
+        },
+    })
 }
 
 // ============================================================================

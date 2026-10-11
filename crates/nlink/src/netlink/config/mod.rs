@@ -53,6 +53,7 @@
 mod apply;
 mod diff;
 mod kind;
+mod plan;
 mod tc_tree;
 mod types;
 
@@ -69,6 +70,7 @@ pub use kind::{
     Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
     RecreatePolicy,
 };
+pub use plan::{JournalEntry, Plan, Step};
 pub use tc_tree::{
     ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterSpec, TcBuilder,
     TcTreeDiff,
