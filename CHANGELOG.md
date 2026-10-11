@@ -361,6 +361,12 @@ All notable changes to this project will be documented in this file.
   The GRE root test now checks both through `ip -d -j link`. It fails
   without each fix.
 
+- **A Geneve flow label is sent big-endian (#516).** `GeneveLink::label`
+  wrote it native-endian, while the kernel reads it with `nla_get_be32`.
+  A label set on a little-endian host was a different one: `0x12345` was
+  stored as `0x30100`. A root test checks it through `ip -d -j link`, and
+  fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -913,6 +919,24 @@ All notable changes to this project will be documented in this file.
   - **CI.** `ip_vti` joins CI's module lists.
   - **Test.** A transition test takes all five A→B and checks every
     parameter through `ip -d -j link`, on iproute2 6.15 and 6.1.
+
+- **Declared Geneve and bare UDP tunnels (#516, row 7, third batch).**
+  - **Geneve.** `LinkBuilder::geneve(vni)` with `geneve_remote` (IPv4 or
+    IPv6), `geneve_ttl`, `geneve_tos` and `geneve_port`.
+    `geneve_changelink` refuses a VNI, port or address-family change, and
+    those recreate. The remote, TTL and TOS change in place.
+  - **Bare UDP.** `bareudp(port, ethertype)` with `bareudp_srcport_min`
+    and `bareudp_multiproto`. It has no `changelink`, so any change
+    recreates. Bare UDP is **unverified on a live kernel**: the one this
+    was written on doesn't build it. Unit fixtures pin its encoding
+    through the offline recreate prediction.
+  - **`GeneveLink`** gains `address()`, so a declared MAC lands at
+    create.
+  - **CI.** `geneve` joins CI's module lists.
+  - **Test.** A root test changes a Geneve tunnel's remote and TTL in
+    place (same ifindex), then its VNI (recreated), checked through
+    `ip -d -j link` on iproute2 6.15 and 6.1. It fails with the VNI
+    uncompared.
 
 ## [0.31.0] - 2026-10-11
 

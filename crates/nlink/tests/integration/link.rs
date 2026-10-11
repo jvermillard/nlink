@@ -1049,3 +1049,26 @@ async fn bridge_vlans_all_includes_the_ports() -> Result<()> {
     assert!(own.contains(&10), "get_bridge_vlans(d0): {own:?}");
     Ok(())
 }
+
+/// A Geneve flow label reaches the kernel as given (#516): it is
+/// big-endian on the wire, and a native-endian one was another label.
+#[tokio::test]
+async fn a_geneve_flow_label_is_the_one_asked_for() -> Result<()> {
+    use nlink::netlink::link::GeneveLink;
+    require_root!();
+    nlink::require_modules!("geneve");
+
+    let ns = TestNamespace::new("geneve-label")?;
+    let conn = ns.connection()?;
+    conn.add_link(
+        GeneveLink::new("gn0", 5)
+            .remote6("fd00::2".parse().unwrap())
+            .label(0x12345),
+    )
+    .await?;
+    let shown = ns.exec("ip", &["-d", "-j", "link", "show", "gn0"])?;
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("ip -j");
+    let data = &shown[0]["linkinfo"]["info_data"];
+    assert_eq!(data["label"], "0x12345", "{data}");
+    Ok(())
+}

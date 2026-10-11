@@ -1160,7 +1160,8 @@ impl DeclaredLink {
             DeclaredLinkType::Gre(_)
             | DeclaredLinkType::Ipip(_)
             | DeclaredLinkType::Sit(_)
-            | DeclaredLinkType::Vti(_) => Some(
+            | DeclaredLinkType::Vti(_)
+            | DeclaredLinkType::Bareudp { .. } => Some(
                 "a MAC address is declared, but an L3 tunnel has no hardware address (gretap has one)",
             ),
             DeclaredLinkType::Netkit { mode, .. }
@@ -1350,6 +1351,25 @@ pub enum DeclaredLinkType {
     Sit(TunnelParams),
     /// IPsec virtual tunnel interface (#516).
     Vti(TunnelParams),
+    /// Geneve tunnel (#516). The VNI, port and the remote's family are
+    /// fixed at create; the remote, TTL and TOS change in place.
+    Geneve {
+        vni: u32,
+        remote: Option<IpAddr>,
+        ttl: Option<u8>,
+        tos: Option<u8>,
+        /// The UDP port; the kernel's 6081 when unset.
+        port: Option<u16>,
+    },
+    /// Bare UDP tunnel (#516): an L3 tunnel of `ethertype` over UDP `port`.
+    /// It has no changelink, so any change is a recreate. Unverified on a
+    /// live kernel: the one these were written on does not build it.
+    Bareudp {
+        port: u16,
+        ethertype: u16,
+        srcport_min: Option<u16>,
+        multiproto: bool,
+    },
     /// Bond interface. Plan 190 §8 added 5 new option knobs.
     Bond {
         mode: BondMode,
@@ -1420,6 +1440,8 @@ impl DeclaredLinkType {
             Self::Ipip(_) => Some("ipip"),
             Self::Sit(_) => Some("sit"),
             Self::Vti(_) => Some("vti"),
+            Self::Geneve { .. } => Some("geneve"),
+            Self::Bareudp { .. } => Some("bareudp"),
             Self::Bond { .. } => Some("bond"),
             Self::Ifb => Some("ifb"),
             Self::Vrf { .. } => Some("vrf"),
@@ -1844,6 +1866,91 @@ impl LinkBuilder {
     pub fn tunnel_underlay_dev(mut self, dev: &str) -> Self {
         if let Some(p) = self.tunnel_params("tunnel_underlay_dev") {
             p.underlay_dev = Some(dev.to_string());
+        }
+        self
+    }
+
+    /// Create a Geneve tunnel with `vni` (#516).
+    pub fn geneve(mut self, vni: u32) -> Self {
+        self.link_type = DeclaredLinkType::Geneve {
+            vni,
+            remote: None,
+            ttl: None,
+            tos: None,
+            port: None,
+        };
+        self
+    }
+
+    /// A Geneve tunnel's remote end (IPv4 or IPv6).
+    pub fn geneve_remote(mut self, addr: IpAddr) -> Self {
+        if let DeclaredLinkType::Geneve { remote, .. } = &mut self.link_type {
+            *remote = Some(addr);
+        } else {
+            self.wrong_kind("geneve_remote", "geneve");
+        }
+        self
+    }
+
+    /// A Geneve tunnel's outer TTL.
+    pub fn geneve_ttl(mut self, want: u8) -> Self {
+        if let DeclaredLinkType::Geneve { ttl, .. } = &mut self.link_type {
+            *ttl = Some(want);
+        } else {
+            self.wrong_kind("geneve_ttl", "geneve");
+        }
+        self
+    }
+
+    /// A Geneve tunnel's outer TOS.
+    pub fn geneve_tos(mut self, want: u8) -> Self {
+        if let DeclaredLinkType::Geneve { tos, .. } = &mut self.link_type {
+            *tos = Some(want);
+        } else {
+            self.wrong_kind("geneve_tos", "geneve");
+        }
+        self
+    }
+
+    /// A Geneve tunnel's UDP port.
+    pub fn geneve_port(mut self, want: u16) -> Self {
+        if let DeclaredLinkType::Geneve { port, .. } = &mut self.link_type {
+            *port = Some(want);
+        } else {
+            self.wrong_kind("geneve_port", "geneve");
+        }
+        self
+    }
+
+    /// Create a bare UDP tunnel of `ethertype` (0x8847 MPLS, 0x0800 IPv4,
+    /// …) over UDP `port` (#516). Unverified on a live kernel.
+    pub fn bareudp(mut self, port: u16, ethertype: u16) -> Self {
+        self.link_type = DeclaredLinkType::Bareudp {
+            port,
+            ethertype,
+            srcport_min: None,
+            multiproto: false,
+        };
+        self
+    }
+
+    /// A bare UDP tunnel's lowest source port.
+    pub fn bareudp_srcport_min(mut self, want: u16) -> Self {
+        if let DeclaredLinkType::Bareudp { srcport_min, .. } = &mut self.link_type {
+            *srcport_min = Some(want);
+        } else {
+            self.wrong_kind("bareudp_srcport_min", "bareudp");
+        }
+        self
+    }
+
+    /// A bare UDP tunnel's multiprotocol mode (MPLS unicast and multicast,
+    /// or IPv4 and IPv6).
+    pub fn bareudp_multiproto(mut self, on: bool) -> Self {
+        if let DeclaredLinkType::Bareudp { multiproto, .. } = &mut self.link_type {
+            *multiproto = on;
+        } else {
+            self.wrong_kind("bareudp_multiproto", "bareudp");
         }
         self
     }
@@ -4867,6 +4974,45 @@ mod serde_roundtrip_tests {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(says), "{says}: {err}");
         }
+    }
+
+    /// Geneve and bareudp (#516). Bareudp is unverified on a live kernel
+    /// (the one this was written on does not build it): the offline
+    /// prediction, which encodes a declaration as the apply sends it and
+    /// reads it back as a dump, pins what a change does.
+    #[test]
+    fn geneve_and_bareudp_roundtrip_and_predict() {
+        let geneve = |vni, last| {
+            NetworkConfig::new().link("gn1", move |l| {
+                l.geneve(vni).geneve_remote(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, last)))
+            })
+        };
+        assert_roundtrips(&geneve(5, 2));
+        let json = geneve(5, 2).to_json_string().unwrap();
+        assert!(json.contains(r#""geneve":{"vni":5,"remote":"10.0.0.2""#), "{json}");
+        // A new remote changes in place; a new VNI recreates.
+        assert!(geneve(5, 3).diff_against(&geneve(5, 2)).recreates.is_empty());
+        let r = geneve(6, 2).diff_against(&geneve(5, 2)).recreates;
+        assert!(r.iter().any(|r| r.reason.contains("geneve vni 5 -> 6")), "{r:?}");
+
+        let bareudp = |port, multi| {
+            NetworkConfig::new().link("bu1", move |l| l.bareudp(port, 0x8847).bareudp_multiproto(multi))
+        };
+        assert_roundtrips(&bareudp(6635, false));
+        assert!(bareudp(6635, true).diff_against(&bareudp(6635, true)).recreates.is_empty());
+        for (b, says) in [
+            (bareudp(6636, false), "bareudp port 6635 -> 6636"),
+            (bareudp(6635, true), "bareudp multiproto -> true"),
+        ] {
+            let r = b.diff_against(&bareudp(6635, false)).recreates;
+            assert!(r.iter().any(|r| r.reason.contains(says)), "{says}: {r:?}");
+        }
+        let err = NetworkConfig::new()
+            .link("bu1", |l| l.bareudp(6635, 0x8847).address([2, 0, 0, 0, 0, 1]))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("an L3 tunnel has no hardware address"), "{err}");
     }
 
     #[test]

@@ -968,6 +968,54 @@ pub(crate) fn link_config(
             }
             Box::new(c)
         }
+        DeclaredLinkType::Geneve {
+            vni,
+            remote,
+            ttl,
+            tos,
+            port,
+        } => {
+            let mut c = crate::netlink::link::GeneveLink::new(&link.name, *vni);
+            match remote {
+                Some(IpAddr::V4(a)) => c = c.remote(*a),
+                Some(IpAddr::V6(a)) => c = c.remote6(*a),
+                None => {}
+            }
+            if let Some(v) = ttl {
+                c = c.ttl(*v);
+            }
+            if let Some(v) = tos {
+                c = c.tos(*v);
+            }
+            if let Some(v) = port {
+                c = c.port(*v);
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                c = c.address(addr);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Bareudp {
+            port,
+            ethertype,
+            srcport_min,
+            multiproto,
+        } => {
+            let mut c = crate::netlink::link::BareudpLink::new(&link.name, *port, *ethertype);
+            if *multiproto {
+                c = c.multiproto_mode();
+            }
+            if let Some(v) = srcport_min {
+                c = c.srcport_min(*v);
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
         DeclaredLinkType::Macvtap { parent, mode } => {
             let mut config = crate::netlink::link::MacvtapLink::new(&link.name, parent)
                 .mode(kernel_macvlan_mode(*mode));

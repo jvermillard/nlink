@@ -1120,6 +1120,102 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
             compare_tunnel(kind, p, &data, names, TunnelIds::IPTUN, &mut d);
         }
         DeclaredLinkType::Vti(p) => compare_tunnel("vti", p, &data, names, TunnelIds::VTI, &mut d),
+        // `geneve_changelink` refuses a VNI, port or address-family change
+        // ("not supported"): those recreate. The rest change in place, from
+        // the current configuration (checked on 6.12).
+        DeclaredLinkType::Geneve {
+            vni,
+            remote,
+            ttl,
+            tos,
+            port,
+        } => {
+            const ID: u16 = 1;
+            const REMOTE: u16 = 2;
+            const TTL: u16 = 3;
+            const TOS: u16 = 4;
+            const PORT: u16 = 5;
+            const REMOTE6: u16 = 7;
+            if let Some(have) = data.u32(ID)
+                && have != *vni
+            {
+                d.recreate.push(format!("geneve vni {have} -> {vni}"));
+            }
+            let want_port = port.unwrap_or(6081);
+            if let Some(have) = data.u16_be(PORT)
+                && have != want_port
+            {
+                d.recreate.push(format!("geneve port {have} -> {want_port}"));
+            }
+            let have_remote: Option<IpAddr> = data
+                .ipv4(REMOTE)
+                .filter(|a| !a.is_unspecified())
+                .map(IpAddr::V4)
+                .or_else(|| {
+                    data.0
+                        .get(&REMOTE6)
+                        .and_then(|p| <[u8; 16]>::try_from(p.get(..16)?).ok())
+                        .map(|b| IpAddr::V6(Ipv6Addr::from(b)))
+                        .filter(|a| !a.is_unspecified())
+                });
+            if have_remote != *remote {
+                let change = format!(
+                    "geneve remote {} -> {}",
+                    have_remote.map_or("none".into(), |a| a.to_string()),
+                    remote.map_or("none".into(), |a| a.to_string())
+                );
+                match (have_remote, remote) {
+                    (Some(IpAddr::V4(_)), Some(IpAddr::V4(a))) => {
+                        d.update("geneve", KindAttr::Bytes(REMOTE, a.octets().to_vec()), change)
+                    }
+                    (Some(IpAddr::V6(_)), Some(IpAddr::V6(a))) => {
+                        d.update("geneve", KindAttr::Bytes(REMOTE6, a.octets().to_vec()), change)
+                    }
+                    _ => d.recreate.push(change),
+                }
+            }
+            for (name, attr, want) in [("ttl", TTL, ttl), ("tos", TOS, tos)] {
+                if let Some(want) = want
+                    && data.u8(attr) != Some(*want)
+                {
+                    d.update(
+                        "geneve",
+                        KindAttr::U8(attr, *want),
+                        format!("geneve {name} {} -> {want}", data.u8(attr).unwrap_or(0)),
+                    );
+                }
+            }
+        }
+        // No changelink: every difference recreates.
+        DeclaredLinkType::Bareudp {
+            port,
+            ethertype,
+            srcport_min,
+            multiproto,
+        } => {
+            const PORT: u16 = 1;
+            const ETHERTYPE: u16 = 2;
+            const SRCPORT_MIN: u16 = 3;
+            const MULTIPROTO: u16 = 4;
+            if let Some(have) = data.u16_be(PORT)
+                && have != *port
+            {
+                d.recreate.push(format!("bareudp port {have} -> {port}"));
+            }
+            if let Some(have) = data.u16_be(ETHERTYPE)
+                && have != *ethertype
+            {
+                d.recreate.push(format!("bareudp ethertype {have:#06x} -> {ethertype:#06x}"));
+            }
+            if let Some(want) = srcport_min
+                && data.u16_ne(SRCPORT_MIN) != Some(*want)
+            {
+                d.recreate.push(format!("bareudp srcport_min -> {want}"));
+            }
+            if data.0.contains_key(&MULTIPROTO) != *multiproto {
+                d.recreate.push(format!("bareudp multiproto -> {multiproto}"));
+            }
+        }
         DeclaredLinkType::Ipvlan {
             parent,
             mode,
