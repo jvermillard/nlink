@@ -4435,10 +4435,18 @@ mod master_and_validate_tests {
             let err = cfg.validate().expect_err(what).to_string();
             assert!(err.contains(what), "{what}: {err}");
         };
-        refused(NetworkConfig::new().link("d0", |l| l.dummy().miimon(100)), "bond parameter");
-        refused(NetworkConfig::new().link("vx0", |l| l.vxlan(1 << 24)), "24 bits");
         refused(
-            NetworkConfig::new().route("10.0.0.1/24", |r| r.dev("d0")).unwrap(),
+            NetworkConfig::new().link("d0", |l| l.dummy().miimon(100)),
+            "bond parameter",
+        );
+        refused(
+            NetworkConfig::new().link("vx0", |l| l.vxlan(1 << 24)),
+            "24 bits",
+        );
+        refused(
+            NetworkConfig::new()
+                .route("10.0.0.1/24", |r| r.dev("d0"))
+                .unwrap(),
             "host bits",
         );
         refused(
