@@ -2,15 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::super::expr::RuleExpr;
+use super::super::object::{ObjectConfig, ObjectType};
+use super::super::types::{
+    ChainInfo, Family, RuleInfo, Set, SetElement, SetFlags, SetInfo, Verdict,
+};
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredObject, DeclaredRule, DeclaredSet, DeclaredTable,
     NftablesConfig, SetElementMode,
-};
-use super::super::object::{ObjectConfig, ObjectType};
-use super::super::expr::RuleExpr;
-use super::super::types::{
-    ChainInfo, Family, Hook, Policy, Priority, RuleInfo, Set, SetElement, SetFlags, SetInfo,
-    Verdict,
 };
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
@@ -217,6 +216,10 @@ pub enum MoveReason {
     BoundToRecreatedObject,
     /// It is installed out of declared order.
     Reorder,
+    /// Its chain is deleted and created again, because what changed — the
+    /// hook, priority, type or device, or whether it is a base chain at
+    /// all — cannot be changed on a live chain (#478).
+    ChainRecreated,
 }
 
 /// A rule the diff deletes and re-inserts, keeping (or restoring) its place
@@ -242,6 +245,65 @@ pub struct RuleMove {
     /// See [`RuleAdd`].
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) seq: usize,
+}
+
+/// A chain the diff deletes and creates again, with its declared rules put
+/// back in declared order (#478).
+///
+/// `nf_tables_updchain` refuses a different hook, priority or type, and a
+/// hook on a regular chain, with `EEXIST`; and nothing turns a base chain
+/// into a regular one. So these changes were sent as an update the kernel
+/// always refused, and a base chain declared as a regular one stayed a base
+/// chain with an empty diff. A base chain cannot be a jump target, so only
+/// its own rules depend on it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ChainRecreate {
+    /// Owning table.
+    pub table: String,
+    /// Owning family.
+    pub family: Family,
+    /// The chain as declared.
+    pub chain: DeclaredChain,
+    /// What changed: `hook input -> forward`, `priority 0 -> -10`, …
+    pub reason: String,
+    /// Rules in the chain that nlink did not write, which it could not put
+    /// back. Non-empty means the apply refuses, with
+    /// [`Error::NotSupported`](crate::Error::NotSupported), rather than
+    /// delete them. An [`exclusive`](super::DeclaredChainBuilder::exclusive)
+    /// chain deletes them instead.
+    pub blocked_by: Vec<String>,
+}
+
+impl ChainRecreate {
+    /// True when the apply will refuse this recreate (see
+    /// [`blocked_by`](Self::blocked_by)).
+    pub fn is_refused(&self) -> bool {
+        !self.blocked_by.is_empty()
+    }
+}
+
+impl std::fmt::Display for ChainRecreate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "-/+ chain {:?} {}/{} (recreate",
+            self.family,
+            self.table,
+            self.chain.name()
+        )?;
+        if self.blocked_by.is_empty() {
+            write!(f, ": {})", self.reason)
+        } else {
+            write!(
+                f,
+                " refused: {}; it would delete rules nlink did not write: {})",
+                self.reason,
+                self.blocked_by.join(", ")
+            )
+        }
+    }
 }
 
 /// Elements to add to, or remove from, one set — with the [`Set`] they
@@ -367,9 +429,10 @@ pub struct NftablesDiff {
     pub tables_to_delete: Vec<(Family, String)>,
     /// Chains to create — (owning table, owning family, chain).
     pub chains_to_add: Vec<(String, Family, DeclaredChain)>,
-    /// Chains whose *properties* drifted — (owning table, owning family,
-    /// chain). Applied as `NFT_MSG_NEWCHAIN`, which the kernel treats as an
-    /// update for an existing chain.
+    /// Chains whose policy drifted — (owning table, owning family, chain).
+    /// Applied as `NFT_MSG_NEWCHAIN`, which the kernel treats as an update
+    /// for an existing chain. What an update cannot change is in
+    /// [`Self::chains_to_recreate`].
     ///
     /// Until 0.25 a chain's diff identity was its **name alone**: none of
     /// `hook` / `priority` / `policy` / `chain_type` / `device` were compared,
@@ -380,6 +443,10 @@ pub struct NftablesDiff {
     pub chains_to_modify: Vec<(String, Family, DeclaredChain)>,
     /// Chains to delete — (table, family, name).
     pub chains_to_delete: Vec<(String, Family, String)>,
+    /// Chains to delete and create again, with their declared rules, in
+    /// [`Self::rules_to_move`] and [`Self::rules_to_add`] (#478). A refused
+    /// one ([`ChainRecreate::is_refused`]) makes the apply fail instead.
+    pub chains_to_recreate: Vec<ChainRecreate>,
     /// Rules to add, each with its placement in the chain.
     pub rules_to_add: Vec<RuleAdd>,
     /// Rules to delete — `(table, family, chain, kernel_handle)`.
@@ -464,6 +531,7 @@ impl NftablesDiff {
             && self.chains_to_add.is_empty()
             && self.chains_to_modify.is_empty()
             && self.chains_to_delete.is_empty()
+            && self.chains_to_recreate.is_empty()
             && self.rules_to_add.is_empty()
             && self.rules_to_delete.is_empty()
             && self.rules_to_replace.is_empty()
@@ -488,6 +556,7 @@ impl NftablesDiff {
             + self.chains_to_add.len()
             + self.chains_to_modify.len()
             + self.chains_to_delete.len()
+            + self.chains_to_recreate.len()
             + self.rules_to_add.len()
             + self.rules_to_delete.len()
             + self.rules_to_replace.len()
@@ -531,15 +600,21 @@ impl NftablesDiff {
         }
         for (tbl, fam, c) in &self.chains_to_modify {
             lines.push(format!(
-                "~ chain {fam:?} {tbl}/{} (policy={:?} hook={:?} priority={:?})",
+                "~ chain {fam:?} {tbl}/{} (policy={:?} hook={:?} priority={:?} type={:?} \
+                 device={:?})",
                 c.name(),
                 c.policy(),
                 c.hook(),
                 c.priority(),
+                c.chain_type(),
+                c.device(),
             ));
         }
         for (tbl, fam, name) in &self.chains_to_delete {
             lines.push(format!("- chain {fam:?} {tbl}/{name}"));
+        }
+        for recreate in &self.chains_to_recreate {
+            lines.push(recreate.to_string());
         }
         for add in &self.rules_to_add {
             let r = &add.rule;
@@ -569,6 +644,7 @@ impl NftablesDiff {
                 MoveReason::BoundToRecreatedSet => "its set is recreated",
                 MoveReason::BoundToRecreatedObject => "its object is recreated",
                 MoveReason::Reorder => "out of declared order",
+                MoveReason::ChainRecreated => "its chain is recreated",
             };
             lines.push(format!(
                 "~ rule {:?} {}/{} (handle={} key={key}, re-added: {why}){}",
@@ -683,23 +759,65 @@ fn placement_suffix(placement: RulePlacement) -> String {
     }
 }
 
-/// Has a declared chain's shape drifted from what the kernel holds?
+/// What a declared chain needs to match what the kernel holds.
 ///
 /// Compares all five properties `DeclaredChain` carries and `ChainInfo` parses
 /// back. A declared `None` means "not specified" and is not treated as drift —
 /// the config is only asserting the properties it names, so a config that
-/// doesn't mention a policy won't fight a policy set out-of-band.
-fn chain_has_drifted(declared: &DeclaredChain, current: &ChainInfo) -> bool {
-    fn drifted<T: PartialEq>(declared: Option<T>, current: Option<T>) -> bool {
-        // Only a declared value can drift; an unspecified one is not a claim.
-        declared.is_some_and(|d| current != Some(d))
+/// doesn't mention a policy won't fight a policy set out-of-band. The hook is
+/// the exception: a chain declared without one is a regular chain, and a
+/// base chain of that name is not it (#478).
+fn chain_change(declared: &DeclaredChain, current: &ChainInfo) -> ChainChange {
+    let mut why = Vec::new();
+    match (declared.hook(), current.hook) {
+        (None, Some(_)) => why.push("base chain -> regular chain".to_string()),
+        (Some(_), None) => why.push("regular chain -> base chain".to_string()),
+        (Some(hook), Some(have)) if hook.to_u32() != have => {
+            why.push(format!("hook {have} -> {}", hook.to_u32()));
+        }
+        _ => {}
     }
+    // Type, priority and device belong to a base chain; on a regular one
+    // they have no meaning, and the change of kind above covers it.
+    if declared.hook().is_some() && current.hook.is_some() {
+        if let Some(t) = declared.chain_type()
+            && current.chain_type != Some(t)
+        {
+            let have = current.chain_type.map_or("none", |t| t.as_str());
+            why.push(format!("type {have} -> {}", t.as_str()));
+        }
+        if let Some(p) = declared.priority()
+            && current.priority != Some(p.to_i32())
+        {
+            let have = current
+                .priority
+                .map_or("none".to_string(), |p| p.to_string());
+            why.push(format!("priority {have} -> {}", p.to_i32()));
+        }
+        if let Some(dev) = declared.device()
+            && current.device.as_deref() != Some(dev)
+        {
+            let have = current.device.as_deref().unwrap_or("none");
+            why.push(format!("device {have} -> {dev}"));
+        }
+    }
+    if !why.is_empty() {
+        return ChainChange::Recreate(why.join(", "));
+    }
+    // Only a declared value can drift; an unspecified one is not a claim.
+    match declared.policy() {
+        Some(policy) if current.policy != Some(policy.to_u32()) => ChainChange::Update,
+        _ => ChainChange::None,
+    }
+}
 
-    drifted(declared.hook().map(Hook::to_u32), current.hook)
-        || drifted(declared.priority().map(Priority::to_i32), current.priority)
-        || drifted(declared.policy().map(Policy::to_u32), current.policy)
-        || drifted(declared.chain_type(), current.chain_type)
-        || drifted(declared.device(), current.device.as_deref())
+/// What a declared chain needs: nothing, an update in place (the policy),
+/// or a recreate (anything else the kernel cannot change on a live chain).
+#[derive(Debug, PartialEq, Eq)]
+enum ChainChange {
+    None,
+    Update,
+    Recreate(String),
 }
 
 /// Has a declared set's shape drifted from what the kernel holds?
@@ -1368,15 +1486,26 @@ impl NftablesConfig {
                     // firewall from policy(Accept) to policy(Drop) produced an
                     // empty diff and a no-op apply: the operator believed the
                     // box was default-deny while it stayed default-allow
-                    // (#200). Same silence for a changed hook or priority.
-                    Some(current) if chain_has_drifted(c, current) => {
-                        diff.chains_to_modify.push((
+                    // (#200). Same silence for a changed hook or priority —
+                    // which, sent as an update, the kernel refuses, so those
+                    // recreate the chain (#478).
+                    Some(current) => match chain_change(c, current) {
+                        ChainChange::None => {}
+                        ChainChange::Update => diff.chains_to_modify.push((
                             declared.name().to_string(),
                             declared.family(),
                             c.clone(),
-                        ));
-                    }
-                    Some(_) => {}
+                        )),
+                        ChainChange::Recreate(reason) => {
+                            diff.chains_to_recreate.push(ChainRecreate {
+                                table: declared.name().to_string(),
+                                family: declared.family(),
+                                chain: c.clone(),
+                                reason,
+                                blocked_by: Vec::new(),
+                            });
+                        }
+                    },
                 }
             }
             for c in chains_in_table {
@@ -1627,6 +1756,63 @@ impl NftablesConfig {
                     .iter()
                     .filter(|r| r.chain() == chain_name)
                     .collect();
+
+                // A recreated chain loses every rule. The declared ones go
+                // back in declared order; one nlink did not write cannot, so
+                // it refuses the recreate, unless the chain is exclusive
+                // (#478).
+                if let Some(recreate) = diff.chains_to_recreate.iter_mut().find(|r| {
+                    r.table == declared.name()
+                        && r.family == declared.family()
+                        && r.chain.name() == chain_name
+                }) {
+                    recreate.blocked_by = kernel_rules
+                        .iter()
+                        .filter(|kr| kr.key.is_none() && !exclusive)
+                        .map(|kr| format!("rule handle {}", kr.handle))
+                        .collect();
+                    if recreate.is_refused() {
+                        continue;
+                    }
+                    let keys: HashSet<&str> = declared_rules
+                        .iter()
+                        .filter_map(|r| r.handle_key())
+                        .collect();
+                    for kr in &kernel_rules {
+                        if kr.key.as_deref().is_none_or(|k| !keys.contains(k)) {
+                            diff.rules_to_delete.push((
+                                declared.name().to_string(),
+                                declared.family(),
+                                chain_name.to_string(),
+                                RuleHandle(kr.handle),
+                            ));
+                        }
+                    }
+                    for rule in &declared_rules {
+                        let was = kernel_rules
+                            .iter()
+                            .find(|kr| kr.key.as_deref() == rule.handle_key());
+                        match was {
+                            Some(kr) => diff.rules_to_move.push(RuleMove {
+                                table: declared.name().to_string(),
+                                family: declared.family(),
+                                chain: chain_name.to_string(),
+                                from: RuleHandle(kr.handle),
+                                placement: RulePlacement::Append,
+                                rule: (*rule).clone(),
+                                reason: MoveReason::ChainRecreated,
+                                seq,
+                            }),
+                            None => diff.rules_to_add.push(RuleAdd {
+                                rule: (*rule).clone(),
+                                placement: RulePlacement::Append,
+                                seq,
+                            }),
+                        }
+                        seq += 1;
+                    }
+                    continue;
+                }
                 let slots: Vec<super::rules::KernelSlot> = kernel_rules
                     .iter()
                     .map(|kr| {
@@ -1748,6 +1934,70 @@ mod tests {
     use super::*;
     use crate::netlink::nftables::{SetFlags, SetKeyType};
     use crate::netlink::nftables::config::types::DeclaredSet;
+
+    /// A policy change is an update; a hook, priority or type change, or a
+    /// base chain declared as a regular one, is a recreate (#478).
+    #[test]
+    fn chain_changes_the_kernel_cannot_update_are_recreates() {
+        use crate::netlink::nftables::{ChainType, Hook, Policy, Priority};
+
+        let declared =
+            |f: fn(super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder| {
+                NftablesConfig::new()
+                    .table("t", Family::Inet, move |t| t.chain("c", f))
+                    .tables()[0]
+                    .chains()[0]
+                    .clone()
+            };
+        let live = ChainInfo {
+            table: "t".into(),
+            name: "c".into(),
+            family: Family::Inet,
+            hook: Some(Hook::Input.to_u32()),
+            priority: Some(0),
+            chain_type: Some(ChainType::Filter),
+            policy: Some(Policy::Accept.to_u32()),
+            handle: 1,
+            device: None,
+        };
+        fn base(c: super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder {
+            c.hook(Hook::Input)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        }
+        assert_eq!(chain_change(&declared(base), &live), ChainChange::None);
+        assert_eq!(
+            chain_change(&declared(|c| base(c).policy(Policy::Drop)), &live),
+            ChainChange::Update
+        );
+        assert_eq!(
+            chain_change(
+                &declared(|c| base(c).priority(Priority::Custom(-10))),
+                &live
+            ),
+            ChainChange::Recreate("priority 0 -> -10".into())
+        );
+        assert_eq!(
+            chain_change(&declared(|c| base(c).hook(Hook::Forward)), &live),
+            ChainChange::Recreate("hook 1 -> 2".into())
+        );
+        assert_eq!(
+            chain_change(&declared(|c| c), &live),
+            ChainChange::Recreate("base chain -> regular chain".into())
+        );
+        let regular = ChainInfo {
+            hook: None,
+            priority: None,
+            chain_type: None,
+            policy: None,
+            ..live.clone()
+        };
+        assert_eq!(chain_change(&declared(|c| c), &regular), ChainChange::None);
+        assert_eq!(
+            chain_change(&declared(base), &regular),
+            ChainChange::Recreate("regular chain -> base chain".into())
+        );
+    }
 
     #[test]
     fn empty_diff_is_empty() {

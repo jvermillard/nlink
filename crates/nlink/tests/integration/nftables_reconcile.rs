@@ -33,7 +33,7 @@ use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, Reconcile
 use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
 use nlink::netlink::{Nftables, namespace};
 
-use crate::common::converge::{assert_converges, case};
+use crate::common::converge::{assert_converges, assert_transition, case};
 use crate::common::{TestNamespace, with_timeout};
 
 /// Build a canonical "filter / input" config with N keyed rules.
@@ -1232,6 +1232,134 @@ async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
             before,
             handle(&nft.list_rules("filter_pol", Family::Inet).await?),
             "an update keeps the chain's rules"
+        );
+        Ok(())
+    })
+    .await
+}
+
+// ============================================================================
+// #478 — what an update cannot change on a live chain
+// ============================================================================
+
+/// `inet t` with chain `c` (a base chain on `hook` at `priority`, or a
+/// regular one) holding two keyed rules, `exclusive` or not.
+fn chain_c(base: Option<(Hook, Priority)>, exclusive: bool) -> NftablesConfig {
+    NftablesConfig::new().table("t", Family::Inet, move |t| {
+        t.chain("c", move |c| {
+            let c = if exclusive { c.exclusive() } else { c };
+            match base {
+                Some((hook, priority)) => c
+                    .hook(hook)
+                    .priority(priority)
+                    .chain_type(ChainType::Filter)
+                    .policy(Policy::Accept),
+                None => c,
+            }
+        })
+        .rule_keyed("c", "ssh", |r| r.match_tcp_dport(22).accept())
+        .rule_keyed("c", "web", |r| r.match_tcp_dport(80).accept())
+    })
+}
+
+/// A base chain's priority or hook change, and a base chain declared as a
+/// regular one, recreate the chain and put its rules back in declared
+/// order. Sent as an update, the first two were refused with `EEXIST` on
+/// every apply; the last left a base chain and an empty diff (#478).
+#[tokio::test]
+async fn chain_changes_an_update_cannot_make_recreate_the_chain() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let steps = [
+        chain_c(Some((Hook::Input, Priority::Filter)), false),
+        chain_c(Some((Hook::Input, Priority::Custom(-10))), false),
+        chain_c(Some((Hook::Forward, Priority::Custom(-10))), false),
+        chain_c(None, false),
+    ];
+    let want = [
+        (Some(Hook::Input.to_u32()), Some(0)),
+        (Some(Hook::Input.to_u32()), Some(-10)),
+        (Some(Hook::Forward.to_u32()), Some(-10)),
+        (None, None),
+    ];
+    let ns = TestNamespace::new("nft-chain-recreate")?;
+    assert_transition(&ns, &steps, false, async |i, nft| {
+        let chains = nft
+            .list_chains_in("t", Family::Inet)
+            .await
+            .map_err(|e| e.to_string())?;
+        let c = chains
+            .iter()
+            .find(|c| c.name == "c")
+            .ok_or("chain c is gone")?;
+        if (c.hook, c.priority) != want[i] {
+            return Err(format!(
+                "want {:?}, chain c is {:?}",
+                want[i],
+                (c.hook, c.priority)
+            ));
+        }
+        let rules = nft
+            .list_rules("t", Family::Inet)
+            .await
+            .map_err(|e| e.to_string())?;
+        let keys: Vec<&str> = rules.iter().filter_map(|r| r.key.as_deref()).collect();
+        if keys != ["ssh", "web"] {
+            return Err(format!("want the rules back in order: {keys:?}"));
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A rule nlink did not write in a chain that has to be recreated refuses
+/// the recreate, which says so in the diff and changes nothing. An
+/// exclusive chain deletes the rule instead.
+#[tokio::test]
+async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nft-chain-refuse")?;
+        let nft = ns.connection_for::<Nftables>()?;
+        chain_c(Some((Hook::Input, Priority::Filter)), false)
+            .diff(&nft)
+            .await?
+            .apply(&nft)
+            .await?;
+        self::nft(&ns, "add rule inet t c tcp dport 8080 accept")?;
+
+        let moved = chain_c(Some((Hook::Input, Priority::Custom(-10))), false);
+        let diff = moved.diff(&nft).await?;
+        assert!(
+            diff.chains_to_recreate
+                .first()
+                .is_some_and(|r| r.is_refused()),
+            "{diff}"
+        );
+        assert!(diff.to_string().contains("recreate refused"), "{diff}");
+        let err = diff.apply(&nft).await.expect_err("the recreate is refused");
+        assert!(err.is_not_supported(), "{err}");
+        let chains = nft.list_chains_in("t", Family::Inet).await?;
+        assert_eq!(
+            chains
+                .iter()
+                .find(|c| c.name == "c")
+                .and_then(|c| c.priority),
+            Some(0),
+            "the refused apply changed the chain"
+        );
+
+        let exclusive = chain_c(Some((Hook::Input, Priority::Custom(-10))), true);
+        exclusive.diff(&nft).await?.apply(&nft).await?;
+        assert!(exclusive.diff(&nft).await?.is_empty());
+        let rules = nft.list_rules("t", Family::Inet).await?;
+        assert_eq!(
+            rules.len(),
+            2,
+            "the exclusive chain keeps only its own rules"
         );
         Ok(())
     })

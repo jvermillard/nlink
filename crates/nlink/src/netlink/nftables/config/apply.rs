@@ -124,6 +124,20 @@ impl NftablesDiff {
         //    one that update's own commit moved the ruleset to. Anything
         //    else committing in between makes the kernel refuse the batch
         //    with ERESTART, rather than apply a diff of a ruleset that is gone.
+        // A refused chain recreate fails here, before anything has changed
+        // (#478).
+        if let Some(refused) = self.chains_to_recreate.iter().find(|r| r.is_refused()) {
+            return Err(Error::NotSupported(format!(
+                "chain {}/{}: {} cannot be changed on the live chain, and recreating it would \
+                 delete rules nlink did not write: {}. Remove them, or declare the chain \
+                 exclusive, and apply again.",
+                refused.table,
+                refused.chain.name(),
+                refused.reason,
+                refused.blocked_by.join(", ")
+            )));
+        }
+
         let mut genid = self.generation;
         if !self.sets_to_update.is_empty() {
             self.update_sets(conn, genid).await?;
@@ -197,6 +211,11 @@ impl NftablesDiff {
                 tx = tx.del_object(table, name, *object_type, *family);
             }
         }
+        // Chains recreated with another hook, priority, type or device;
+        // their rules went in step 1 (#478).
+        for r in &self.chains_to_recreate {
+            tx = tx.del_chain(&r.table, r.chain.name(), r.family);
+        }
 
         // Phase 2 — add, in dependency order.
 
@@ -226,10 +245,14 @@ impl NftablesDiff {
         //    policy converges without a delete+recreate (which would drop
         //    the chain's rules) (#200). Sent with `add_chain`'s `NLM_F_EXCL`
         //    it was refused with `EEXIST`, and no policy change ever applied
-        //    (#456). The kernel refuses a changed hook, priority or type on
-        //    a live base chain either way.
+        //    (#456). A changed hook, priority or type the kernel refuses
+        //    either way, so those chains are recreated: deleted in step 3,
+        //    created here (#478).
         for (table_name, family, declared) in &self.chains_to_add {
             tx = tx.add_chain(build_chain(table_name, *family, declared)?);
+        }
+        for r in &self.chains_to_recreate {
+            tx = tx.add_chain(build_chain(&r.table, r.family, &r.chain)?);
         }
         for (table_name, family, declared) in &self.chains_to_modify {
             tx = tx.update_chain(build_chain(table_name, *family, declared)?);
