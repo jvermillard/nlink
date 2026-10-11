@@ -89,8 +89,8 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
                     "rates": {
                         "rx_bps": iface.rates.rx_bps(),
                         "tx_bps": iface.rates.tx_bps(),
-                        "rx_pps": iface.rates.rx_pps,
-                        "tx_pps": iface.rates.tx_pps,
+                        "rx_pps": iface.rates.rx_packets_per_sec,
+                        "tx_pps": iface.rates.tx_packets_per_sec,
                     },
                     "tc": iface.tc.as_ref().map(|tc| {
                         serde_json::json!({

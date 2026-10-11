@@ -72,6 +72,10 @@ use std::{
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
 
+/// The rates in [`InterfaceDiag::rates`]: the crate's one `LinkRates`,
+/// from [`stats`](crate::netlink::stats), since 0.32 (#525). This module had
+/// its own, in whole units with `rx_pps`/`tx_pps`.
+pub use crate::netlink::stats::LinkRates;
 use crate::netlink::{
     connection::Connection,
     error::Result,
@@ -89,7 +93,9 @@ use crate::netlink::{
 /// Network diagnostic report containing all collected information.
 #[derive(Debug, Clone)]
 pub struct DiagnosticReport {
-    /// When the report was generated.
+    /// When the link counters were read: the end of the link dump. A
+    /// [`Diagnostics::scan_since`] given this report takes its rates over
+    /// the time since.
     pub timestamp: Instant,
     /// Interface diagnostics.
     pub interfaces: Vec<InterfaceDiag>,
@@ -114,7 +120,10 @@ pub struct InterfaceDiag {
     pub mtu: Option<u32>,
     /// Link statistics.
     pub stats: LinkStats,
-    /// Calculated rates (requires previous sample).
+    /// The rates since the previous sample of this link — the runner's
+    /// last scan, or the report given to [`Diagnostics::scan_since`] — and
+    /// zero without one. Since 0.32 this is the crate's one `LinkRates`,
+    /// in bytes and packets per second as `f64` (#525).
     pub rates: LinkRates,
     /// Traffic control diagnostics.
     pub tc: Option<TcDiag>,
@@ -143,56 +152,6 @@ impl InterfaceDiag {
     /// right now?"
     pub fn is_operational(&self) -> bool {
         self.is_up() && matches!(self.state, OperState::Up)
-    }
-}
-
-/// Link transfer rates calculated from statistics deltas.
-///
-/// The byte fields were called `rx_bps`/`tx_bps` while being documented
-/// and computed as **bytes** per second, and `total_bps()` summed them
-/// and called the result bits — so it read 8× low, and a "saturated at
-/// 1 Gbps" alert built on it did not fire until 8 Gbps (#274). The
-/// fields now say bytes and the `*_bps()` accessors do the conversion,
-/// matching [`crate::netlink::stats::LinkRates`], which had it right.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LinkRates {
-    /// Receive bytes per second.
-    pub rx_bytes_per_sec: u64,
-    /// Transmit bytes per second.
-    pub tx_bytes_per_sec: u64,
-    /// Receive packets per second.
-    pub rx_pps: u64,
-    /// Transmit packets per second.
-    pub tx_pps: u64,
-    /// Sample duration in milliseconds.
-    pub sample_duration_ms: u64,
-}
-
-impl LinkRates {
-    /// Total bytes per second (rx + tx).
-    pub fn total_bytes_per_sec(&self) -> u64 {
-        self.rx_bytes_per_sec.saturating_add(self.tx_bytes_per_sec)
-    }
-
-    /// Receive **bits** per second.
-    pub fn rx_bps(&self) -> u64 {
-        self.rx_bytes_per_sec.saturating_mul(8)
-    }
-
-    /// Transmit **bits** per second.
-    pub fn tx_bps(&self) -> u64 {
-        self.tx_bytes_per_sec.saturating_mul(8)
-    }
-
-    /// Total **bits** per second (rx + tx) — comparable against a link
-    /// speed, which is always quoted in bits.
-    pub fn total_bps(&self) -> u64 {
-        self.total_bytes_per_sec().saturating_mul(8)
-    }
-
-    /// Total packets per second (rx + tx).
-    pub fn total_pps(&self) -> u64 {
-        self.rx_pps.saturating_add(self.tx_pps)
     }
 }
 
@@ -569,10 +528,32 @@ pub struct Diagnostics {
     conn: Connection<Route>,
     config: DiagnosticsConfig,
     /// Previous statistics for rate calculation.
-    prev_stats: Arc<Mutex<HashMap<u32, (Instant, LinkStats)>>>,
+    prev_stats: Arc<Mutex<HashMap<u32, LinkSample>>>,
     /// Previous TC stats for rate calculation (reserved for future use).
     #[allow(dead_code, clippy::type_complexity)]
     prev_tc_stats: Arc<Mutex<HashMap<(u32, u32), (Instant, u64, u64)>>>,
+}
+
+/// A link's counters as sampled: when, under what name, and the counters.
+type LinkSample = (Instant, String, LinkStats);
+
+/// The rates since `prev`, and its counters, when it is a sample of the
+/// same link — the same name — and none went backwards; zero rates (and
+/// still the counters, for the same link) otherwise.
+fn rates_since(
+    prev: Option<&LinkSample>,
+    name: &str,
+    stats: &LinkStats,
+    now: Instant,
+) -> (LinkRates, Option<LinkStats>) {
+    match prev {
+        Some((at, prev_name, prev)) if prev_name == name => {
+            let elapsed = now.saturating_duration_since(*at);
+            let rates = LinkRates::between(prev, stats, elapsed).unwrap_or_default();
+            (rates, Some(*prev))
+        }
+        _ => (LinkRates::default(), None),
+    }
 }
 
 impl Diagnostics {
@@ -607,12 +588,41 @@ impl Diagnostics {
     }
 
     /// Run a full diagnostic scan of all interfaces and routes.
+    ///
+    /// Rates are since this runner's previous scan; a fresh runner has
+    /// none, and reports zero. [`scan_since`](Self::scan_since) takes the
+    /// previous sample from the caller instead.
     pub async fn scan(&self) -> Result<DiagnosticReport> {
-        let timestamp = Instant::now();
+        let prev = self.prev_stats.lock().await.clone();
+        let (report, samples) = self.scan_with(&prev).await?;
+        *self.prev_stats.lock().await = samples;
+        Ok(report)
+    }
+
+    /// A full scan whose rates are since `previous`, a report the caller
+    /// kept (#525): a collector that builds a runner per tick, or scans
+    /// many namespaces with one, gets rates from its first scan. This
+    /// runner's own previous sample is neither used nor updated.
+    pub async fn scan_since(&self, previous: &DiagnosticReport) -> Result<DiagnosticReport> {
+        let prev = previous
+            .interfaces
+            .iter()
+            .map(|i| (i.ifindex, (previous.timestamp, i.name.clone(), i.stats)))
+            .collect();
+        Ok(self.scan_with(&prev).await?.0)
+    }
+
+    /// The scan, with the previous samples to take rates against; returns
+    /// the report and this scan's samples.
+    async fn scan_with(
+        &self,
+        prev_stats: &HashMap<u32, LinkSample>,
+    ) -> Result<(DiagnosticReport, HashMap<u32, LinkSample>)> {
         let mut all_issues = Vec::new();
 
-        // Get all links
+        // Get all links. Their counters' time is the end of this dump.
         let links = self.conn.get_links().await?;
+        let timestamp = Instant::now();
 
         // Get all addresses for checking
         let addresses = self.conn.get_addresses().await?;
@@ -657,16 +667,10 @@ impl Diagnostics {
             });
         }
 
-        // Scan each interface
+        // Scan each interface. A sample is only compared with one of the
+        // same name: a reused ifindex is another link (#274).
         let mut interfaces = Vec::new();
-        let mut prev_stats = self.prev_stats.lock().await;
-        // Everything we sample this pass. Whatever is left in
-        // `prev_stats` afterwards is an interface that has gone away or
-        // is now filtered out; keeping it forever leaked, and a reused
-        // ifindex got diffed against the *previous* interface's
-        // counters — masked into a spuriously-zero rate by the
-        // `saturating_sub` below (#274).
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut samples = HashMap::new();
 
         for link in links {
             // Skip loopback if configured
@@ -684,34 +688,8 @@ impl Diagnostics {
             let state = link.operstate().unwrap_or(OperState::Unknown);
             let stats = link.stats().cloned().unwrap_or_default();
 
-            // Calculate rates
-            let rates = if let Some((prev_time, prev)) = prev_stats.get(&ifindex) {
-                let elapsed = prev_time.elapsed();
-                if elapsed.as_millis() > 0 {
-                    let ms = elapsed.as_millis() as u64;
-                    LinkRates {
-                        rx_bytes_per_sec: (stats.rx_bytes().saturating_sub(prev.rx_bytes()))
-                            * 1000
-                            / ms,
-                        tx_bytes_per_sec: (stats.tx_bytes().saturating_sub(prev.tx_bytes()))
-                            * 1000
-                            / ms,
-                        rx_pps: (stats.rx_packets().saturating_sub(prev.rx_packets())) * 1000 / ms,
-                        tx_pps: (stats.tx_packets().saturating_sub(prev.tx_packets())) * 1000 / ms,
-                        sample_duration_ms: ms,
-                    }
-                } else {
-                    LinkRates::default()
-                }
-            } else {
-                LinkRates::default()
-            };
-
-            // Store current stats for next calculation
-            let prev = prev_stats
-                .insert(ifindex, (Instant::now(), stats))
-                .map(|(_, prev)| prev);
-            seen.insert(ifindex);
+            let (rates, prev) = rates_since(prev_stats.get(&ifindex), &name, &stats, timestamp);
+            samples.insert(ifindex, (timestamp, name.clone(), stats));
 
             // Detect issues for this interface
             let mut issues =
@@ -747,15 +725,13 @@ impl Diagnostics {
             });
         }
 
-        // Drop samples for anything that was not scanned this pass.
-        prev_stats.retain(|ifindex, _| seen.contains(ifindex));
-
-        Ok(DiagnosticReport {
+        let report = DiagnosticReport {
             timestamp,
             interfaces,
             routes,
             issues: all_issues,
-        })
+        };
+        Ok((report, samples))
     }
 
     /// Diagnose a specific interface.
@@ -782,30 +758,11 @@ impl Diagnostics {
         };
 
         // Calculate rates
+        let read_at = Instant::now();
         let mut prev_stats = self.prev_stats.lock().await;
-        let rates = if let Some((prev_time, prev)) = prev_stats.get(&ifindex) {
-            let elapsed = prev_time.elapsed();
-            if elapsed.as_millis() > 0 {
-                let ms = elapsed.as_millis() as u64;
-                LinkRates {
-                    rx_bytes_per_sec: (stats.rx_bytes().saturating_sub(prev.rx_bytes())) * 1000
-                        / ms,
-                    tx_bytes_per_sec: (stats.tx_bytes().saturating_sub(prev.tx_bytes())) * 1000
-                        / ms,
-                    rx_pps: (stats.rx_packets().saturating_sub(prev.rx_packets())) * 1000 / ms,
-                    tx_pps: (stats.tx_packets().saturating_sub(prev.tx_packets())) * 1000 / ms,
-                    sample_duration_ms: ms,
-                }
-            } else {
-                LinkRates::default()
-            }
-        } else {
-            LinkRates::default()
-        };
-
-        let prev = prev_stats
-            .insert(ifindex, (Instant::now(), stats))
-            .map(|(_, prev)| prev);
+        let (rates, prev) = rates_since(prev_stats.get(&ifindex), &name, &stats, read_at);
+        prev_stats.insert(ifindex, (read_at, name.clone(), stats));
+        drop(prev_stats);
 
         // Detect issues
         let mut issues =
@@ -1589,43 +1546,34 @@ mod tests {
         assert!(s.contains("Check cable"));
     }
 
+    /// The rates come from the one `LinkRates` (#525), in bytes per
+    /// second with bits eight times that (#274), and only against a sample
+    /// of the same link: another name at the ifindex is another link.
     #[test]
-    fn test_link_rates() {
-        let rates = LinkRates {
-            rx_bytes_per_sec: 1000,
-            tx_bytes_per_sec: 2000,
-            rx_pps: 10,
-            tx_pps: 20,
-            sample_duration_ms: 1000,
-        };
-
-        // The old assertion was `total_bps() == 3000`, which pinned the
-        // bug: 3000 is the byte total. Bits are eight times that (#274).
-        assert_eq!(rates.total_bytes_per_sec(), 3000);
-        assert_eq!(rates.total_bps(), 24_000);
-        assert_eq!(rates.rx_bps(), 8_000);
-        assert_eq!(rates.tx_bps(), 16_000);
-        assert_eq!(rates.total_pps(), 30);
-    }
-
-    #[test]
-    fn link_rates_agree_with_the_stats_module() {
-        // The crate has two `LinkRates`. They disagreed on what `bps`
-        // meant, and only the wrong one was re-exported at the crate
-        // root, so `nlink::LinkRates` was the broken one (#274). Pin
-        // that they now answer the same question the same way.
-        let diag = LinkRates {
-            rx_bytes_per_sec: 1_250_000,
-            tx_bytes_per_sec: 0,
-            ..LinkRates::default()
-        };
-        let stats = crate::netlink::stats::LinkRates {
-            rx_bytes_per_sec: 1_250_000.0,
+    fn rates_are_since_a_sample_of_the_same_link() {
+        let t0 = Instant::now();
+        let at = |bytes: u64, packets: u64| LinkStats {
+            rx_bytes: bytes,
+            rx_packets: packets,
             ..Default::default()
         };
-        assert_eq!(diag.rx_bps(), 10_000_000, "10 Mbit/s of bytes is 10 Mbit/s");
-        assert_eq!(diag.rx_bps() as f64, stats.rx_bps());
-        assert_eq!(diag.total_bps() as f64, stats.total_bps());
+        let prev: LinkSample = (t0, "eth0".into(), at(1000, 10));
+        let now = t0 + std::time::Duration::from_secs(2);
+        let (rates, back) = rates_since(Some(&prev), "eth0", &at(3_501_000, 30), now);
+        assert_eq!(rates.rx_bytes_per_sec, 1_750_000.0);
+        assert_eq!(rates.rx_bps(), 14_000_000.0);
+        assert_eq!(rates.rx_packets_per_sec, 10.0);
+        assert!(back.is_some());
+
+        let (rates, back) = rates_since(Some(&prev), "eth1", &at(3_501_000, 30), now);
+        assert_eq!(rates, LinkRates::default());
+        assert!(
+            back.is_none(),
+            "another link's counters are not a previous sample"
+        );
+        // A counter that went backwards is a reset: no rate.
+        let (rates, _) = rates_since(Some(&prev), "eth0", &at(10, 1), now);
+        assert_eq!(rates, LinkRates::default());
     }
 
     #[test]

@@ -174,6 +174,23 @@ pub struct LinkStats {
     pub(crate) collisions: u64,
 }
 
+impl From<&LinkStats64> for LinkStats {
+    fn from(s: &LinkStats64) -> Self {
+        Self {
+            rx_packets: s.rx_packets,
+            tx_packets: s.tx_packets,
+            rx_bytes: s.rx_bytes,
+            tx_bytes: s.tx_bytes,
+            rx_errors: s.rx_errors,
+            tx_errors: s.tx_errors,
+            rx_dropped: s.rx_dropped,
+            tx_dropped: s.tx_dropped,
+            multicast: s.multicast,
+            collisions: s.collisions,
+        }
+    }
+}
+
 impl LinkStats {
     /// Get the number of received packets.
     pub fn rx_packets(&self) -> u64 {
@@ -665,18 +682,7 @@ impl FromNetlink for LinkMessage {
                 }
                 attr_ids::IFLA_STATS64 => {
                     if let Some(stats) = LinkStats64::from_bytes(attr_data) {
-                        msg.stats = Some(LinkStats {
-                            rx_packets: stats.rx_packets,
-                            tx_packets: stats.tx_packets,
-                            rx_bytes: stats.rx_bytes,
-                            tx_bytes: stats.tx_bytes,
-                            rx_errors: stats.rx_errors,
-                            tx_errors: stats.tx_errors,
-                            rx_dropped: stats.rx_dropped,
-                            tx_dropped: stats.tx_dropped,
-                            multicast: stats.multicast,
-                            collisions: stats.collisions,
-                        });
+                        msg.stats = Some(LinkStats::from(&stats));
                     }
                 }
                 // Plan 190 §2.3c — GSO/GRO/TSO cap parsing.

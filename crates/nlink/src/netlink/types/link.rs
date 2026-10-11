@@ -359,6 +359,28 @@ impl LinkStats64 {
     }
 }
 
+/// The header of an `RTM_GETSTATS`/`RTM_NEWSTATS` message (struct
+/// if_stats_msg, Linux 4.7+). `filter_mask` selects the `IFLA_STATS_*`
+/// attributes, one bit each: `1 << (attr - 1)`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct IfStatsMsg {
+    pub family: u8,
+    pub pad1: u8,
+    pub pad2: u16,
+    pub ifindex: u32,
+    pub filter_mask: u32,
+}
+
+impl IfStatsMsg {
+    /// The struct's size on the wire.
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+}
+
+/// `IFLA_STATS_LINK_64`: a `struct rtnl_link_stats64` in an
+/// `RTM_NEWSTATS` message.
+pub const IFLA_STATS_LINK_64: u16 = 1;
+
 // ============================================================================
 // Bridge VLAN types
 // ============================================================================

@@ -39,28 +39,19 @@ fn test_issue_category_display() {
 
 #[test]
 fn test_link_rates() {
+    // `nlink::LinkRates` is the stats module's since 0.32 (#525): bytes and
+    // packets per second as f64, bits eight times the bytes (#274).
     let rates = LinkRates {
-        rx_bytes_per_sec: 1000,
-        tx_bytes_per_sec: 2000,
-        rx_pps: 10,
-        tx_pps: 20,
-        sample_duration_ms: 1000,
+        rx_bytes_per_sec: 1000.0,
+        tx_bytes_per_sec: 2000.0,
+        rx_packets_per_sec: 10.0,
+        tx_packets_per_sec: 20.0,
+        ..LinkRates::default()
     };
-
-    // The old assertion read `total_bps() == 3000`, which pinned the
-    // bug: the fields are bytes, so bits are eight times that (#274).
-    assert_eq!(rates.total_bytes_per_sec(), 3000);
-    assert_eq!(rates.total_bps(), 24_000);
-    assert_eq!(rates.total_pps(), 30);
-}
-
-#[test]
-fn test_link_rates_default() {
-    let rates = LinkRates::default();
-    assert_eq!(rates.rx_bytes_per_sec, 0);
-    assert_eq!(rates.tx_bytes_per_sec, 0);
-    assert_eq!(rates.rx_bps(), 0);
-    assert_eq!(rates.total_bps(), 0);
+    assert_eq!(rates.total_bytes_per_sec(), 3000.0);
+    assert_eq!(rates.total_bps(), 24_000.0);
+    assert_eq!(rates.total_packets_per_sec(), 30.0);
+    assert_eq!(LinkRates::default().total_bps(), 0.0);
 }
 
 #[test]
@@ -549,5 +540,159 @@ async fn the_no_default_route_warning_can_be_switched_off() -> nlink::Result<()>
     };
     let quiet = Diagnostics::with_config(ns.connection()?, config);
     assert!(!warned(&quiet.scan().await?));
+    Ok(())
+}
+
+/// Send `n` datagrams over `lo` in `ns`, to a bound receiver so no ICMP
+/// follows them.
+fn lo_traffic(ns: &TestNamespace, n: usize) {
+    crate::common::traffic::in_ns(ns, move || {
+        let rx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind rx");
+        let to = rx.local_addr().unwrap();
+        let tx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind tx");
+        for _ in 0..n {
+            tx.send_to(&[0u8; 100], to).expect("send");
+        }
+    });
+}
+
+/// #525: one `RTM_GETSTATS` dump reads every link's counters. An idle
+/// link's agree with what the link dump reports, and datagrams over `lo`
+/// show up in its.
+#[tokio::test]
+async fn stats64_dump_agrees_with_the_link_dump_and_counts_traffic() -> nlink::Result<()> {
+    use nlink::netlink::link::DummyLink;
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("stats64")?;
+    let conn = ns.connection()?;
+    crate::common::traffic::lo_up(&ns).await?;
+    conn.add_link(DummyLink::new("idle0")).await?;
+    let idle = conn.get_link_by_name("idle0").await?.expect("idle0");
+
+    let before = conn.get_stats64_all().await?;
+    let mut keys: Vec<u32> = before.keys().copied().collect();
+    keys.sort();
+    // Every link the link dump has — lo, idle0, and the fallback tunnels a
+    // namespace gets where their modules are loaded.
+    let mut links: Vec<u32> = conn
+        .get_links()
+        .await?
+        .iter()
+        .map(|l| l.ifindex())
+        .collect();
+    links.sort();
+    assert_eq!(keys, links);
+    let dumped = idle.stats().copied().unwrap_or_default();
+    let read = before[&idle.ifindex()];
+    assert_eq!(
+        (
+            read.rx_packets(),
+            read.tx_packets(),
+            read.rx_bytes(),
+            read.tx_bytes()
+        ),
+        (
+            dumped.rx_packets(),
+            dumped.tx_packets(),
+            dumped.rx_bytes(),
+            dumped.tx_bytes()
+        )
+    );
+
+    lo_traffic(&ns, 50);
+    let after = conn.get_stats64_all().await?;
+    let sent = after[&1].tx_packets() - before[&1].tx_packets();
+    assert!(sent >= 50, "lo sent {sent}");
+    assert!(after[&1].rx_bytes() - before[&1].rx_bytes() >= 50 * 100);
+    Ok(())
+}
+
+/// #525: `lo` is ifindex 1 in every namespace. A `StatsTracker` keyed by
+/// ifindex alone diffed one namespace's counters against another's; a
+/// `RateSampler` keeps them apart. Traffic in one namespace only: its
+/// `lo` has a rate, the other's has none.
+#[tokio::test]
+async fn a_rate_sampler_keeps_two_namespaces_lo_apart() -> nlink::Result<()> {
+    use nlink::netlink::stats::{RateSampler, StatsSnapshot};
+    require_root!();
+
+    let busy = TestNamespace::new("sampler-busy")?;
+    let quiet = TestNamespace::new("sampler-quiet")?;
+    let (busy_conn, quiet_conn) = (busy.connection()?, quiet.connection()?);
+    crate::common::traffic::lo_up(&busy).await?;
+    crate::common::traffic::lo_up(&quiet).await?;
+
+    let mut sampler = RateSampler::new();
+    assert!(
+        sampler
+            .sample(&StatsSnapshot::capture(&busy_conn).await?)
+            .is_empty()
+    );
+    assert!(
+        sampler
+            .sample(&StatsSnapshot::capture(&quiet_conn).await?)
+            .is_empty()
+    );
+    lo_traffic(&busy, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let busy_snap = StatsSnapshot::capture(&busy_conn).await?;
+    let quiet_snap = StatsSnapshot::capture(&quiet_conn).await?;
+    assert_ne!(busy_snap.netns, quiet_snap.netns);
+    assert!(busy_snap.netns.is_some());
+    let busy_rates = sampler.sample(&busy_snap);
+    let quiet_rates = sampler.sample(&quiet_snap);
+    let lo = |rates: &[nlink::netlink::stats::SampledRates]| {
+        rates
+            .iter()
+            .find(|r| r.key.ifindex == 1)
+            .map(|r| r.rates)
+            .expect("lo")
+    };
+    assert!(lo(&busy_rates).tx_packets_per_sec > 0.0, "{busy_rates:?}");
+    assert_eq!(lo(&quiet_rates).tx_packets_per_sec, 0.0, "{quiet_rates:?}");
+    Ok(())
+}
+
+/// #525: a fresh `Diagnostics` has no previous sample, so its rates were
+/// always 0. `scan_since` takes one from the caller.
+#[tokio::test]
+async fn scan_since_gives_a_fresh_runner_rates() -> nlink::Result<()> {
+    require_root!();
+    let ns = TestNamespace::new("diag-since")?;
+    crate::common::traffic::lo_up(&ns).await?;
+    let config = || DiagnosticsConfig {
+        skip_loopback: false,
+        ..Default::default()
+    };
+    let lo = |report: &nlink::netlink::diagnostics::DiagnosticReport| {
+        report
+            .interfaces
+            .iter()
+            .find(|i| i.name == "lo")
+            .expect("lo")
+            .rates
+    };
+
+    let first = Diagnostics::with_config(ns.connection()?, config())
+        .scan()
+        .await?;
+    lo_traffic(&ns, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let plain = Diagnostics::with_config(ns.connection()?, config())
+        .scan()
+        .await?;
+    assert_eq!(
+        lo(&plain).tx_packets_per_sec,
+        0.0,
+        "a fresh runner has no sample"
+    );
+    let since = Diagnostics::with_config(ns.connection()?, config())
+        .scan_since(&first)
+        .await?;
+    assert!(lo(&since).tx_packets_per_sec > 0.0, "{:?}", lo(&since));
+    assert!(lo(&since).tx_bytes_per_sec >= 100.0 * lo(&since).tx_packets_per_sec);
     Ok(())
 }
