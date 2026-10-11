@@ -69,7 +69,7 @@ use super::{
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
         DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_classid,
-        flower_matches, fq_codel_target_matches, htb_class_rates_match, root_htb_options,
+        flower_matches, fq_codel_target_matches, htb_class_rates_match, root_conflict,
     },
 };
 
@@ -453,23 +453,25 @@ impl RateLimiter {
                 report.changes_made += 1;
                 report.root_modified = true;
             }
-            Some(q) if q.kind() != Some("htb") || q.handle() != root_handle => {
-                if opts.fallback_to_apply {
-                    report.changes_made += 1;
-                    report.root_modified = true;
-                    if !opts.dry_run {
-                        self.apply(conn).await?;
+            // Another root, or an HTB `1:` with another default class —
+            // another recipe's tree, whose classes this one would mix into
+            // (#491).
+            Some(q) => {
+                if let Some(conflict) = root_conflict(q, &tree, root_handle, LEAF_CLASS_MINOR) {
+                    if opts.fallback_to_apply {
+                        report.changes_made += 1;
+                        report.root_modified = true;
+                        if !opts.dry_run {
+                            self.apply(conn).await?;
+                        }
+                        return Ok(true);
                     }
-                    return Ok(true);
+                    return Err(Error::InvalidMessage(format!(
+                        "RateLimiter::reconcile({ctx}): root qdisc is {conflict}; pass \
+                         ReconcileOptions::with_fallback_to_apply(true) to rebuild"
+                    )));
                 }
-                return Err(Error::InvalidMessage(format!(
-                    "RateLimiter::reconcile({ctx}): root qdisc is {:?} (handle {}), not HTB \
-                     at 1:; pass ReconcileOptions::with_fallback_to_apply(true) to rebuild",
-                    q.kind(),
-                    q.handle()
-                )));
             }
-            Some(_) => {}
         }
 
         // Classes 1:1 and 1:10.
@@ -1239,8 +1241,9 @@ impl PerHostLimiter {
                 report.root_modified = true;
             }
             Some(q) => {
-                let kind_ok = q.kind() == Some("htb") && q.handle() == root_handle;
-                if !kind_ok {
+                // Another root, or another default class: HTB cannot
+                // change either in place (#491).
+                if let Some(conflict) = root_conflict(q, &tree, root_handle, default_minor) {
                     if opts.fallback_to_apply {
                         if opts.dry_run {
                             report.changes_made += 1;
@@ -1250,35 +1253,10 @@ impl PerHostLimiter {
                         return self.apply_as_reconcile(conn).await;
                     }
                     return Err(Error::InvalidMessage(format!(
-                        "PerHostLimiter::reconcile: root qdisc on {} is {:?} (handle {}), \
-                         not HTB at 1:; pass ReconcileOptions::with_fallback_to_apply(true) \
-                         to rebuild",
-                        self.dev,
-                        q.kind(),
-                        q.handle()
+                        "PerHostLimiter::reconcile: root qdisc on {} is {conflict}; pass \
+                         ReconcileOptions::with_fallback_to_apply(true) to rebuild",
+                        self.dev
                     )));
-                }
-                let default_ok = root_htb_options(&tree)
-                    .map(|opts| opts.default_class == default_minor as u32)
-                    .unwrap_or(false);
-                if !default_ok {
-                    if !opts.dry_run {
-                        let cfg = HtbQdiscConfig::new()
-                            .default_class(default_minor as u32)
-                            .build();
-                        conn.change_qdisc_by_index_full(
-                            ifindex,
-                            TcHandle::ROOT,
-                            Some(root_handle),
-                            cfg,
-                        )
-                        .await
-                        .map_err(|e| {
-                            e.with_context("PerHostLimiter::reconcile: update HTB root")
-                        })?;
-                    }
-                    report.changes_made += 1;
-                    report.root_modified = true;
                 }
             }
         }

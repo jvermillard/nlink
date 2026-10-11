@@ -236,7 +236,9 @@ for q in &qdiscs {
 `FilterPriority` is a `u16` with documented bands (operator 1..=49,
 recipe 100..=199, app 200..=999, system 1000..). `PerPeerImpairer`
 (`100 + i`) and `PerHostLimiter` (four per rule from `100 + 4i`, #434)
-install in the recipe band so they don't fight operator-installed rules.
+start in the recipe band so they don't fight operator-installed rules;
+past 100 (resp. 25) rules they continue above 199, which is why each
+tells its own filters by the class they target, not by the band (#491).
 
 ## TC API conventions
 

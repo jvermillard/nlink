@@ -160,6 +160,36 @@ pub(crate) fn root_htb_options(tree: &LiveTree) -> Option<HtbOptions> {
     }
 }
 
+/// What keeps the live root qdisc `root` from being the HTB at
+/// `root_handle` with default class `default_minor` a recipe builds, if
+/// anything: another kind or handle, or another default class. HTB has no
+/// change operation, so neither can be fixed in place — a change is always
+/// `EINVAL` — and a recipe rebuilds the tree or says what is in the way
+/// (#491).
+pub(crate) fn root_conflict(
+    root: &TcMessage,
+    tree: &LiveTree,
+    root_handle: TcHandle,
+    default_minor: u16,
+) -> Option<String> {
+    if root.kind() != Some("htb") || root.handle() != root_handle {
+        return Some(format!(
+            "{:?} (handle {}), not HTB at {root_handle}",
+            root.kind(),
+            root.handle()
+        ));
+    }
+    let default = root_htb_options(tree).map(|o| o.default_class);
+    if default != Some(u32::from(default_minor)) {
+        let have = default.map_or_else(|| "?".to_string(), |d| format!("{d:#x}"));
+        return Some(format!(
+            "HTB at {root_handle} with default class {have}, not {default_minor:#x}: another \
+             recipe's tree, or one built before 0.26"
+        ));
+    }
+    None
+}
+
 /// Get parsed HTB class options for a live class message.
 pub(crate) fn htb_class_options(class: &TcMessage) -> Option<HtbClassOptions> {
     if class.kind()? != "htb" {
