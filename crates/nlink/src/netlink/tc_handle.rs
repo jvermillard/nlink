@@ -38,6 +38,7 @@ use super::types::tc::tc_handle as raw;
 /// Internally `(major as u32) << 16 | minor as u32`, matching the
 /// kernel's encoding. Round-trips with `tc(8)` notation via
 /// [`FromStr`] and [`fmt::Display`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TcHandle(u32);

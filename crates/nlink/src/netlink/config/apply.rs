@@ -160,6 +160,7 @@ impl ApplyOptions {
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 #[must_use = "Inspect `.is_success()`, `.errors`, or `.summary_text()` to learn the outcome"]
+#[non_exhaustive]
 pub struct ApplyResult {
     /// Number of changes made (or that would be made in dry-run mode).
     pub changes_made: usize,
@@ -167,6 +168,9 @@ pub struct ApplyResult {
     pub errors: Vec<ApplyError>,
     /// Summary of what was done.
     pub summary: Vec<String>,
+    /// The links the apply deleted and created again (or, on a dry run,
+    /// would), each with why and what it lost (#513).
+    pub recreated: Vec<super::LinkRecreate>,
 }
 
 impl ApplyResult {
@@ -308,7 +312,12 @@ pub async fn apply_diff(
                  (or the link), and apply again.",
                 recreate.name,
                 recreate.reason,
-                recreate.blocked_by.join(", ")
+                recreate
+                    .blocked_by
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             if options.continue_on_error {
                 result.errors.push(ApplyError {
@@ -323,6 +332,7 @@ pub async fn apply_diff(
         if options.dry_run {
             result.summary.push(format!("Would {op}"));
             result.changes_made += 1;
+            result.recreated.push(recreate.clone());
             continue;
         }
         match conn.del_link_if_exists(recreate.name.as_str()).await {
@@ -332,9 +342,10 @@ pub async fn apply_diff(
                     recreate.name, recreate.reason
                 ));
                 result.changes_made += 1;
+                result.recreated.push(recreate.clone());
             }
             // Deleted with the link it is stacked on.
-            Ok(false) => {}
+            Ok(false) => result.recreated.push(recreate.clone()),
             Err(e) => {
                 if options.continue_on_error {
                     result.errors.push(ApplyError {

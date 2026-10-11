@@ -25,6 +25,22 @@ All notable changes to this project will be documented in this file.
     like the other diffs'. The `nlink-config` and `nlink-nft` diff output
     ends with one again: they printed with `print!`.
 
+- **Typed recreate blockers, and a report of what was recreated (#513,
+  part 1).**
+  - `LinkRecreate::blocked_by` is a `Vec<Blocker>`. `Blocker` is an enum
+    with one variant per thing a recreate would destroy that the config
+    does not declare: an address, route, qdisc, class, filter, FDB entry,
+    neighbour, proxy neighbour or nexthop, a stacked link, a port, or a
+    peer in another namespace. `Unsupported` covers a link that cannot be
+    recreated at all. Each variant's `Display` is the text the list held
+    before. In JSON a blocker is tagged by `kind`.
+  - `ApplyResult::recreated` lists the links the apply deleted and created
+    again; a dry run lists the ones it would.
+  - `LinkRecreate::resets` says what each recreated link lost that the
+    config does not declare: its alias, and a MAC address the kernel
+    picks again.
+  - `TcHandle` derives `JsonSchema` under `schemars`.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
