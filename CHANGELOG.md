@@ -127,6 +127,21 @@ All notable changes to this project will be documented in this file.
   `percent_to_prob`. A root test installs the same netem through `tc`
   and through nlink and compares the kernel's dumps byte for byte.
 
+- **cake agrees with tc and the kernel (#635).** Each of these was found
+  by installing cake through `tc` and through nlink and comparing the
+  kernel's state.
+  - A replace turns a flag off. `CakeConfig` sent `nat`, `wash`,
+    `ingress` and autorate only when they were on, and `cake_change`
+    keeps any attribute it isn't sent. Once set, those flags stayed on.
+  - `no-split-gso` reaches the kernel. `split_gso` defaulted to false
+    while the kernel's default is on, and false was never sent, so every
+    nlink cake split GSO segments.
+  - `rtt` sets the target as tc does: tc sends a twentieth of the RTT as
+    the target. `rtt 50ms` used to leave the kernel's 5 ms target in
+    place.
+  - `CakeOptions::raw` reads raw mode from the attribute's presence.
+    `cake_dump` sends it with the value 0, so it always read false.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
