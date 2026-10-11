@@ -8230,7 +8230,9 @@ impl Connection<Route> {
     ///   qdisc's own handle: a new qdisc is grafted over the live one, so
     ///   the slot is never bare. A same-kind qdisc with classes is refused
     ///   instead (`is_not_supported`), because the new one would not have
-    ///   them.
+    ///   them. fq_codel and sfq are not refused: their classes are the
+    ///   flows that have packets queued, which a recreate drops along with
+    ///   the queue (#596).
     ///
     /// # Example
     ///
@@ -8342,7 +8344,11 @@ impl Connection<Route> {
         // Recreate: a new qdisc grafted over the live one. A same-kind
         // recreate would take the live qdisc's classes with it, which a
         // caller asking to change parameters does not expect; refuse that.
-        if same_kind {
+        // fq_codel's and sfq's classes are not a tree anyone built: their
+        // `walk` reports each flow that has packets queued, so a busy one
+        // always has some. Recreating them drops the queue, as any graft
+        // does (#596).
+        if same_kind && !matches!(config.kind(), "fq_codel" | "sfq") {
             let classes = self
                 .get_classes_by_index(ifindex)
                 .await?

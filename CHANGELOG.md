@@ -1162,6 +1162,23 @@ All notable changes to this project will be documented in this file.
   only in the guard step, are in both lists now. A local root run with
   the full strict list passes all 548 tests.
 
+- **A declared fq_codel `flows` change never reached the kernel (#596).**
+  The diff skipped `flows` because a change could not act on it (#361),
+  and the declarative replace stripped it. Since #486, `replace_qdisc`
+  recreates an fq_codel whose live table is a different size, so the diff
+  now compares `flows`, and the apply sends it. A `flows` change replaces
+  the qdisc, which drops its queue and resets its statistics, as `tc
+  qdisc replace` does.
+
+  That recreate path also refused to replace a busy fq_codel or sfq.
+  Their `walk` reports every flow with packets queued as a class, and a
+  same-kind recreate refuses to drop classes, so as not to take an HTB
+  tree down with it. A `flows` change, or any change to an sfq (which can
+  only be recreated), failed with "would delete its N class(es)" whenever
+  traffic was queued. Those two kinds are exempt now. A root test queues a
+  burst behind an 8 kbit HTB class and changes both leaves under it; the
+  transition test reads `flows` back with `tc`.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it

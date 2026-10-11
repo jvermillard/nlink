@@ -1236,7 +1236,7 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
         DeclaredQdiscType::FqCodel { .. } => {
             let config = qdisc
                 .qdisc_type
-                .fq_codel_config(true)
+                .fq_codel_config()
                 .expect("matched the FqCodel arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
@@ -1369,11 +1369,11 @@ async fn atomic_replace(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resu
             .await
         }
         DeclaredQdiscType::FqCodel { .. } => {
-            // `false`: this is a change to a live qdisc, so `flows`
-            // must not go on the wire — see `fq_codel_config` (#361).
+            // With `flows`: `replace_qdisc` leaves it out of a change and
+            // recreates the qdisc when the live table differs (#596).
             let cfg = qdisc
                 .qdisc_type
-                .fq_codel_config(false)
+                .fq_codel_config()
                 .expect("matched the FqCodel arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
