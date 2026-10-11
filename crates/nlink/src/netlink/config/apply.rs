@@ -889,8 +889,13 @@ pub async fn apply_diff(
 /// devices: the kernel refuses `IFLA_ADDRESS` on them (netkit answers a
 /// bare EOPNOTSUPP), and if the address were dropped instead the diff
 /// would ask for it on every apply. Say which knob is wrong instead.
-async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()> {
-    match &link.link_type {
+/// The typed config `create_link` sends for a declared link; `None` for a
+/// physical device, which cannot be created. `diff_against` encodes the
+/// same configs to predict recreates without a kernel (#513).
+pub(crate) fn link_config(
+    link: &DeclaredLink,
+) -> Option<Box<dyn crate::netlink::link::LinkConfig>> {
+    let config: Box<dyn crate::netlink::link::LinkConfig> = match &link.link_type {
         DeclaredLinkType::Dummy => {
             let mut config = DummyLink::new(&link.name);
             if let Some(mtu) = link.mtu {
@@ -899,7 +904,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Veth { peer } => {
             let mut config = VethLink::new(&link.name, peer);
@@ -909,7 +914,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Bridge => {
             let mut config = BridgeLink::new(&link.name);
@@ -919,7 +924,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Vlan {
             parent,
@@ -936,7 +941,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Vxlan {
             vni,
@@ -971,7 +976,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Macvlan { parent, mode } => {
             let mut config = MacvlanLink::new(&link.name, parent);
@@ -982,7 +987,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Bond {
             mode,
@@ -1026,7 +1031,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Ifb => {
             let mut config = IfbLink::new(&link.name);
@@ -1036,7 +1041,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Vrf { table } => {
             let mut config = crate::netlink::link::VrfLink::new(&link.name, *table);
@@ -1046,14 +1051,14 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Ovpn => {
             let mut config = crate::netlink::link::OvpnLink::new(&link.name);
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
         DeclaredLinkType::Netkit {
             peer,
@@ -1085,12 +1090,17 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
-            conn.add_link(config).await?;
+            Box::new(config)
         }
-        DeclaredLinkType::Physical => {
-            // Physical interfaces can't be created, only configured
-            // This should not be reached
-        }
+        // Physical interfaces can't be created, only configured.
+        DeclaredLinkType::Physical => return None,
+    };
+    Some(config)
+}
+
+async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()> {
+    if let Some(config) = link_config(link) {
+        conn.add_link(config).await?;
     }
 
     // Enslave before bringing up: a bond refuses a port that is already
