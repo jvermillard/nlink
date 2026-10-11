@@ -401,6 +401,9 @@ fn step_operation(step: &Step) -> String {
         Step::PinBridgeMtu { bridge, mtu } => format!("restore bridge {bridge} mtu={mtu}"),
         Step::HoldVlanDown { vlan } => format!("take VLAN {vlan} down"),
         Step::AddAddress(a) => format!("add address {}/{} on {}", a.address, a.prefix_len, a.dev),
+        Step::ChangeAddress(a) => {
+            format!("change address {}/{} on {}", a.address, a.prefix_len, a.dev)
+        }
         Step::DeleteAddress { address: a, .. } => {
             format!("remove address {}/{} on {}", a.address, a.prefix_len, a.dev)
         }
@@ -612,6 +615,16 @@ async fn run_step(
             }
             Err(e) => return Err(e),
         },
+        Step::ChangeAddress(addr) => {
+            change_address(conn, addr).await?;
+            Outcome::Changed(
+                format!(
+                    "Changed address {}/{} on {}",
+                    addr.address, addr.prefix_len, addr.dev
+                ),
+                1,
+            )
+        }
         Step::DeleteAddress { address: addr, .. } => match del_address(conn, addr).await {
             Ok(()) => Outcome::Changed(
                 format!(
@@ -1072,14 +1085,80 @@ async fn enslave(conn: &Connection<Route>, name: &str, master: &str) -> Result<(
 }
 
 async fn add_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {
+    match address_config(addr) {
+        AddressConfigOf::V4(c) => conn.add_address(c).await,
+        AddressConfigOf::V6(c) => conn.add_address(c).await,
+    }
+}
+
+/// Change an address's metric, lifetimes or (IPv6) flags in place, with
+/// `NLM_F_REPLACE` and everything declared (#516).
+async fn change_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {
+    match address_config(addr) {
+        AddressConfigOf::V4(c) => conn.replace_address(c).await,
+        AddressConfigOf::V6(c) => conn.replace_address(c).await,
+    }
+}
+
+enum AddressConfigOf {
+    V4(Ipv4Address),
+    V6(Ipv6Address),
+}
+
+/// The imperative config for a declared address, with every attribute it
+/// declares (#516).
+fn address_config(addr: &DeclaredAddress) -> AddressConfigOf {
+    let t = &addr.attrs;
+    let lifetimes = t.lifetimes.map(|(valid, preferred)| {
+        let secs = |d: std::time::Duration| u32::try_from(d.as_secs()).unwrap_or(u32::MAX - 1);
+        (secs(valid), secs(preferred))
+    });
     match addr.address {
         IpAddr::V4(v4) => {
-            let config = Ipv4Address::new(&addr.dev, v4, addr.prefix_len);
-            conn.add_address(config).await
+            let mut c = Ipv4Address::new(&addr.dev, v4, addr.prefix_len);
+            if let Some(IpAddr::V4(peer)) = t.peer {
+                c = c.peer(peer);
+            }
+            if let Some(label) = &t.label {
+                c = c.label(label.clone());
+            }
+            if let Some(metric) = t.metric {
+                c = c.metric(metric);
+            }
+            if t.noprefixroute {
+                c = c.noprefixroute();
+            }
+            if t.home {
+                c = c.home();
+            }
+            if let Some((valid, preferred)) = lifetimes {
+                c = c.valid_lifetime(valid).preferred_lifetime(preferred);
+            }
+            AddressConfigOf::V4(c)
         }
         IpAddr::V6(v6) => {
-            let config = Ipv6Address::new(&addr.dev, v6, addr.prefix_len);
-            conn.add_address(config).await
+            let mut c = Ipv6Address::new(&addr.dev, v6, addr.prefix_len);
+            if let Some(IpAddr::V6(peer)) = t.peer {
+                c = c.peer(peer);
+            }
+            if let Some(metric) = t.metric {
+                c = c.metric(metric);
+            }
+            for (on, set) in [
+                (t.nodad, Ipv6Address::nodad as fn(Ipv6Address) -> Ipv6Address),
+                (t.optimistic, Ipv6Address::optimistic),
+                (t.noprefixroute, Ipv6Address::noprefixroute),
+                (t.home, Ipv6Address::home),
+                (t.mngtmpaddr, Ipv6Address::mngtmpaddr),
+            ] {
+                if on {
+                    c = set(c);
+                }
+            }
+            if let Some((valid, preferred)) = lifetimes {
+                c = c.valid_lifetime(valid).preferred_lifetime(preferred);
+            }
+            AddressConfigOf::V6(c)
         }
     }
 }
@@ -1157,8 +1236,11 @@ async fn add_route(
 }
 
 async fn del_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {
-    conn.del_address(addr.dev.as_str(), addr.address, addr.prefix_len)
-        .await
+    // The peer names a point-to-point address (#516).
+    match address_config(addr) {
+        AddressConfigOf::V4(c) => conn.del_address_config(c).await,
+        AddressConfigOf::V6(c) => conn.del_address_config(c).await,
+    }
 }
 
 /// `Ok(true)` when the route was deleted, `Ok(false)` when the kernel

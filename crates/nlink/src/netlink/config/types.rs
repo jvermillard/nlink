@@ -507,6 +507,43 @@ impl NetworkConfig {
         Ok(self)
     }
 
+    /// Add an address with more than its prefix (#516): a peer, a label,
+    /// a metric, flags, lifetimes. A setter the address's family has no
+    /// use for is a validation error.
+    ///
+    /// ```
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::time::Duration;
+    /// use nlink::netlink::config::NetworkConfig;
+    ///
+    /// let config = NetworkConfig::new()
+    ///     .address_with("eth0", "fd00::1/64", |a| a.nodad().noprefixroute().metric(100))?
+    ///     .address_with("eth0", "10.0.0.1/24", |a| a.label("eth0:mgmt"))?
+    ///     .address_with("eth0", "10.0.1.1/24", |a| {
+    ///         a.lifetime(Duration::from_secs(3600), Duration::from_secs(1800))
+    ///     })?;
+    /// config.validate()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn address_with(
+        mut self,
+        dev: &str,
+        addr: &str,
+        f: impl FnOnce(AddressBuilder) -> AddressBuilder,
+    ) -> Result<Self, AddressParseError> {
+        let built = f(AddressBuilder::new(DeclaredAddress::parse(dev, addr)?));
+        let at = format!("addresses.{dev}/{addr}");
+        self.invalid.extend(
+            built
+                .errors
+                .into_iter()
+                .map(|e| crate::netlink::error::ValidationErrorInfo::new(at.clone(), e)),
+        );
+        self.addresses.push(built.address);
+        Ok(self)
+    }
+
     /// Add a route.
     ///
     /// The destination should be in CIDR notation (e.g., "10.0.0.0/8" or "0.0.0.0/0").
@@ -1461,6 +1498,165 @@ pub struct DeclaredAddress {
     pub(crate) dev: String,
     pub(crate) address: IpAddr,
     pub(crate) prefix_len: u8,
+    /// Everything else an address can carry (#516): the peer, label,
+    /// metric, flags and lifetimes. All unset by default.
+    pub(crate) attrs: AddressAttrs,
+}
+
+/// What an address carries besides its address and prefix (#516). Set
+/// with [`AddressBuilder`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AddressAttrs {
+    /// The other end of a point-to-point address.
+    pub(crate) peer: Option<IpAddr>,
+    /// The IPv4 label (`eth0:1`); the kernel's default is the device name.
+    pub(crate) label: Option<String>,
+    /// The metric of the prefix route (`IFA_RT_PRIORITY`).
+    pub(crate) metric: Option<u32>,
+    /// `IFA_F_NODAD`: skip duplicate address detection (IPv6).
+    pub(crate) nodad: bool,
+    /// `IFA_F_OPTIMISTIC`: usable during DAD (IPv6, RFC 4429).
+    pub(crate) optimistic: bool,
+    /// `IFA_F_NOPREFIXROUTE`: no prefix route for it.
+    pub(crate) noprefixroute: bool,
+    /// `IFA_F_HOMEADDRESS`: a Mobile IPv6 home address.
+    pub(crate) home: bool,
+    /// `IFA_F_MANAGETEMPADDR`: make privacy addresses from it (IPv6).
+    pub(crate) mngtmpaddr: bool,
+    /// The valid and preferred lifetimes; `None` is forever.
+    pub(crate) lifetimes: Option<(std::time::Duration, std::time::Duration)>,
+}
+
+impl AddressAttrs {
+    /// The `IFA_F_*` bits a declaration sets.
+    pub(crate) fn flag_bits(&self) -> u32 {
+        use crate::netlink::types::addr::ifa_flags as f;
+        let mut bits = 0;
+        for (on, bit) in [
+            (self.nodad, f::NODAD),
+            (self.optimistic, f::OPTIMISTIC),
+            (self.noprefixroute, f::NOPREFIXROUTE),
+            (self.home, f::HOMEADDRESS),
+            (self.mngtmpaddr, f::MANAGETEMPADDR),
+        ] {
+            if on {
+                bits |= bit;
+            }
+        }
+        bits
+    }
+}
+
+/// The attributes of an address beyond `address/prefix`, for
+/// [`NetworkConfig::address_with`] (#516). A setter for the other family
+/// (a label on IPv6, `nodad` on IPv4) is a validation error.
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct AddressBuilder {
+    address: DeclaredAddress,
+    errors: Vec<String>,
+}
+
+impl AddressBuilder {
+    fn new(address: DeclaredAddress) -> Self {
+        Self {
+            address,
+            errors: Vec::new(),
+        }
+    }
+
+    fn ipv6_only(&mut self, what: &str) {
+        if self.address.address.is_ipv4() {
+            self.errors.push(format!("{what} is an IPv6 address flag"));
+        }
+    }
+
+    /// The other end of a point-to-point address (`ip addr add A peer P`).
+    /// The declared prefix is the peer's.
+    pub fn peer(mut self, peer: &str) -> Self {
+        match peer.parse::<IpAddr>() {
+            Ok(p) if p.is_ipv4() == self.address.address.is_ipv4() => {
+                self.address.attrs.peer = Some(p)
+            }
+            Ok(p) => self.errors.push(format!("peer {p} is another address family")),
+            Err(_) => self.errors.push(format!("peer {peer:?} is not an IP address")),
+        }
+        self
+    }
+
+    /// The IPv4 label (`ip addr add … label eth0:1`). The kernel wants it
+    /// to start with the device name, and at most 15 bytes.
+    pub fn label(mut self, label: &str) -> Self {
+        if self.address.address.is_ipv6() {
+            self.errors.push("a label is IPv4 only".into());
+        } else if !label.starts_with(self.address.dev.as_str()) || label.len() > 15 {
+            self.errors.push(format!(
+                "label {label:?} must start with the device name {:?} and be at most 15 bytes",
+                self.address.dev
+            ));
+        }
+        self.address.attrs.label = Some(label.to_string());
+        self
+    }
+
+    /// The metric of the prefix route the address installs.
+    pub fn metric(mut self, metric: u32) -> Self {
+        self.address.attrs.metric = Some(metric);
+        self
+    }
+
+    /// Skip duplicate address detection (IPv6).
+    pub fn nodad(mut self) -> Self {
+        self.ipv6_only("nodad");
+        self.address.attrs.nodad = true;
+        self
+    }
+
+    /// Usable while duplicate address detection runs (IPv6, RFC 4429;
+    /// the device needs `optimistic_dad`). Set at creation only: the
+    /// kernel clears the flag when DAD ends, so it is not compared.
+    pub fn optimistic(mut self) -> Self {
+        self.ipv6_only("optimistic");
+        self.address.attrs.optimistic = true;
+        self
+    }
+
+    /// Install no prefix route for it.
+    pub fn noprefixroute(mut self) -> Self {
+        self.address.attrs.noprefixroute = true;
+        self
+    }
+
+    /// A Mobile IPv6 home address.
+    pub fn home(mut self) -> Self {
+        self.address.attrs.home = true;
+        self
+    }
+
+    /// Make privacy (temporary) addresses from this one (IPv6).
+    pub fn mngtmpaddr(mut self) -> Self {
+        self.ipv6_only("mngtmpaddr");
+        self.address.attrs.mngtmpaddr = true;
+        self
+    }
+
+    /// Expire the address: `valid` after the apply it is removed,
+    /// `preferred` after it is deprecated. Whole seconds, at most
+    /// `u32::MAX - 1`; `preferred` no longer than `valid`. Each apply
+    /// that changes the address sets them afresh; an apply that finds it
+    /// in place does not refresh them.
+    pub fn lifetime(mut self, valid: std::time::Duration, preferred: std::time::Duration) -> Self {
+        if preferred > valid {
+            self.errors
+                .push("the preferred lifetime is longer than the valid one".into());
+        }
+        if valid.as_secs() >= u64::from(u32::MAX) {
+            self.errors
+                .push("a lifetime is at most u32::MAX - 1 seconds; leave it out for forever".into());
+        }
+        self.address.attrs.lifetimes = Some((valid, preferred));
+        self
+    }
 }
 
 /// Serde shadow for [`DeclaredAddress`] — the human-facing
@@ -1475,6 +1671,36 @@ struct AddressRepr {
     dev: String,
     /// CIDR-notation address, e.g. `"10.0.0.1/24"` or `"fd00::1/64"`.
     address: String,
+    /// The other end of a point-to-point address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer: Option<String>,
+    /// The IPv4 label (`eth0:1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    /// The metric of the prefix route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metric: Option<u32>,
+    /// Address flags: `nodad`, `optimistic`, `noprefixroute`, `home`,
+    /// `mngtmpaddr`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    flags: Vec<String>,
+    /// The valid lifetime (`"3600s"`, in tc(8)'s time units); forever when
+    /// absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::util::serde_units::option_duration"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    valid_lft: Option<std::time::Duration>,
+    /// The preferred lifetime; the valid one when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::util::serde_units::option_duration"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    preferred_lft: Option<std::time::Duration>,
 }
 
 // Delegate `DeclaredAddress`'s schema to `AddressRepr` so it
@@ -1502,9 +1728,27 @@ impl schemars::JsonSchema for DeclaredAddress {
 #[cfg(feature = "serde")]
 impl From<DeclaredAddress> for AddressRepr {
     fn from(a: DeclaredAddress) -> Self {
+        let t = &a.attrs;
+        let flags = [
+            (t.nodad, "nodad"),
+            (t.optimistic, "optimistic"),
+            (t.noprefixroute, "noprefixroute"),
+            (t.home, "home"),
+            (t.mngtmpaddr, "mngtmpaddr"),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_string())
+        .collect();
         AddressRepr {
-            dev: a.dev,
             address: format!("{}/{}", a.address, a.prefix_len),
+            peer: t.peer.map(|p| p.to_string()),
+            label: t.label.clone(),
+            metric: t.metric,
+            flags,
+            valid_lft: t.lifetimes.map(|(v, _)| v),
+            preferred_lft: t.lifetimes.map(|(_, p)| p),
+            dev: a.dev,
         }
     }
 }
@@ -1514,7 +1758,44 @@ impl TryFrom<AddressRepr> for DeclaredAddress {
     type Error = AddressParseError;
 
     fn try_from(r: AddressRepr) -> Result<Self, Self::Error> {
-        DeclaredAddress::parse(&r.dev, &r.address)
+        let mut b = AddressBuilder::new(DeclaredAddress::parse(&r.dev, &r.address)?);
+        if let Some(peer) = &r.peer {
+            b = b.peer(peer);
+        }
+        if let Some(label) = &r.label {
+            b = b.label(label);
+        }
+        if let Some(metric) = r.metric {
+            b = b.metric(metric);
+        }
+        for flag in &r.flags {
+            b = match flag.as_str() {
+                "nodad" => b.nodad(),
+                "optimistic" => b.optimistic(),
+                "noprefixroute" => b.noprefixroute(),
+                "home" => b.home(),
+                "mngtmpaddr" => b.mngtmpaddr(),
+                other => {
+                    return Err(AddressParseError::Invalid(format!(
+                        "unknown address flag {other:?} (nodad, optimistic, noprefixroute, \
+                         home, mngtmpaddr)"
+                    )));
+                }
+            };
+        }
+        match (r.valid_lft, r.preferred_lft) {
+            (Some(valid), preferred) => b = b.lifetime(valid, preferred.unwrap_or(valid)),
+            (None, Some(_)) => {
+                return Err(AddressParseError::Invalid(
+                    "a preferred lifetime needs a valid one".into(),
+                ));
+            }
+            (None, None) => {}
+        }
+        if let Some(e) = b.errors.first() {
+            return Err(AddressParseError::Invalid(e.clone()));
+        }
+        Ok(b.address)
     }
 }
 
@@ -1546,7 +1827,44 @@ impl DeclaredAddress {
             dev: dev.to_string(),
             address,
             prefix_len,
+            attrs: AddressAttrs::default(),
         })
+    }
+
+    /// The address at `prefix_len` on `dev`, with nothing else declared.
+    pub(crate) fn plain(dev: &str, address: IpAddr, prefix_len: u8) -> Self {
+        Self {
+            dev: dev.to_string(),
+            address,
+            prefix_len,
+            attrs: AddressAttrs::default(),
+        }
+    }
+
+    /// The peer of a point-to-point address.
+    pub fn peer(&self) -> Option<IpAddr> {
+        self.attrs.peer
+    }
+
+    /// The declared IPv4 label.
+    pub fn label(&self) -> Option<&str> {
+        self.attrs.label.as_deref()
+    }
+
+    /// The declared metric of its prefix route.
+    pub fn metric(&self) -> Option<u32> {
+        self.attrs.metric
+    }
+
+    /// The `IFA_F_*` flags declared (`nodad`, `optimistic`,
+    /// `noprefixroute`, `home`, `mngtmpaddr`).
+    pub fn flags(&self) -> u32 {
+        self.attrs.flag_bits()
+    }
+
+    /// The declared valid and preferred lifetimes; `None` is forever.
+    pub fn lifetimes(&self) -> Option<(std::time::Duration, std::time::Duration)> {
+        self.attrs.lifetimes
     }
 
     /// Get the device name.
@@ -1591,6 +1909,9 @@ pub enum AddressParseError {
     /// Prefix length too large.
     #[error("prefix length {prefix} exceeds maximum {max}")]
     PrefixTooLarge { prefix: u8, max: u8 },
+    /// An attribute beyond the address that cannot be (#516).
+    #[error("{0}")]
+    Invalid(String),
 }
 
 // ============================================================================
@@ -3372,6 +3693,79 @@ mod serde_roundtrip_tests {
         let back = NetworkConfig::from_json_str(&json).unwrap();
         assert_eq!(back.addresses()[0].address().to_string(), "192.168.1.5");
         assert_eq!(back.addresses()[0].prefix_len(), 24);
+    }
+
+    #[test]
+    fn address_attributes_roundtrip_and_validate() {
+        use std::time::Duration;
+        let cfg = NetworkConfig::new()
+            .address_with("eth0", "fd00::1/64", |a| a.nodad().noprefixroute().metric(100))
+            .unwrap()
+            .address_with("eth0", "10.0.0.1/32", |a| a.peer("10.0.0.2").label("eth0:p"))
+            .unwrap()
+            .address_with("eth0", "10.0.1.1/24", |a| {
+                a.lifetime(Duration::from_secs(3600), Duration::from_secs(1800))
+            })
+            .unwrap();
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""flags":["nodad","noprefixroute"]"#,
+            r#""metric":100"#,
+            r#""peer":"10.0.0.2""#,
+            r#""label":"eth0:p""#,
+            r#""valid-lft":"3600s""#,
+            r#""preferred-lft":"1800s""#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+
+        // The other family's setters, a label without the device name, a
+        // preferred lifetime past the valid one: refused, builder and
+        // document alike.
+        for (cfg, says) in [
+            (
+                NetworkConfig::new().address_with("eth0", "10.0.0.1/24", |a| a.nodad()).unwrap(),
+                "nodad is an IPv6 address flag",
+            ),
+            (
+                NetworkConfig::new().address_with("eth0", "fd00::1/64", |a| a.label("eth0:x")).unwrap(),
+                "a label is IPv4 only",
+            ),
+            (
+                NetworkConfig::new().address_with("eth0", "10.0.0.1/24", |a| a.label("lan")).unwrap(),
+                "must start with the device name",
+            ),
+            (
+                NetworkConfig::new()
+                    .address_with("eth0", "10.0.0.1/24", |a| {
+                        a.lifetime(Duration::from_secs(10), Duration::from_secs(20))
+                    })
+                    .unwrap(),
+                "preferred lifetime is longer",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        for (doc, says) in [
+            (
+                r#"{"addresses":[{"dev":"eth0","address":"10.0.0.1/24","flags":["fast"]}]}"#,
+                "unknown address flag",
+            ),
+            (
+                r#"{"addresses":[{"dev":"eth0","address":"fd00::1/64","label":"eth0:x"}]}"#,
+                "IPv4 only",
+            ),
+            (
+                r#"{"addresses":[{"dev":"eth0","address":"10.0.0.1/24","preferred-lft":"3600s"}]}"#,
+                "needs a valid one",
+            ),
+        ] {
+            let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();
+            assert!(err.contains(says), "{doc}: {err}");
+        }
     }
 
     #[test]

@@ -240,6 +240,10 @@ pub struct ConfigDiff {
 
     /// Addresses to add.
     pub addresses_to_add: Vec<DeclaredAddress>,
+    /// Addresses whose metric, lifetimes or (IPv6) flags the apply changes
+    /// in place (#516). An IPv4 label or flag change cannot be made in
+    /// place: the address is then removed and added again.
+    pub addresses_to_change: Vec<DeclaredAddress>,
 
     /// Routes to add.
     pub routes_to_add: Vec<DeclaredRoute>,
@@ -406,6 +410,7 @@ impl ConfigDiff {
             && self.links_missing.is_empty()
             && self.links_to_remove.is_empty()
             && self.addresses_to_add.is_empty()
+            && self.addresses_to_change.is_empty()
             && self.routes_to_add.is_empty()
             && self.routes_refused.is_empty()
             && self.qdiscs_to_add.is_empty()
@@ -424,6 +429,7 @@ impl ConfigDiff {
             + self.links_missing.len()
             + self.links_to_remove.len()
             + self.addresses_to_add.len()
+            + self.addresses_to_change.len()
             + self.routes_to_add.len()
             + self.routes_refused.len()
             + self.qdiscs_to_add.len()
@@ -474,6 +480,12 @@ impl ConfigDiff {
         for addr in &self.addresses_to_add {
             lines.push(format!(
                 "+ address {}/{} on {}",
+                addr.address, addr.prefix_len, addr.dev
+            ));
+        }
+        for addr in &self.addresses_to_change {
+            lines.push(format!(
+                "~ address {}/{} on {}",
                 addr.address, addr.prefix_len, addr.dev
             ));
         }
@@ -1529,36 +1541,50 @@ fn diff_addresses(
     opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
-    // Build set of desired addresses: (dev, address, prefix_len)
-    let desired: HashSet<(&str, IpAddr, u8)> = config
-        .addresses
-        .iter()
-        .map(|a| (a.dev.as_str(), a.address, a.prefix_len))
-        .collect();
-
-    // Build set of current addresses
-    let current_set: HashSet<(&str, IpAddr, u8)> = current
+    // The kernel's addresses as declarations: on a device, an address
+    // (`IFA_LOCAL`, or `IFA_ADDRESS` when there is no other), its prefix,
+    // and a point-to-point peer (`IFA_ADDRESS` when it differs) — which,
+    // for IPv4, makes another address, not a change of this one (#516).
+    let live: Vec<(DeclaredAddress, &AddressMessage)> = current
         .iter()
         .filter_map(|a| {
-            let name = ifindex_to_name.get(&a.ifindex())?;
-            let addr = a.address?;
-            Some((*name, addr, a.prefix_len()))
+            let dev = ifindex_to_name.get(&a.ifindex())?;
+            let mut declared = DeclaredAddress::plain(dev, *a.primary_address()?, a.prefix_len());
+            declared.attrs.peer = a.peer().copied();
+            Some((declared, a))
         })
         .collect();
+    let same = |a: &DeclaredAddress, b: &DeclaredAddress| {
+        a.dev == b.dev
+            && a.address == b.address
+            && a.prefix_len == b.prefix_len
+            && a.attrs.peer == b.attrs.peer
+    };
+    let queued = |diff: &ConfigDiff, a: &DeclaredAddress| {
+        diff.addresses_to_remove.iter().any(|q| same(q, a))
+    };
 
-    // Find addresses to add. An IPv6 address on a link whose change in
-    // this apply makes the kernel drop it (set down, moved into or out of
-    // a VRF or a bond, a VLAN on one of those — see `compute_diff`) is read
-    // here as present and is gone by the time the address step runs, so it
-    // is (re-)added too. Comparing only against the pre-apply dump left it
-    // missing until the next apply (#409). Should the address survive after
-    // all (`keep_addr_on_down`), the add finds it in place and is not
-    // counted.
+    // An IPv6 address on a link whose change in this apply makes the
+    // kernel drop it (set down, moved into or out of a VRF or a bond, a
+    // VLAN on one of those — see `compute_diff`) is read here as present
+    // and is gone by the time the address step runs, so it is (re-)added
+    // too. Comparing only against the pre-apply dump left it missing until
+    // the next apply (#409). Should the address survive after all
+    // (`keep_addr_on_down`), the add finds it in place and is not counted.
     for declared in &config.addresses {
-        let key = (declared.dev.as_str(), declared.address, declared.prefix_len);
         let gone = declared.address.is_ipv6() && flushed.contains(declared.dev.as_str());
-        if gone || !current_set.contains(&key) {
-            diff.addresses_to_add.push(declared.clone());
+        match live.iter().find(|(l, _)| same(l, declared)) {
+            None => diff.addresses_to_add.push(declared.clone()),
+            Some(_) if gone => diff.addresses_to_add.push(declared.clone()),
+            Some((have, msg)) => match address_drift(declared, msg) {
+                AddressDrift::None => {}
+                AddressDrift::InPlace => diff.addresses_to_change.push(declared.clone()),
+                // Deleted right before it is added again (#516).
+                AddressDrift::Recreate => {
+                    diff.addresses_to_remove.push(have.clone());
+                    diff.addresses_to_add.push(declared.clone());
+                }
+            },
         }
         // The kernel knows an IPv6 address by the address alone
         // (`ipv6_get_ifaddr`), so the same address at another prefix is
@@ -1569,30 +1595,27 @@ fn diff_addresses(
         // keys addresses on address *and* mask (`inet_insert_ifa`), so two
         // prefixes of one IPv4 address coexist and need nothing here.
         if declared.address.is_ipv6() && !gone {
-            for (dev, addr, prefix) in &current_set {
-                if *dev == declared.dev.as_str()
-                    && *addr == declared.address
-                    && *prefix != declared.prefix_len
+            for (have, _) in &live {
+                if have.dev == declared.dev
+                    && have.address == declared.address
+                    && have.prefix_len != declared.prefix_len
+                    && !queued(diff, have)
                 {
-                    diff.addresses_to_remove.push(DeclaredAddress {
-                        dev: dev.to_string(),
-                        address: *addr,
-                        prefix_len: *prefix,
-                    });
+                    diff.addresses_to_remove.push(have.clone());
                 }
             }
         }
     }
 
-    // Declared before, not now, and still there: it goes (#512). A
-    // re-prefixed IPv6 address was queued above already.
+    // Declared before, not now, and still there: it goes (#512).
     for prev in opts.previous.iter().flat_map(|p| p.addresses.iter()) {
-        let key = (prev.dev.as_str(), prev.address, prev.prefix_len);
-        let queued = diff.addresses_to_remove.iter().any(|q| {
-            q.dev == prev.dev && q.address == prev.address && q.prefix_len == prev.prefix_len
-        });
-        if !desired.contains(&key) && current_set.contains(&key) && !queued {
-            diff.addresses_to_remove.push(prev.clone());
+        let declared_now = config.addresses.iter().any(|a| same(a, prev));
+        let have = live.iter().find(|(l, _)| same(l, prev));
+        if let Some((have, _)) = have
+            && !declared_now
+            && !queued(diff, have)
+        {
+            diff.addresses_to_remove.push(have.clone());
         }
     }
 
@@ -1604,36 +1627,51 @@ fn diff_addresses(
     // the config doesn't declare — but only on interfaces the config
     // declares, as a link or by an address, or the caller names (#470),
     // and never kernel-managed addresses (link-local / loopback / any
-    // non-global scope / anything with a lifetime).
+    // non-global scope / anything with a lifetime: a declared address
+    // with one is removed through `previous`, not a purge, which cannot
+    // tell it from a DHCP lease).
     let managed_devs = opts.purge_address_scope(config);
-    for a in current {
-        if !purgeable_address(a) {
+    for (have, msg) in &live {
+        if !purgeable_address(msg) || !managed_devs.contains(have.dev.as_str()) {
             continue;
         }
-        let Some(name) = ifindex_to_name.get(&a.ifindex()) else {
-            continue;
-        };
-        if !managed_devs.contains(name) {
-            continue;
+        if !config.addresses.iter().any(|a| same(a, have)) && !queued(diff, have) {
+            diff.addresses_to_remove.push(have.clone());
         }
-        let Some(addr) = a.address else {
-            continue;
-        };
-        let key = (*name, addr, a.prefix_len());
-        let removal = DeclaredAddress {
-            dev: name.to_string(),
-            address: addr,
-            prefix_len: a.prefix_len(),
-        };
-        // A re-prefixed IPv6 address is already queued above.
-        let queued = diff.addresses_to_remove.iter().any(|q| {
-            q.dev == removal.dev
-                && q.address == removal.address
-                && q.prefix_len == removal.prefix_len
-        });
-        if !desired.contains(&key) && !queued {
-            diff.addresses_to_remove.push(removal);
-        }
+    }
+}
+
+/// How a live address differs from its declaration (#516).
+enum AddressDrift {
+    None,
+    /// An `NLM_F_REPLACE` changes it: the metric, the lifetimes, and an
+    /// IPv6 address's flags.
+    InPlace,
+    /// Only deleting and adding it again does: an IPv4 address's label or
+    /// flags, which a replace leaves as they were, and an IPv6 metric going
+    /// back to none, which `inet6_addr_modify` skips (checked on 6.12).
+    Recreate,
+}
+
+fn address_drift(declared: &DeclaredAddress, live: &AddressMessage) -> AddressDrift {
+    use crate::netlink::types::addr::ifa_flags as f;
+    let t = &declared.attrs;
+    // `optimistic` is cleared by the kernel when DAD ends: not compared.
+    let managed = f::NODAD | f::NOPREFIXROUTE | f::HOMEADDRESS | f::MANAGETEMPADDR;
+    let flags = t.flag_bits() & managed != live.flags() & managed;
+    let metric = t.metric.unwrap_or(0) != live.metric().unwrap_or(0);
+    // A lifetime counts down: compared finite against forever only.
+    let lifetimes = t.lifetimes.is_some() == live.is_permanent();
+    let label = declared.address.is_ipv4()
+        && t.label.as_deref().unwrap_or(&declared.dev) != live.label().unwrap_or(&declared.dev);
+    let metric_to_none =
+        declared.address.is_ipv6() && t.metric.unwrap_or(0) == 0 && live.metric().unwrap_or(0) != 0;
+    if (declared.address.is_ipv4() && (label || flags)) || metric_to_none {
+        AddressDrift::Recreate
+    } else if flags || metric || lifetimes {
+        AddressDrift::InPlace
+    } else {
+        AddressDrift::None
     }
 }
 
@@ -2483,11 +2521,7 @@ mod tests {
     // ---- Plan 205 (re-wired) — purge diff accounting + options ----
 
     fn declared_addr(dev: &str, addr: &str, plen: u8) -> DeclaredAddress {
-        DeclaredAddress {
-            dev: dev.to_string(),
-            address: addr.parse().unwrap(),
-            prefix_len: plen,
-        }
+        DeclaredAddress::plain(dev, addr.parse().unwrap(), plen)
     }
 
     fn declared_route(dst: &str, plen: u8) -> DeclaredRoute {
@@ -2682,6 +2716,7 @@ mod tests {
             keys(ConfigDiff::json_schema_value()),
             [
                 "addresses-to-add",
+                "addresses-to-change",
                 "addresses-to-remove",
                 "links-missing",
                 "links-to-add",

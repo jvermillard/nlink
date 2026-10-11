@@ -463,3 +463,44 @@ async fn test_replace_address_by_name() -> Result<()> {
 
     Ok(())
 }
+
+/// An IPv4 address can be on a device at two prefixes, and a point-to-point
+/// address at two peers: a delete removes the one it names. It used to send
+/// only `IFA_LOCAL`, and `inet_rtm_deladdr` then deletes the first address
+/// with that local, whatever its prefix or peer (#516).
+#[tokio::test]
+async fn deleting_an_ipv4_address_removes_the_one_it_names() -> Result<()> {
+    use nlink::netlink::addr::Ipv4Address;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("deladdr-pfx")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    let ip: IpAddr = Ipv4Addr::new(10, 7, 0, 1).into();
+    conn.add_address_by_name("dummy0", ip, 24).await?;
+    conn.add_address_by_name("dummy0", ip, 16).await?;
+    conn.del_address("dummy0", ip, 16).await?;
+    let left: Vec<u8> = conn
+        .get_addresses_by_name("dummy0")
+        .await?
+        .iter()
+        .filter(|a| a.primary_address() == Some(&ip))
+        .map(|a| a.prefix_len())
+        .collect();
+    assert_eq!(left, [24], "the /16 goes, the /24 stays");
+
+    let local = Ipv4Addr::new(10, 8, 0, 1);
+    let peer = |last| Ipv4Address::new("dummy0", local, 32).peer(Ipv4Addr::new(10, 8, 0, last));
+    conn.add_address(peer(2)).await?;
+    conn.add_address(peer(3)).await?;
+    conn.del_address_config(peer(3)).await?;
+    let peers: Vec<IpAddr> = conn
+        .get_addresses_by_name("dummy0")
+        .await?
+        .iter()
+        .filter_map(|a| a.peer().copied())
+        .collect();
+    assert_eq!(peers, [IpAddr::V4(Ipv4Addr::new(10, 8, 0, 2))], "peer .3 goes, .2 stays");
+    Ok(())
+}

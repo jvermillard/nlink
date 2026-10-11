@@ -19,6 +19,7 @@ mod attr_ids {
     pub const IFA_ANYCAST: u16 = 5;
     pub const IFA_CACHEINFO: u16 = 6;
     pub const IFA_FLAGS: u16 = 8;
+    pub const IFA_RT_PRIORITY: u16 = 9;
 }
 
 /// Strongly-typed address message with all attributes parsed.
@@ -41,6 +42,8 @@ pub struct AddressMessage {
     pub(crate) flags: Option<u32>,
     /// Cache info (IFA_CACHEINFO) - preferred/valid lifetimes.
     pub(crate) cache_info: Option<AddressCacheInfo>,
+    /// The metric of the prefix route (IFA_RT_PRIORITY).
+    pub(crate) rt_priority: Option<u32>,
 }
 
 /// Address cache information.
@@ -119,6 +122,23 @@ impl AddressMessage {
     /// Get the cache info.
     pub fn cache_info(&self) -> Option<&AddressCacheInfo> {
         self.cache_info.as_ref()
+    }
+
+    /// The metric of the prefix route the address installs
+    /// (`IFA_RT_PRIORITY`, `ip addr … metric N`); `None` when it was added
+    /// without one.
+    pub fn metric(&self) -> Option<u32> {
+        self.rt_priority
+    }
+
+    /// The peer of a point-to-point address (`ip addr add A peer P`): the
+    /// kernel then reports the local address as `IFA_LOCAL` and the peer
+    /// as `IFA_ADDRESS`. `None` for an ordinary address.
+    pub fn peer(&self) -> Option<&IpAddr> {
+        match (&self.local, &self.address) {
+            (Some(local), Some(address)) if local != address => Some(address),
+            _ => None,
+        }
     }
 
     /// Get the primary address (local or address).
@@ -257,6 +277,10 @@ impl FromNetlink for AddressMessage {
                 attr_ids::IFA_FLAGS if attr_data.len() >= 4 => {
                     let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
                     msg.flags = Some(u32::from_ne_bytes(bytes));
+                }
+                attr_ids::IFA_RT_PRIORITY if attr_data.len() >= 4 => {
+                    let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
+                    msg.rt_priority = Some(u32::from_ne_bytes(bytes));
                 }
                 attr_ids::IFA_CACHEINFO => {
                     if let Some(info) = IfaCacheinfo::from_bytes(attr_data) {

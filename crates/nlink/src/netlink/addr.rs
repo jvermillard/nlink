@@ -426,6 +426,13 @@ impl AddressConfig for Ipv4Address {
 
         // IFA_LOCAL
         builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
+        // IFA_ADDRESS, the peer or the address: without it
+        // `inet_rtm_deladdr` matches the local alone and deletes the first
+        // address with it, whatever its prefix or peer (#516).
+        builder.append_attr(
+            IfaAttr::Address as u16,
+            &self.peer.unwrap_or(self.address).octets(),
+        );
 
         Ok(())
     }
