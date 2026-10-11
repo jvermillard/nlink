@@ -19,7 +19,7 @@
 use std::fmt;
 
 use super::{
-    DeclaredAddress, DeclaredLink, DeclaredQdisc, DeclaredRoute, LinkChanges, LinkRecreate,
+    DeclaredAddress, DeclaredLink, DeclaredNeighbour, DeclaredQdisc, DeclaredRoute, LinkChanges, LinkRecreate,
     LinkRemoval, RouteConflict,
     diff::route_text,
     tc_tree::DeclaredTc,
@@ -116,6 +116,16 @@ pub enum Step {
     },
     /// Delete a route.
     DeleteRoute(DeclaredRoute),
+    /// Install a neighbour with `NLM_F_REPLACE` (#516): added, or
+    /// overwriting the entry in its place.
+    SetNeighbour {
+        /// The permanent entry it overwrites, if one is there.
+        before: Option<DeclaredNeighbour>,
+        /// The neighbour installed.
+        after: DeclaredNeighbour,
+    },
+    /// Delete a neighbour the previous config declared (#516).
+    DeleteNeighbour(DeclaredNeighbour),
     /// Delete a qdisc the previous config declared; the kernel's default
     /// comes back (#512).
     DeleteQdisc(DeclaredQdisc),
@@ -186,6 +196,17 @@ impl Step {
             },
             Self::AddQdisc(q) => Self::DeleteQdisc(q.clone()),
             Self::DeleteQdisc(q) => Self::AddQdisc(q.clone()),
+            Self::SetNeighbour { before, after } => match before {
+                Some(before) => Self::SetNeighbour {
+                    before: Some(after.clone()),
+                    after: before.clone(),
+                },
+                None => Self::DeleteNeighbour(after.clone()),
+            },
+            Self::DeleteNeighbour(n) => Self::SetNeighbour {
+                before: None,
+                after: n.clone(),
+            },
             _ => return None,
         })
     }
@@ -325,6 +346,12 @@ impl fmt::Display for Step {
                 None => write!(f, "+ route {}", route_text(after)),
             },
             Self::DeleteRoute(route) => write!(f, "- route {}", route_text(route)),
+            Self::SetNeighbour { before, after } => {
+                let replaced: Vec<(DeclaredNeighbour, DeclaredNeighbour)> =
+                    before.iter().map(|b| (after.clone(), b.clone())).collect();
+                f.write_str(&super::diff::neighbour_line(after, &replaced))
+            }
+            Self::DeleteNeighbour(n) => write!(f, "- {n}"),
             Self::DeleteQdisc(q) => write!(
                 f,
                 "- qdisc {} on {} ({:?})",
@@ -500,6 +527,16 @@ impl super::ConfigDiff {
             steps.push(Step::AddAddress(address.clone()));
         }
         steps.extend(self.addresses_to_change.iter().cloned().map(Step::ChangeAddress));
+        for n in &self.neighbours_to_set {
+            steps.push(Step::SetNeighbour {
+                before: self
+                    .neighbours_replaced
+                    .iter()
+                    .find(|(d, _)| d == n)
+                    .map(|(_, before)| before.clone()),
+                after: n.clone(),
+            });
+        }
         for route in &self.routes_to_add {
             let before = self
                 .routes_replaced
@@ -538,6 +575,7 @@ impl super::ConfigDiff {
                     reason: None,
                 }),
         );
+        steps.extend(self.neighbours_to_remove.iter().cloned().map(Step::DeleteNeighbour));
         Plan {
             steps,
             routes_protocol: self.routes_protocol,
@@ -566,6 +604,37 @@ mod tests {
             route_type: DeclaredRouteType::Unicast,
             attrs: Default::default(),
         }
+    }
+
+    /// A neighbour set over another is undone by setting the other back;
+    /// one added, by deleting it; one deleted, by adding it (#516).
+    #[test]
+    fn neighbour_steps_invert_and_print() {
+        let n = |m: u8| DeclaredNeighbour {
+            dev: "d0".into(),
+            destination: "10.0.0.2".parse().unwrap(),
+            lladdr: Some([2, 0, 0, 0, 0, m]),
+            proxy: false,
+        };
+        let replace = Step::SetNeighbour {
+            before: Some(n(1)),
+            after: n(2),
+        };
+        assert_eq!(
+            replace.to_string(),
+            "~ neighbour 10.0.0.2 lladdr 02:00:00:00:00:02 dev d0 (replacing lladdr 02:00:00:00:00:01)"
+        );
+        assert!(matches!(
+            replace.inverse(),
+            Some(Step::SetNeighbour { before: Some(b), after: a }) if b == n(2) && a == n(1)
+        ));
+        let add = Step::SetNeighbour { before: None, after: n(1) };
+        assert_eq!(add.to_string(), "+ neighbour 10.0.0.2 lladdr 02:00:00:00:00:01 dev d0");
+        assert!(matches!(add.inverse(), Some(Step::DeleteNeighbour(d)) if d == n(1)));
+        assert!(matches!(
+            Step::DeleteNeighbour(n(1)).inverse(),
+            Some(Step::SetNeighbour { before: None, after }) if after == n(1)
+        ));
     }
 
     /// The steps come in the order the apply runs them, the hidden ones

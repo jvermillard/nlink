@@ -27,6 +27,9 @@ pub struct NetworkConfig {
     pub(crate) routes: Vec<DeclaredRoute>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) qdiscs: Vec<DeclaredQdisc>,
+    /// Permanent and proxy neighbours (#516).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) neighbours: Vec<DeclaredNeighbour>,
     /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
     /// yet: a filter's actions have no document form.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -151,6 +154,24 @@ impl NetworkConfig {
                     "table 0 is unspecified, which the kernel reads as main (254); \
                      declare 254 or leave the table out",
                 ));
+            }
+        }
+        for (i, n) in self.neighbours.iter().enumerate() {
+            let at = || format!("neighbours.{}/{}", n.dev, n.destination);
+            if n.destination.is_unspecified() || n.destination.is_multicast() {
+                errors.push(ValidationErrorInfo::new(at(), "a neighbour's address is a unicast address"));
+            }
+            match (n.proxy, n.lladdr) {
+                (true, Some(_)) => {
+                    errors.push(ValidationErrorInfo::new(at(), "a proxy entry has no link-layer address"))
+                }
+                (false, None) => {
+                    errors.push(ValidationErrorInfo::new(at(), "a neighbour needs its link-layer address"))
+                }
+                _ => {}
+            }
+            if self.neighbours[..i].iter().any(|o| o.same_entry(n)) {
+                errors.push(ValidationErrorInfo::new(at(), "declared twice"));
             }
         }
         let mut links = HashSet::new();
@@ -510,14 +531,15 @@ impl NetworkConfig {
     }
 
     /// `true` when the config declares nothing: no links, addresses,
-    /// routes, qdiscs or TC trees, and no builder mistake waiting for
-    /// [`validate`](Self::validate) (#531).
+    /// routes, qdiscs, TC trees or neighbours, and no builder mistake
+    /// waiting for [`validate`](Self::validate) (#531).
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
             && self.addresses.is_empty()
             && self.routes.is_empty()
             && self.qdiscs.is_empty()
             && self.tc.is_empty()
+            && self.neighbours.is_empty()
             && self.invalid.is_empty()
     }
 
@@ -700,6 +722,49 @@ impl NetworkConfig {
         Ok(self)
     }
 
+    /// Declare a permanent neighbour on `dev` (#516), as
+    /// `ip neigh replace <destination> lladdr <lladdr> dev <dev> nud permanent`
+    /// does: an ARP entry for an IPv4 address, an ND entry for an IPv6 one.
+    ///
+    /// The kernel flushes a device's neighbours when it goes down, moves to
+    /// or from an L3 master, changes its MAC or is recreated; the apply
+    /// that does any of those puts the declared ones back. A recreate does
+    /// not count them among what it destroys. Neighbours are removed only
+    /// through [`PlanOptions::previous`](super::PlanOptions::previous), not
+    /// by a purge.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use std::net::Ipv4Addr;
+    ///
+    /// let config = NetworkConfig::new()
+    ///     .neighbour("eth0", Ipv4Addr::new(10, 0, 0, 2), [0x02, 0, 0, 0, 0, 0x02])
+    ///     .proxy_neighbour("eth0", Ipv4Addr::new(10, 0, 0, 9));
+    /// config.validate().unwrap();
+    /// ```
+    pub fn neighbour(mut self, dev: &str, destination: impl Into<IpAddr>, lladdr: [u8; 6]) -> Self {
+        self.neighbours.push(DeclaredNeighbour {
+            dev: dev.to_string(),
+            destination: destination.into(),
+            lladdr: Some(lladdr),
+            proxy: false,
+        });
+        self
+    }
+
+    /// Declare a proxy entry on `dev` (#516), as `ip neigh add proxy
+    /// <destination> dev <dev>` does: the device answers ARP or neighbour
+    /// solicitations for the address (with `proxy_arp` or `proxy_ndp` on).
+    pub fn proxy_neighbour(mut self, dev: &str, destination: impl Into<IpAddr>) -> Self {
+        self.neighbours.push(DeclaredNeighbour {
+            dev: dev.to_string(),
+            destination: destination.into(),
+            lladdr: None,
+            proxy: true,
+        });
+        self
+    }
+
     /// Add a route.
     ///
     /// The destination should be in CIDR notation (e.g., "10.0.0.0/8" or "0.0.0.0/0").
@@ -816,6 +881,11 @@ impl NetworkConfig {
     /// Get the configured qdiscs.
     pub fn qdiscs(&self) -> &[DeclaredQdisc] {
         &self.qdiscs
+    }
+
+    /// Get the configured neighbours.
+    pub fn neighbours(&self) -> &[DeclaredNeighbour] {
+        &self.neighbours
     }
 }
 
@@ -2665,6 +2735,57 @@ pub struct DeclaredAddress {
     /// Everything else an address can carry (#516): the peer, label,
     /// metric, flags and lifetimes. All unset by default.
     pub(crate) attrs: AddressAttrs,
+}
+
+/// A declared neighbour (#516): a permanent ARP or ND entry with its
+/// link-layer address, or a proxy entry. See
+/// [`NetworkConfig::neighbour`] and [`NetworkConfig::proxy_neighbour`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredNeighbour {
+    /// The device.
+    pub dev: String,
+    /// The neighbour's address.
+    pub destination: IpAddr,
+    /// Its link-layer address, as `aa:bb:cc:dd:ee:ff`; none for a proxy
+    /// entry.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "mac_serde", skip_serializing_if = "Option::is_none")
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub lladdr: Option<[u8; 6]>,
+    /// A proxy entry: the device answers for the address.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub proxy: bool,
+}
+
+impl DeclaredNeighbour {
+    /// Whether `other` is the same entry: the same device, address and
+    /// proxy-ness. The kernel keeps one of each.
+    pub(crate) fn same_entry(&self, other: &DeclaredNeighbour) -> bool {
+        self.dev == other.dev && self.destination == other.destination && self.proxy == other.proxy
+    }
+}
+
+impl std::fmt::Display for DeclaredNeighbour {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.proxy {
+            return write!(f, "proxy neighbour {} dev {}", self.destination, self.dev);
+        }
+        write!(f, "neighbour {}", self.destination)?;
+        if let Some(m) = self.lladdr {
+            write!(
+                f,
+                " lladdr {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )?;
+        }
+        write!(f, " dev {}", self.dev)
+    }
 }
 
 /// What an address carries besides its address and prefix (#516). Set
@@ -5260,6 +5381,55 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("end-station or SCB"), "{err}");
+    }
+
+    #[test]
+    fn neighbours_roundtrip_and_validate() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let cfg = NetworkConfig::new()
+            .neighbour("d0", Ipv4Addr::new(10, 0, 0, 2), [2, 0, 0, 0, 0, 0xa])
+            .neighbour("d0", "fd00::2".parse::<Ipv6Addr>().unwrap(), [2, 0, 0, 0, 0, 0xb])
+            .proxy_neighbour("d0", Ipv4Addr::new(10, 0, 0, 9));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#"{"dev":"d0","destination":"10.0.0.2","lladdr":"02:00:00:00:00:0a"}"#,
+            r#"{"dev":"d0","destination":"10.0.0.9","proxy":true}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        assert_eq!(
+            cfg.neighbours()[0].to_string(),
+            "neighbour 10.0.0.2 lladdr 02:00:00:00:00:0a dev d0"
+        );
+        let mut proxy_with_mac = NetworkConfig::new().proxy_neighbour("d0", Ipv4Addr::new(10, 0, 0, 9));
+        proxy_with_mac.neighbours[0].lladdr = Some([2, 0, 0, 0, 0, 1]);
+        let mut no_mac = NetworkConfig::new().neighbour("d0", Ipv4Addr::new(10, 0, 0, 2), [2, 0, 0, 0, 0, 1]);
+        no_mac.neighbours[0].lladdr = None;
+        for (cfg, says) in [
+            (proxy_with_mac, "a proxy entry has no link-layer address"),
+            (no_mac, "a neighbour needs its link-layer address"),
+            (
+                NetworkConfig::new().neighbour("d0", Ipv4Addr::UNSPECIFIED, [2, 0, 0, 0, 0, 1]),
+                "a unicast address",
+            ),
+            (
+                NetworkConfig::new()
+                    .neighbour("d0", Ipv4Addr::new(10, 0, 0, 2), [2, 0, 0, 0, 0, 1])
+                    .neighbour("d0", Ipv4Addr::new(10, 0, 0, 2), [2, 0, 0, 0, 0, 2]),
+                "declared twice",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        // The same address as a neighbour and a proxy entry is two entries.
+        NetworkConfig::new()
+            .neighbour("d0", Ipv4Addr::new(10, 0, 0, 2), [2, 0, 0, 0, 0, 1])
+            .proxy_neighbour("d0", Ipv4Addr::new(10, 0, 0, 2))
+            .validate()
+            .unwrap();
     }
 
     #[test]

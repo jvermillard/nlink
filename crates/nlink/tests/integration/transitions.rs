@@ -1719,6 +1719,64 @@ async fn ip6tnl_and_xfrm_change_in_place() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Declared neighbours A→B→C→D (#516), on a VLAN: a permanent IPv4 and
+/// IPv6 entry and a proxy entry. Step 2 gives the IPv4 and IPv6 entries
+/// other link-layer addresses. Step 3 changes the VLAN id, which recreates
+/// the link and deletes them; the recreate does not count them among what
+/// it destroys, and puts them back. Step 4 takes the VLAN down, which
+/// flushes them all, permanent ones included; the apply puts them back on
+/// the down link. `ip -j neigh` shows each step.
+#[tokio::test]
+async fn neighbours_change_and_come_back_after_a_recreate_or_flush() -> nlink::Result<()> {
+    use std::net::Ipv6Addr;
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let mac = |n: u8| [0x02, 0, 0, 0, 0x80, n];
+    let six = Ipv6Addr::new(0xfd00, 0x80, 0, 0, 0, 0, 0, 2);
+    let step = |id: u16, up: bool, m: u8| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v0", move |l| {
+                let l = l.vlan("d0", id);
+                if up { l.up() } else { l.down() }
+            })
+            .neighbour("v0", Ipv4Addr::new(10, 80, 0, 2), mac(m))
+            .neighbour("v0", six, mac(m + 1))
+            .proxy_neighbour("v0", Ipv4Addr::new(10, 80, 0, 9))
+    };
+    let steps = [step(10, true, 1), step(10, true, 3), step(11, true, 3), step(11, false, 3)];
+    let ns = TestNamespace::new("tr-neigh")?;
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let m = if i == 0 { 1 } else { 3 };
+        let shown = |m: [u8; 6]| {
+            m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+        };
+        let neigh = ip_json(&ns, &["neigh", "show", "dev", "v0"])?;
+        let entry = |dst: &str| {
+            neigh
+                .as_array()
+                .and_then(|a| a.iter().find(|n| n["dst"] == dst))
+                .map(|n| (n["lladdr"].clone(), n["state"].clone()))
+        };
+        let want = |m: [u8; 6]| Some((serde_json::json!(shown(m)), serde_json::json!(["PERMANENT"])));
+        if entry("10.80.0.2") != want(mac(m)) || entry(&six.to_string()) != want(mac(m + 1)) {
+            return Err(format!("step {}: {neigh}", i + 1));
+        }
+        let proxies = ip_json(&ns, &["neigh", "show", "proxy", "dev", "v0"])?;
+        if proxies != serde_json::json!([{"dst": "10.80.0.9", "proxy": null}]) {
+            return Err(format!("step {}: proxies {proxies}", i + 1));
+        }
+        ifindexes.push(link_json(&ns, "v0")?["ifindex"].as_u64());
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "a new lladdr changes the entry, not the link");
+    assert_ne!(ifindexes[1], ifindexes[2], "a new VLAN id recreates the link");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

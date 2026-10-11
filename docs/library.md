@@ -701,6 +701,9 @@ kernel-managed state:
 - **Links and qdiscs are never purged** — deleting an interface is too
   blunt for a declarative reconcile; use the imperative `del_link` /
   `del_qdisc` when you mean it.
+- **Neighbours are never purged:** a permanent ARP entry is as likely
+  another tool's as stale. One declared with `NetworkConfig::neighbour`
+  goes when it leaves the config, through `PlanOptions::previous`.
 
 Inspect the diff first (`addresses_to_remove` / `routes_to_remove`, or
 the `Display` output) — purge is reachable only through the explicit

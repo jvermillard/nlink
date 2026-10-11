@@ -995,6 +995,39 @@ All notable changes to this project will be documented in this file.
     - It fails if the ip6tnl change sends only the mode (`EEXIST`), or
       if the xfrm change leaves out the underlay (`EINVAL`).
 
+- **Declared neighbours (#516, row 8, first half).**
+  - **Builder.** `NetworkConfig::neighbour(dev, ip, lladdr)` declares a
+    permanent ARP or ND entry. `proxy_neighbour(dev, ip)` declares a
+    proxy entry.
+  - **Diff.** Each is installed with `NLM_F_REPLACE`: when it is missing,
+    not permanent, or has another link-layer address.
+    - `ConfigDiff::neighbours_to_set` and `neighbours_to_remove` hold
+      them, and the JSON schema gains both keys.
+    - The plan holds them as `Step::SetNeighbour { before, after }` and
+      `Step::DeleteNeighbour`, which invert for `ApplyResult::undo`.
+  - **Flushes.** The kernel flushes every neighbour on a device that goes
+    down, moves to or from an L3 master, changes its MAC or is recreated.
+    That includes permanent and proxy entries, in both families. An apply
+    that does any of those puts the declared ones back in the same apply,
+    and a recreate no longer counts them among what it would destroy.
+  - **Removal.** A neighbour leaves through `PlanOptions::previous`.
+    `purge` never removes a neighbour.
+  - **Validation errors:**
+    - a proxy entry with a link-layer address;
+    - a neighbour without one;
+    - an unspecified or multicast address;
+    - an entry declared twice.
+  - **Tests.**
+    - A transition test changes the link-layer addresses, recreates the
+      VLAN they are on, and takes it down, checking `ip -j neigh` at each
+      step. It passes on iproute2 6.15 and 6.1.
+    - It fails if declared neighbours are counted as blockers (the
+      recreate is refused), or if a downed link's entries are taken as
+      present (the apply does not converge).
+    - A root test removes the previous config's entries under a purge,
+      and keeps one that nothing declared. It also checks that a MAC
+      change puts the declared entry back, and fails without that.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

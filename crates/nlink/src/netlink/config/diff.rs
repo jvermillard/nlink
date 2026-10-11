@@ -10,13 +10,13 @@ use std::{
 
 use super::kind::{self, KindPlan, KindUpdate, LinkRecreate};
 use super::types::{
-    DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredRoute,
+    DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredNeighbour, DeclaredQdisc, DeclaredRoute,
     DeclaredRouteType, LinkState, MasterSpec, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
     connection::Connection,
     error::Result,
-    messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
+    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
     protocol::Route,
     tc_spec::QdiscSpec,
     types::{addr::Scope, route::RouteType},
@@ -72,6 +72,8 @@ pub struct PlanOptions {
     /// - **Links and qdiscs are never purged** — deleting
     ///   interfaces is too destructive to infer; use the imperative
     ///   `Connection::del_link` / `del_qdisc` for those.
+    /// - **Neighbours are never purged** (#516): one the previous config
+    ///   declared goes through [`Self::previous`].
     pub purge: bool,
 
     /// Extra route tables to purge `static`/`boot` routes from, on
@@ -274,6 +276,21 @@ pub struct ConfigDiff {
     /// [`PlanOptions::purge_address_devs`] are touched.
     pub addresses_to_remove: Vec<DeclaredAddress>,
 
+    /// Neighbours to install with `NLM_F_REPLACE` (#516): missing, not
+    /// permanent, or with another link-layer address — or on a device the
+    /// apply recreates, flushes (down, an L3 master move) or gives another
+    /// MAC, which loses them.
+    pub neighbours_to_set: Vec<DeclaredNeighbour>,
+    /// Neighbours the previous config declared and this one does not,
+    /// still in the kernel (#516). Only with [`PlanOptions::previous`]: a
+    /// purge leaves neighbours alone.
+    pub neighbours_to_remove: Vec<DeclaredNeighbour>,
+    /// The permanent entry each in `neighbours_to_set` replaces, when one
+    /// is there: `(declared, replaced)`. Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) neighbours_replaced: Vec<(DeclaredNeighbour, DeclaredNeighbour)>,
+
     /// Routes to remove.
     ///
     /// Always: a route a declared route *supersedes* — same destination,
@@ -418,6 +435,8 @@ impl ConfigDiff {
             && self.qdiscs_to_remove.is_empty()
             && self.addresses_to_remove.is_empty()
             && self.routes_to_remove.is_empty()
+            && self.neighbours_to_set.is_empty()
+            && self.neighbours_to_remove.is_empty()
             && self.tc.is_empty()
     }
 
@@ -437,6 +456,8 @@ impl ConfigDiff {
             + self.qdiscs_to_remove.len()
             + self.addresses_to_remove.len()
             + self.routes_to_remove.len()
+            + self.neighbours_to_set.len()
+            + self.neighbours_to_remove.len()
             + self.tc.iter().map(|t| t.len()).sum::<usize>()
     }
 
@@ -533,6 +554,10 @@ impl ConfigDiff {
         for tree in &self.tc {
             lines.push(tree.to_string());
         }
+        // Neighbours
+        for n in &self.neighbours_to_set {
+            lines.push(neighbour_line(n, &self.neighbours_replaced));
+        }
 
         // Purge removals (only present under `PlanOptions::purge`).
         for addr in &self.addresses_to_remove {
@@ -556,12 +581,32 @@ impl ConfigDiff {
                 route.destination, route.prefix_len, via, dev
             ));
         }
+        for n in &self.neighbours_to_remove {
+            lines.push(format!("- {n}"));
+        }
 
         if lines.is_empty() {
             "No changes needed".to_string()
         } else {
             lines.join("\n")
         }
+    }
+}
+
+/// A neighbour the apply installs, as the diff and the plan print it.
+pub(crate) fn neighbour_line(
+    n: &DeclaredNeighbour,
+    replaced: &[(DeclaredNeighbour, DeclaredNeighbour)],
+) -> String {
+    match replaced.iter().find(|(d, _)| d == n) {
+        Some((_, before)) => match before.lladdr {
+            Some(m) => format!(
+                "~ {n} (replacing lladdr {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            ),
+            None => format!("~ {n}"),
+        },
+        None => format!("+ {n}"),
     }
 }
 
@@ -911,6 +956,11 @@ pub struct Snapshot {
     /// Every bridge port's VLANs (#516): read by [`read`](Self::read), and
     /// by `read_for` when its config declares port VLANs.
     bridge_vlans: Vec<crate::netlink::bridge_vlan::BridgeVlanEntry>,
+    /// ARP and ND entries, and proxy entries (#516): read by
+    /// [`read`](Self::read), and by `read_for` when its config or the
+    /// previous one declares a neighbour.
+    neighbours: Vec<NeighborMessage>,
+    proxies: Vec<NeighborMessage>,
 }
 
 impl Snapshot {
@@ -929,7 +979,14 @@ impl Snapshot {
         tc_links.dedup();
         snapshot.read_tc(conn, tc_links).await?;
         snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
+        snapshot.read_neighbours(conn).await?;
         Ok(snapshot)
+    }
+
+    async fn read_neighbours(&mut self, conn: &Connection<Route>) -> Result<()> {
+        self.neighbours = conn.get_neighbors().await?;
+        self.proxies = conn.get_proxy_neighbors().await?;
+        Ok(())
     }
 
     async fn read_tc(&mut self, conn: &Connection<Route>, ifindexes: Vec<u32>) -> Result<()> {
@@ -978,6 +1035,11 @@ impl Snapshot {
         {
             snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
         }
+        if !config.neighbours.is_empty()
+            || opts.previous.as_ref().is_some_and(|p| !p.neighbours.is_empty())
+        {
+            snapshot.read_neighbours(conn).await?;
+        }
         Ok(snapshot)
     }
 
@@ -990,6 +1052,8 @@ impl Snapshot {
             extras: None,
             tc: HashMap::new(),
             bridge_vlans: Vec::new(),
+            neighbours: Vec::new(),
+            proxies: Vec::new(),
         })
     }
 
@@ -1145,6 +1209,17 @@ pub(crate) fn diff_snapshot(
     // Diff qdiscs
     diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, opts, &mut diff);
 
+    // Neighbours (#516), against what the link changes leave: a link
+    // recreated, flushed or given another MAC has none.
+    let mut lost = flushed.clone();
+    lost.extend(
+        diff.links_to_modify
+            .iter()
+            .filter(|(_, c)| c.set_address.is_some())
+            .filter_map(|(name, _)| link_by_name.get(name.as_str()).map(|l| l.ifindex())),
+    );
+    diff_neighbours(config, snapshot, &link_by_name, &lost, opts, &mut diff);
+
     // TC trees (#514), against what the recreates leave: a recreated link
     // has none. The apply diffs each again after the qdisc step.
     let names = super::tc_tree::ifindexes(&current_links);
@@ -1177,6 +1252,61 @@ pub(crate) fn diff_snapshot(
     }
 
     Ok(diff)
+}
+
+/// The declared neighbours against the kernel's (#516). A neighbour on a
+/// device the apply creates, recreates or flushes (`lost`) is set whatever
+/// the dump says; a previous one is removed while it is there.
+fn diff_neighbours(
+    config: &NetworkConfig,
+    snapshot: &Snapshot,
+    link_by_name: &HashMap<&str, &LinkMessage>,
+    lost: &HashSet<u32>,
+    opts: &PlanOptions,
+    diff: &mut ConfigDiff,
+) {
+    // The entry the kernel has for a declaration, as one: a permanent one
+    // with its link-layer address, or the proxy entry.
+    let live = |n: &DeclaredNeighbour| -> Option<(DeclaredNeighbour, bool)> {
+        let ifindex = link_by_name.get(n.dev.as_str())?.ifindex();
+        if lost.contains(&ifindex) {
+            return None;
+        }
+        let pool = if n.proxy { &snapshot.proxies } else { &snapshot.neighbours };
+        let msg = pool
+            .iter()
+            .find(|m| m.ifindex() == ifindex && m.destination() == Some(&n.destination))?;
+        let have = DeclaredNeighbour {
+            dev: n.dev.clone(),
+            destination: n.destination,
+            lladdr: if n.proxy {
+                None
+            } else {
+                msg.lladdr().and_then(|l| <[u8; 6]>::try_from(l).ok())
+            },
+            proxy: n.proxy,
+        };
+        Some((have, n.proxy || msg.is_permanent()))
+    };
+    for n in &config.neighbours {
+        match live(n) {
+            Some((have, true)) if have == *n => {}
+            Some((have, true)) => {
+                diff.neighbours_replaced.push((n.clone(), have));
+                diff.neighbours_to_set.push(n.clone());
+            }
+            // Missing, or learned and not permanent.
+            _ => diff.neighbours_to_set.push(n.clone()),
+        }
+    }
+    for prev in opts.previous.iter().flat_map(|p| p.neighbours.iter()) {
+        if config.neighbours.iter().any(|n| n.same_entry(prev)) {
+            continue;
+        }
+        if let Some((have, true)) = live(prev) {
+            diff.neighbours_to_remove.push(have);
+        }
+    }
 }
 
 /// A declared port's VLANs against the port's (#516): the change lines,
@@ -3042,6 +3172,8 @@ mod tests {
                 "links-to-modify",
                 "links-to-recreate",
                 "links-to-remove",
+                "neighbours-to-remove",
+                "neighbours-to-set",
                 "qdiscs-to-add",
                 "qdiscs-to-remove",
                 "qdiscs-to-replace",
