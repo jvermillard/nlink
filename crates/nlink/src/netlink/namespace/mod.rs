@@ -54,6 +54,10 @@ use super::{
     socket::NetlinkSocket,
 };
 
+mod netns;
+
+pub use netns::{Netns, NetnsId, NetnsRef};
+
 /// Specification for which network namespace to use.
 ///
 /// This enum provides a unified way to specify a network namespace,
