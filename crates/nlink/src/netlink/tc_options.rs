@@ -987,8 +987,10 @@ pub struct FqPieOptions {
     pub quantum: u32,
     /// Per-qdisc memory limit in bytes.
     pub memory_limit: u32,
-    /// ECN marking probability (per-mille — divide by 10 for percent).
-    pub ecn_prob_permille: u32,
+    /// The drop probability up to which packets are ECN-marked, in whole
+    /// percent. Named `ecn_prob_permille` and divided by 10 before 0.32
+    /// (#631).
+    pub ecn_prob_percent: u32,
     /// ECN marking enabled.
     pub ecn: bool,
     /// Byte mode enabled.
@@ -1018,10 +1020,8 @@ impl FqPieOptions {
 
     /// Get the ECN probability as a `Percent`, or `None` if zero.
     pub fn ecn_prob(&self) -> Option<crate::util::Percent> {
-        if self.ecn_prob_permille > 0 {
-            Some(crate::util::Percent::new(
-                self.ecn_prob_permille as f64 / 10.0,
-            ))
+        if self.ecn_prob_percent > 0 {
+            Some(crate::util::Percent::new(f64::from(self.ecn_prob_percent)))
         } else {
             None
         }
@@ -1766,7 +1766,7 @@ fn parse_fq_pie_options(data: &[u8]) -> FqPieOptions {
             }
             TCA_FQ_PIE_ECN_PROB => {
                 if let Some(v) = read_u32(payload) {
-                    opts.ecn_prob_permille = v;
+                    opts.ecn_prob_percent = v;
                 }
             }
             TCA_FQ_PIE_ECN => {
@@ -2689,7 +2689,7 @@ mod tests {
     #[test]
     fn test_fq_pie_options_ecn_prob_accessor() {
         let opts = FqPieOptions {
-            ecn_prob_permille: 200, // 20%
+            ecn_prob_percent: 20,
             ..Default::default()
         };
         let p = opts.ecn_prob().unwrap();

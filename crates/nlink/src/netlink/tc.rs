@@ -4070,7 +4070,9 @@ pub struct FqPieConfig {
     pub quantum: Option<crate::util::Bytes>,
     /// Per-qdisc memory limit.
     pub memory_limit: Option<crate::util::Bytes>,
-    /// ECN marking probability.
+    /// The drop probability up to which a packet is ECN-marked instead of
+    /// dropped (kernel default 10 %). A whole percentage: the kernel holds
+    /// no fraction of one.
     pub ecn_prob: Option<crate::util::Percent>,
     /// Enable ECN marking.
     pub ecn: bool,
@@ -4153,7 +4155,9 @@ impl FqPieConfig {
         self
     }
 
-    /// Set the ECN marking probability.
+    /// Set the drop probability up to which packets are ECN-marked
+    /// instead of dropped. A whole percentage; `write_options` refuses a
+    /// fraction, which the kernel cannot hold.
     pub fn ecn_prob(mut self, prob: crate::util::Percent) -> Self {
         self.ecn_prob = Some(prob);
         self
@@ -4189,7 +4193,7 @@ impl FqPieConfig {
     /// - `limit <packets>`, `flows <n>`, `alpha <n>`, `beta <n>`
     /// - `target <time>`, `tupdate <time>` — tc-style times (`15ms`)
     /// - `quantum <size>`, `memory_limit <size>` — tc-style sizes
-    /// - `ecnprob <percent>` (alias `ecn_prob`)
+    /// - `ecnprob <percent>` (alias `ecn_prob`) — a whole percentage
     /// - bare toggles: `ecn` / `noecn`, `bytemode` / `nobytemode`,
     ///   `dq_rate_estimator` / `no_dq_rate_estimator`
     ///
@@ -4282,11 +4286,17 @@ impl FqPieConfig {
                 }
                 "ecnprob" | "ecn_prob" => {
                     let s = need_value()?;
-                    cfg.ecn_prob = Some(s.parse::<crate::util::Percent>().map_err(|_| {
+                    let prob = s.parse::<crate::util::Percent>().map_err(|_| {
                         Error::InvalidMessage(format!(
                             "fq_pie: invalid ecnprob `{s}` (expected percent 0-100)"
                         ))
-                    })?);
+                    })?;
+                    if prob.as_percent().fract() != 0.0 {
+                        return Err(Error::InvalidMessage(format!(
+                            "fq_pie: ecnprob `{s}` is not a whole percentage"
+                        )));
+                    }
+                    cfg.ecn_prob = Some(prob);
                     i += 2;
                 }
                 "ecn" => {
@@ -4360,9 +4370,16 @@ impl QdiscConfig for FqPieConfig {
             );
         }
         if let Some(prob) = self.ecn_prob {
-            // Kernel encodes ECN probability as a per-mille value.
-            let permille = (prob.as_percent() * 10.0) as u32;
-            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN_PROB, permille);
+            // A whole percentage, as tc(8) sends it. This was written as
+            // per-mille: 20 % installed 200, which marks at any drop
+            // probability (#631).
+            let pct = prob.as_percent();
+            if pct.fract() != 0.0 {
+                return Err(Error::InvalidMessage(format!(
+                    "fq_pie: ecn_prob {prob} is not a whole percentage"
+                )));
+            }
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN_PROB, pct as u32);
         }
         // Written whether on or off: all three default off, and
         // `fq_pie_change` keeps what it has when an attribute is absent, so
@@ -9490,6 +9507,27 @@ mod psched_wire_tests {
     /// override it. This is CLAUDE.md's "silent skipping is a bug" contract
     /// violated one layer *below* the parser: the parser dutifully accepted
     /// the token and the encoder threw it away (#213).
+    /// #631: `TCA_FQ_PIE_ECN_PROB` is a whole percentage, as tc(8) sends
+    /// it; it was written per-mille, so 20 % went out as 200.
+    #[test]
+    fn fq_pie_ecn_prob_is_a_percentage_on_the_wire() {
+        use crate::netlink::types::tc::qdisc::fq_pie::TCA_FQ_PIE_ECN_PROB;
+        let cfg = FqPieConfig::new().ecn_prob(crate::util::Percent::new(20.0));
+        assert_eq!(u32_at(&qdisc_attrs(&cfg), TCA_FQ_PIE_ECN_PROB, 0), 20);
+
+        let cfg = FqPieConfig::new().ecn_prob(crate::util::Percent::new(1.5));
+        let mut b = MessageBuilder::new(0, 0);
+        let err = cfg.write_options(&mut b).unwrap_err().to_string();
+        assert!(err.contains("not a whole percentage"), "got: {err}");
+        let err = FqPieConfig::parse_params(&["ecn_prob", "1.5"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("fq_pie: ecnprob `1.5` is not a whole percentage"),
+            "got: {err}"
+        );
+    }
+
     #[test]
     fn htb_qdisc_r2q_reaches_the_wire() {
         // struct tc_htb_glob: version@0 rate2quantum@4 defcls@8 debug@12 ...

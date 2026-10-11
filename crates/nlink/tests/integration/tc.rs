@@ -380,15 +380,15 @@ async fn netem_replace_clears_an_external_slot_and_ecn() -> Result<()> {
     Ok(())
 }
 
-/// `tc -d qdisc show dev <dev>` with the handle and the netem seed cut
-/// out, so two devices given the same netem print the same line. A seed is
+/// `tc -d qdisc show dev <dev> root` with the handle and a netem seed cut
+/// out, so two devices given the same qdisc print the same line. A seed is
 /// random unless set, and only iproute2 6.3+ prints one.
-fn netem_line(ns: &TestNamespace, dev: &str) -> Result<String> {
-    let shown = ns.exec("tc", &["-d", "qdisc", "show", "dev", dev])?;
+fn root_qdisc_line(ns: &TestNamespace, dev: &str) -> Result<String> {
+    let shown = ns.exec("tc", &["-d", "qdisc", "show", "dev", dev, "root"])?;
     let line = shown
         .lines()
-        .find(|l| l.starts_with("qdisc netem"))
-        .unwrap_or_else(|| panic!("no netem on {dev}: {shown}"));
+        .find(|l| l.starts_with("qdisc "))
+        .unwrap_or_else(|| panic!("no root qdisc on {dev}: {shown}"));
     let words: Vec<&str> = line.split_whitespace().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -448,17 +448,17 @@ async fn netem_slot_ecn_seed_overhead_and_distribution_match_tc() -> Result<()> 
     args.extend(tokens);
     ns.exec("tc", &args)?;
     // The seed through nlink only: iproute2 learnt `seed` in 6.3, after
-    // the CI image's 6.1. `netem_line` drops the one tc prints, which is
+    // the CI image's 6.1. `root_qdisc_line` drops the one tc prints, which is
     // random where none was set.
     let mut seeded = tokens.to_vec();
     seeded.extend(["seed", "42"]);
     conn.add_qdisc("dummy0", NetemConfig::parse_params(&seeded)?)
         .await?;
 
-    let ours = netem_line(&ns, "dummy0")?;
+    let ours = root_qdisc_line(&ns, "dummy0")?;
     assert_eq!(
         ours,
-        netem_line(&ns, "dummy1")?,
+        root_qdisc_line(&ns, "dummy1")?,
         "nlink and tc installed different netems"
     );
     for word in [
@@ -1018,6 +1018,57 @@ async fn a_replace_turns_pie_flags_off() -> Result<()> {
         fq_pie["dq_rate_estimator"], true,
         "fq_pie estimator stayed on: {fq_pie}"
     );
+    Ok(())
+}
+
+/// #631: `ecn_prob` is a whole percentage. nlink wrote it per-mille and read
+/// it back the same way, so its own round trip agreed with itself: through
+/// `nlink-tc`, `ecn_prob 20` installed 200, and the kernel default of 10
+/// read back as 1 %. The same value through `tc` and through nlink on two
+/// devices, then the dumps compared.
+#[tokio::test]
+async fn fq_pie_ecn_prob_matches_tc() -> Result<()> {
+    use nlink::netlink::tc::FqPieConfig;
+    require_root!();
+    nlink::require_modules!("sch_fq_pie");
+
+    let (ns, conn) = setup_tc_ns("fqpie-ecnprob").await?;
+    conn.add_link(DummyLink::new("dummy1")).await?;
+    let ecn_prob = |opts: Option<QdiscOptions>| match opts {
+        Some(QdiscOptions::FqPie(o)) => o.ecn_prob(),
+        other => panic!("not fq_pie: {other:?}"),
+    };
+
+    ns.exec("tc", &["qdisc", "add", "dev", "dummy1", "root", "fq_pie"])?;
+    let root = conn
+        .get_root_qdisc_by_name("dummy1")
+        .await?
+        .expect("a root");
+    assert_eq!(
+        ecn_prob(root.options()),
+        Some(nlink::Percent::new(10.0)),
+        "the default"
+    );
+
+    ns.exec(
+        "tc",
+        &[
+            "qdisc", "replace", "dev", "dummy1", "root", "fq_pie", "ecn_prob", "20",
+        ],
+    )?;
+    conn.add_qdisc(
+        "dummy0",
+        FqPieConfig::new().ecn_prob(nlink::Percent::new(20.0)),
+    )
+    .await?;
+    let ours = root_qdisc_line(&ns, "dummy0")?;
+    assert!(format!("{ours} ").contains(" ecn_prob 20 "), "{ours}");
+    assert_eq!(ours, root_qdisc_line(&ns, "dummy1")?);
+    let root = conn
+        .get_root_qdisc_by_name("dummy0")
+        .await?
+        .expect("a root");
+    assert_eq!(ecn_prob(root.options()), Some(nlink::Percent::new(20.0)));
     Ok(())
 }
 

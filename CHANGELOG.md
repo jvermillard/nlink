@@ -58,6 +58,11 @@ All notable changes to this project will be documented in this file.
   Build one with `NetemConfig::new()` and its setters, not a struct
   literal.
 
+- **`FqPieOptions::ecn_prob_permille` is `ecn_prob_percent` (#631).** It
+  holds the whole percentage the kernel reports. The old field held that
+  value too, under a name that said per-mille, and `ecn_prob()` divided
+  it by 10.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -101,6 +106,14 @@ All notable changes to this project will be documented in this file.
     deleted and a new one created under the same name, it silently
     joined the new one. Now it fails with `NamespaceDeleted`. A root
     test recreates a pool's namespace and fails without the fix.
+
+- **fq_pie's `ecn_prob` is a percentage (#631).** `FqPieConfig::ecn_prob`
+  sent `TCA_FQ_PIE_ECN_PROB` per-mille, so `ecn_prob 20` installed 200.
+  That is above the kernel's maximum probability, so ECN marking applied
+  at any drop probability. The reader divided by 10, so nlink's own round
+  trip agreed with itself. As a result, the kernel's default of 10 read
+  back as 1 %. A fractional percentage, which the kernel can't hold, is
+  now refused by `write_options` and `parse_params`.
 
 ### Added
 
