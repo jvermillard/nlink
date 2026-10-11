@@ -130,6 +130,60 @@ pub struct LinkRecreate {
     pub resets: Vec<String>,
 }
 
+/// A link the previous config declared and this one does not, which the
+/// apply deletes (#512), with the links the kernel deletes along with it.
+///
+/// Only a link the previous config gave a kind, still in the kernel with
+/// that kind: never a physical or kindless device, and never a link of the
+/// same name another actor made since. Deleting it would also destroy what
+/// it carries; what no config declared there refuses the removal, as it
+/// refuses a recreate.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct LinkRemoval {
+    /// The link.
+    pub name: String,
+    /// Its kind.
+    pub link_kind: String,
+    /// The removed link it is stacked on, for one the kernel deletes with
+    /// it.
+    pub stacked_on: Option<String>,
+    /// What deleting it would destroy that no config declares. Non-empty
+    /// means the apply refuses, with
+    /// [`Error::NotSupported`](crate::Error::NotSupported).
+    pub blocked_by: Vec<Blocker>,
+}
+
+impl LinkRemoval {
+    /// True when the apply will refuse this removal (see
+    /// [`blocked_by`](Self::blocked_by)).
+    pub fn is_refused(&self) -> bool {
+        !self.blocked_by.is_empty()
+    }
+}
+
+impl std::fmt::Display for LinkRemoval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "- link {} ({}", self.name, self.link_kind)?;
+        if let Some(lower) = &self.stacked_on {
+            write!(f, ", stacked on {lower}")?;
+        }
+        f.write_str(")")?;
+        if !self.blocked_by.is_empty() {
+            let blockers: Vec<String> = self.blocked_by.iter().map(ToString::to_string).collect();
+            write!(
+                f,
+                " refused: deleting it would destroy what no config declares: {}",
+                blockers.join(", ")
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// One reason a link cannot be recreated (#513): something deleting it
 /// would destroy that the config does not declare, or a link that cannot
 /// be recreated at all.
@@ -896,6 +950,9 @@ pub(crate) struct KindPlan {
     pub(crate) was_up: HashSet<String>,
     /// In-place changes, by link name.
     pub(crate) updates: HashMap<String, KindUpdate>,
+    /// Links the previous config declared and this one does not, and the
+    /// ones stacked on them, in deletion order; and the ones refused (#512).
+    pub(crate) remove: Vec<LinkRemoval>,
 }
 
 /// What hangs off the links beyond the four dumps every diff takes (links,
@@ -967,6 +1024,40 @@ pub(crate) fn recreates_any(config: &NetworkConfig, links: &[LinkMessage]) -> bo
                 !d.recreate.is_empty() || !d.refuse.is_empty()
             })
     })
+}
+
+/// The links the previous config declared with a kind and this one does
+/// not, still in the kernel with that kind: what the apply deletes (#512).
+pub(crate) fn removed_links<'a>(
+    config: &NetworkConfig,
+    opts: &DiffOptions,
+    links: &'a [LinkMessage],
+) -> Vec<&'a LinkMessage> {
+    let Some(previous) = opts.previous.as_deref() else {
+        return Vec::new();
+    };
+    previous
+        .links
+        .iter()
+        .filter(|l| !config.links.iter().any(|d| d.name == l.name))
+        .filter_map(|l| {
+            let kind = l.link_type.kind()?;
+            links
+                .iter()
+                .find(|live| live.name.as_deref() == Some(l.name.as_str()))
+                .filter(|live| live.kind() == Some(kind))
+        })
+        .collect()
+}
+
+/// Whether a diff of `config` deletes a link, by recreating it or by
+/// removing it: what a deletion would destroy is read then (#426, #512).
+pub(crate) fn deletes_any(
+    config: &NetworkConfig,
+    opts: &DiffOptions,
+    links: &[LinkMessage],
+) -> bool {
+    recreates_any(config, links) || !removed_links(config, opts, links).is_empty()
 }
 
 /// `downed`, and the VLANs the kernel takes down with them, transitively:
@@ -1211,7 +1302,7 @@ pub(crate) fn plan(
         if !d.recreate.is_empty() || !d.refuse.is_empty() {
             let mut reasons = d.refuse.clone();
             reasons.extend(d.recreate.iter().cloned());
-            seeds.push((*live, reasons.join(", "), d.refuse));
+            seeds.push((*live, reasons.join(", "), d.refuse, false));
         } else if let Some(update) = d.update {
             plan.updates.insert(link.name.clone(), update);
         }
@@ -1252,7 +1343,42 @@ pub(crate) fn plan(
         (dst, r.dst_len(), r.table_id())
     };
 
-    for (seed, reason, refuse) in seeds {
+    // Links the previous config declared and this one does not (#512).
+    for live in removed_links(config, opts, links) {
+        seeds.push((live, "no longer declared".to_string(), Vec::new(), true));
+    }
+    // What the previous config declared is the config's own: deleting it
+    // with a removed link is the point, not a loss.
+    let previous = opts.previous.as_deref();
+    let previously_declared_link =
+        |name: &str| previous.is_some_and(|p| p.links.iter().any(|l| l.name == name));
+    let previously_declared_address = |name: &str, addr: IpAddr, len: u8| {
+        previous.is_some_and(|p| {
+            p.addresses
+                .iter()
+                .any(|d| d.dev == name && d.address == addr && d.prefix_len == len)
+        })
+    };
+    let previous_routes: HashSet<(IpAddr, u8, u32)> = previous
+        .iter()
+        .flat_map(|p| p.routes.iter())
+        .map(|r| {
+            (
+                super::diff::kernel_destination(r.destination, r.prefix_len),
+                r.prefix_len,
+                r.table.unwrap_or(254),
+            )
+        })
+        .collect();
+    let previously_declared_qdisc = |name: &str, parent: QdiscParent| {
+        previous.is_some_and(|p| {
+            p.qdiscs
+                .iter()
+                .any(|d| d.dev == name && d.effective_parent() == parent)
+        })
+    };
+
+    for (seed, reason, refuse, remove) in seeds {
         if plan.gone.contains(&seed.ifindex()) {
             continue;
         }
@@ -1297,6 +1423,8 @@ pub(crate) fn plan(
                     declared_existing,
                 };
                 match declared.get(name) {
+                    // Removed too: the previous config declared it.
+                    None if remove && previously_declared_link(name) => {}
                     None => blocked_by.push(stacked(false)),
                     Some(d) if d.link_type.kind().is_none() => blocked_by.push(stacked(true)),
                     Some(_) => {}
@@ -1307,9 +1435,10 @@ pub(crate) fn plan(
                 if a.scope() != Scope::Universe || purged_address(name, a) {
                     continue;
                 }
-                let is_declared = config.addresses.iter().any(|d| {
-                    d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
-                });
+                let is_declared =
+                    config.addresses.iter().any(|d| {
+                        d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
+                    }) || (remove && previously_declared_address(name, addr, a.prefix_len()));
                 if !is_declared {
                     blocked_by.push(Blocker::Address {
                         dev: name.to_string(),
@@ -1321,6 +1450,7 @@ pub(crate) fn plan(
             for r in routes {
                 if r.protocol() == RouteProtocol::Kernel
                     || declared_routes.contains(&route_key(r))
+                    || (remove && previous_routes.contains(&route_key(r)))
                     || purged_route(r)
                 {
                     continue;
@@ -1354,7 +1484,8 @@ pub(crate) fn plan(
                 let is_declared = config
                     .qdiscs
                     .iter()
-                    .any(|d| d.dev == name && d.effective_parent() == parent);
+                    .any(|d| d.dev == name && d.effective_parent() == parent)
+                    || (remove && previously_declared_qdisc(name, parent));
                 if !is_declared {
                     blocked_by.push(Blocker::Qdisc {
                         dev: name.to_string(),
@@ -1429,7 +1560,8 @@ pub(crate) fn plan(
             .collect();
         for (master, port) in &ports {
             let port_name = name_of(port.ifindex());
-            if !declared.contains_key(port_name) {
+            if !declared.contains_key(port_name) && !(remove && previously_declared_link(port_name))
+            {
                 blocked_by.push(Blocker::Port {
                     name: port_name.to_string(),
                     master: name_of(master.ifindex()).to_string(),
@@ -1461,9 +1593,10 @@ pub(crate) fn plan(
                 if a.scope() != Scope::Universe || purged_address(name, a) {
                     continue;
                 }
-                let is_declared = config.addresses.iter().any(|d| {
-                    d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
-                });
+                let is_declared =
+                    config.addresses.iter().any(|d| {
+                        d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
+                    }) || (remove && previously_declared_address(name, addr, a.prefix_len()));
                 if !is_declared {
                     blocked_by.push(Blocker::Address {
                         dev: name.to_string(),
@@ -1475,6 +1608,7 @@ pub(crate) fn plan(
             for r in routes {
                 if r.protocol() == RouteProtocol::Kernel
                     || declared_routes.contains(&route_key(r))
+                    || (remove && previous_routes.contains(&route_key(r)))
                     || old_tables.contains(&r.table_id())
                     || purged_route(r)
                 {
@@ -1490,6 +1624,38 @@ pub(crate) fn plan(
         // A bridge entry is dumped once per VLAN as well as once without.
         let mut seen_reasons = HashSet::new();
         blocked_by.retain(|b| seen_reasons.insert(b.clone()));
+
+        if remove {
+            let refused = !blocked_by.is_empty();
+            plan.remove.push(LinkRemoval {
+                name: name_of(seed.ifindex()).to_string(),
+                link_kind: seed.kind().unwrap_or("link").to_string(),
+                stacked_on: None,
+                blocked_by,
+            });
+            if refused {
+                continue;
+            }
+            for (l, lower) in &closure {
+                plan.gone.insert(l.ifindex());
+                if let Some(lower) = lower {
+                    plan.remove.push(LinkRemoval {
+                        name: name_of(l.ifindex()).to_string(),
+                        link_kind: l.kind().unwrap_or("link").to_string(),
+                        stacked_on: Some(name_of(*lower).to_string()),
+                        blocked_by: Vec::new(),
+                    });
+                }
+            }
+            for (master, port) in &ports {
+                let closes = master.kind() == Some("bond");
+                plan.released.insert(port.ifindex(), closes);
+                if flushing.contains(&port.ifindex()) {
+                    plan.cycled.insert(port.ifindex());
+                }
+            }
+            continue;
+        }
 
         if !blocked_by.is_empty() {
             plan.recreate.push(LinkRecreate {

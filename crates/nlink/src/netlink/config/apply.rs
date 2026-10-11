@@ -316,6 +316,27 @@ pub async fn apply_diff(
         return Err(error);
     }
 
+    // A removal that would destroy what no config declares is refused
+    // before anything changes, as a recreate is (#512).
+    for removal in diff.links_to_remove.iter().filter(|r| r.is_refused()) {
+        let blockers: Vec<String> = removal.blocked_by.iter().map(ToString::to_string).collect();
+        let error = Error::NotSupported(format!(
+            "link {}: the previous config declared it and this one does not, but deleting it \
+             would destroy what no config declares: {}. Declare them, or remove them, and \
+             apply again.",
+            removal.name,
+            blockers.join(", ")
+        ));
+        if options.continue_on_error {
+            result.errors.push(ApplyError {
+                operation: format!("delete link {}", removal.name),
+                error,
+            });
+            continue;
+        }
+        return Err(error);
+    }
+
     // 0. Delete the links to be recreated. A refused recreate — one that
     //    would destroy what the config does not declare — fails here,
     //    before anything has changed. The links the kernel deletes along
@@ -363,6 +384,40 @@ pub async fn apply_diff(
             }
             // Deleted with the link it is stacked on.
             Ok(false) => result.recreated.push(recreate.clone()),
+            Err(e) => {
+                if options.continue_on_error {
+                    result.errors.push(ApplyError {
+                        operation: op,
+                        error: e,
+                    });
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    // 0b. Delete the links the previous config declared and this one does
+    //     not, before anything is created: a replacement can conflict with
+    //     them (the same VLAN id on the same parent, the same VNI and port).
+    //     The links stacked on one are listed after it, and gone with it by
+    //     the time they come up (#512).
+    for removal in diff.links_to_remove.iter().filter(|r| !r.is_refused()) {
+        let op = format!("delete link {} ({})", removal.name, removal.link_kind);
+        if options.dry_run {
+            result.summary.push(format!("Would {op}"));
+            result.changes_made += 1;
+            continue;
+        }
+        match conn.del_link_if_exists(removal.name.as_str()).await {
+            Ok(true) => {
+                result.summary.push(format!(
+                    "Deleted link {} ({})",
+                    removal.name, removal.link_kind
+                ));
+                result.changes_made += 1;
+            }
+            Ok(false) => {}
             Err(e) => {
                 if options.continue_on_error {
                     result.errors.push(ApplyError {
