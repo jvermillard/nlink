@@ -328,27 +328,7 @@ where
         })
     }
 
-    /// Create a connection that operates in a specific network namespace.
-    ///
-    /// The namespace is specified by an open file descriptor to a namespace file
-    /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`).
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// use std::fs::File;
-    /// use std::os::unix::io::AsRawFd;
-    /// use nlink::netlink::{Connection, Route};
-    ///
-    /// let ns_file = File::open("/var/run/netns/myns")?;
-    /// let conn = Connection::<Route>::new_in_namespace(ns_file.as_raw_fd())?;
-    ///
-    /// // All operations now occur in the "myns" namespace
-    /// let links = conn.get_links().await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Create a connection in a network namespace:
     /// [`new_in_namespace`](Self::new_in_namespace) taking an I/O-safe
     /// borrowed fd (`impl AsFd`: a `NamespaceFd`, a `File`, …), so the
     /// fd provably outlives the call (#186).
@@ -370,6 +350,29 @@ where
         Self::new_in_namespace(ns_fd.as_fd().as_raw_fd())
     }
 
+    /// Create a connection that operates in a specific network namespace.
+    ///
+    /// The namespace is specified by an open file descriptor to a namespace file
+    /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`). The fd only
+    /// has to stay open for the call; [`new_in_namespace_fd`](Self::new_in_namespace_fd)
+    /// takes an owned or borrowed one, so the compiler checks that.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::fs::File;
+    /// use std::os::unix::io::AsRawFd;
+    /// use nlink::netlink::{Connection, Route};
+    ///
+    /// let ns_file = File::open("/var/run/netns/myns")?;
+    /// let conn = Connection::<Route>::new_in_namespace(ns_file.as_raw_fd())?;
+    ///
+    /// // All operations now occur in the "myns" namespace
+    /// let links = conn.get_links().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
         let socket = NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?;

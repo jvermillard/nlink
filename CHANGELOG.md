@@ -1244,6 +1244,19 @@ All notable changes to this project will be documented in this file.
   option cannot be dropped the same way. A root test runs a `Stack` dry
   run and a reconcile with the option set.
 
+- **`set_wiphy_netns` never moved the wiphy (#604).** It and
+  `set_wiphy_netns_pid` sent `NL80211_CMD_SET_WIPHY` (2) with the
+  namespace attributes. `nl80211_set_wiphy` does not read those, so as
+  the kernel source reads, the request was acked and the wiphy stayed
+  where it was. Both now send `NL80211_CMD_SET_WIPHY_NETNS` (49), as
+  `iw phy <phy> set netns` does. A unit test pins the command and
+  attributes against the header. This is **unverified on a live kernel**:
+  neither the test kernel nor CI has a Wi-Fi stack or `mac80211_hwsim`.
+
+  Also, the rustdoc for `Connection::new_in_namespace(RawFd)` sat on
+  `new_in_namespace_fd`, so the `RawFd` constructor had none. Each now
+  has its own.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it
