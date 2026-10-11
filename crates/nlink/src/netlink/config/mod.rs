@@ -62,7 +62,10 @@ mod types;
 // was in the JSON ABI while being unnameable in Rust.
 pub use apply::{ApplyError, ApplyOptions, ApplyResult};
 pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict, Snapshot};
-pub use kind::{Blocker, BlockerFilter, LinkRecreate, LinkRemoval, Owned, RecreatePolicy};
+pub use kind::{
+    Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
+    RecreatePolicy,
+};
 pub use types::*;
 
 use super::{connection::Connection, error::Result, protocol::Route};
@@ -120,6 +123,35 @@ impl NetworkConfig {
         options: DiffOptions,
     ) -> Result<ConfigDiff> {
         diff::compute_diff_with_options(self, conn, &options).await
+    }
+
+    /// The links going from `previous` to this config recreates,
+    /// predicted without a kernel (#513).
+    ///
+    /// It runs the comparison a live diff runs, against the link the
+    /// kernel would hold for `previous`: its declaration encoded as the
+    /// apply sends it and read back. So it cannot drift from what an apply
+    /// does. A parameter `previous` left to a module parameter's default
+    /// (the VXLAN port, a bond option) is a recreate
+    /// [`IfKernelDefaultDiffers`](Certainty::IfKernelDefaultDiffers). What
+    /// the live state would block cannot be known here; the live diff's
+    /// [`links_to_recreate`](ConfigDiff::links_to_recreate) says that.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    ///
+    /// let before = NetworkConfig::new()
+    ///     .link("d0", |l| l.dummy())
+    ///     .link("v1", |l| l.vlan("d0", 10));
+    /// let after = NetworkConfig::new()
+    ///     .link("d0", |l| l.dummy())
+    ///     .link("v1", |l| l.vlan("d0", 20));
+    /// let offline = after.diff_against(&before);
+    /// assert_eq!(offline.recreates[0].name, "v1");
+    /// assert!(offline.recreates[0].reason.contains("vlan id 10 -> 20"));
+    /// ```
+    pub fn diff_against(&self, previous: &NetworkConfig) -> OfflineDiff {
+        kind::diff_against(self, previous)
     }
 
     /// The diff against a [`Snapshot`] read earlier, with no kernel read

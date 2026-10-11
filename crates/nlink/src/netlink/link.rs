@@ -413,6 +413,44 @@ pub trait LinkConfig: Send + Sync {
     }
 }
 
+/// A boxed config is a config, so a link kind chosen at run time can be
+/// created (#513).
+impl<T: LinkConfig + ?Sized> LinkConfig for Box<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+    fn kind(&self) -> &str {
+        (**self).kind()
+    }
+    fn peer_name(&self) -> Option<&str> {
+        (**self).peer_name()
+    }
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        (**self).parent_ref()
+    }
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        (**self).write_to(builder, parent_index)
+    }
+    fn pinned_mtu(&self) -> Option<u32> {
+        (**self).pinned_mtu()
+    }
+    fn master_ref(&self) -> Option<&InterfaceRef> {
+        (**self).master_ref()
+    }
+    fn up_at_create(&self) -> bool {
+        (**self).up_at_create()
+    }
+    fn alias_after_create(&self) -> Option<&str> {
+        (**self).alias_after_create()
+    }
+    fn netns_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        (**self).netns_fd()
+    }
+    fn creation_error(&self) -> Option<&str> {
+        (**self).creation_error()
+    }
+}
+
 /// Options every link takes as it is created: a master, the up state, an
 /// alias, and the namespace to create it in (#517).
 ///

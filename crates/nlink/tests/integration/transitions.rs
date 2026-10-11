@@ -909,3 +909,112 @@ async fn flower_lines_install_the_same_through_tc_and_nlink() -> nlink::Result<(
     );
     Ok(())
 }
+
+// ============================================================================
+// Offline prediction against the kernel
+// ============================================================================
+
+/// `diff_against` predicts, from declarations alone, the recreates a live
+/// diff finds once the first config is applied: every certain prediction
+/// is recreated, and nothing is recreated that was not at least a maybe
+/// (#513).
+#[tokio::test]
+async fn offline_recreate_predictions_match_the_kernel() -> nlink::Result<()> {
+    use nlink::netlink::config::{BondMode, Certainty, MacvlanMode};
+    use nlink::netlink::link::VlanProtocol;
+    use std::collections::BTreeSet;
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "vxlan", "bonding", "macvlan", "vrf");
+
+    let base = || NetworkConfig::new().link("d0", |l| l.dummy().up());
+    let cases: Vec<(&str, NetworkConfig, NetworkConfig)> = vec![
+        (
+            "vlan-id",
+            base().link("v1", |l| l.vlan("d0", 10)),
+            base().link("v1", |l| l.vlan("d0", 20)),
+        ),
+        (
+            "vlan-protocol",
+            base().link("v1", |l| l.vlan("d0", 10)),
+            base().link("v1", |l| {
+                l.vlan("d0", 10).vlan_protocol(VlanProtocol::Dot1ad)
+            }),
+        ),
+        (
+            "vxlan-vni-and-stacked-vlan",
+            base()
+                .link("vx0", |l| {
+                    l.vxlan(100).vxlan_underlay_dev("d0").vxlan_port(4789)
+                })
+                .link("v1", |l| l.vlan("vx0", 5)),
+            base()
+                .link("vx0", |l| {
+                    l.vxlan(200).vxlan_underlay_dev("d0").vxlan_port(4789)
+                })
+                .link("v1", |l| l.vlan("vx0", 5)),
+        ),
+        (
+            "vxlan-port-from-default-to-another",
+            base().link("vx0", |l| l.vxlan(100).vxlan_underlay_dev("d0")),
+            base().link("vx0", |l| {
+                l.vxlan(100).vxlan_underlay_dev("d0").vxlan_port(4789)
+            }),
+        ),
+        (
+            "vxlan-port-from-default-to-the-default",
+            base().link("vx0", |l| l.vxlan(100).vxlan_underlay_dev("d0")),
+            base().link("vx0", |l| {
+                l.vxlan(100).vxlan_underlay_dev("d0").vxlan_port(8472)
+            }),
+        ),
+        (
+            "bond-mode",
+            NetworkConfig::new().link("b0", |l| l.bond().bond_mode(BondMode::ActiveBackup)),
+            NetworkConfig::new().link("b0", |l| l.bond().bond_mode(BondMode::BalanceRr)),
+        ),
+        (
+            "macvlan-mode-changes-in-place",
+            base().link("m0", |l| l.macvlan("d0").macvlan_mode(MacvlanMode::Bridge)),
+            base().link("m0", |l| l.macvlan("d0").macvlan_mode(MacvlanMode::Private)),
+        ),
+        (
+            "vrf-table",
+            NetworkConfig::new().link("vrf0", |l| l.vrf(100)),
+            NetworkConfig::new().link("vrf0", |l| l.vrf(200)),
+        ),
+        (
+            "mtu-changes-in-place",
+            base().link("v1", |l| l.vlan("d0", 10).mtu(1400)),
+            base().link("v1", |l| l.vlan("d0", 10).mtu(1300)),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, before, after) in cases {
+        let ns = TestNamespace::new(&format!("off-{}", &name[..name.len().min(8)]))?;
+        let conn = ns.connection()?;
+        let applied = before.apply(&conn).await?;
+        assert!(applied.is_success(), "{name}: {applied:?}");
+        let live: BTreeSet<String> = after
+            .diff(&conn)
+            .await?
+            .links_to_recreate
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        let offline = after.diff_against(&before);
+        let certain: BTreeSet<String> = offline
+            .recreates
+            .iter()
+            .filter(|r| r.certainty == Certainty::Certain)
+            .map(|r| r.name.clone())
+            .collect();
+        let any: BTreeSet<String> = offline.recreates.iter().map(|r| r.name.clone()).collect();
+        if !certain.is_subset(&live) || !live.is_subset(&any) {
+            failures.push(format!(
+                "{name}: live {live:?}, offline certain {certain:?}, offline any {any:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    Ok(())
+}

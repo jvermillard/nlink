@@ -134,6 +134,226 @@ pub struct LinkRecreate {
     pub destroys: Vec<Blocker>,
 }
 
+/// How sure an offline prediction is (#513).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Certainty {
+    /// The declarations alone decide it: the link is recreated.
+    Certain,
+    /// The previous config left a parameter to a module parameter's
+    /// default (the VXLAN port, a bond option), which only the kernel
+    /// knows: the link is recreated if that default differs from what the
+    /// new config declares.
+    IfKernelDefaultDiffers,
+}
+
+/// A link [`NetworkConfig::diff_against`] predicts is recreated (#513).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OfflineRecreate {
+    /// The link.
+    pub name: String,
+    /// Why: the parameters that differ, or the link it is stacked on.
+    pub reason: String,
+    /// How sure the prediction is.
+    pub certainty: Certainty,
+}
+
+/// What changing from one config to another recreates, predicted without
+/// a kernel (#513). See [`NetworkConfig::diff_against`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OfflineDiff {
+    /// The links recreated, lower devices first.
+    pub recreates: Vec<OfflineRecreate>,
+}
+
+impl OfflineDiff {
+    /// True when nothing is recreated.
+    pub fn is_empty(&self) -> bool {
+        self.recreates.is_empty()
+    }
+}
+
+impl std::fmt::Display for OfflineDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let lines: Vec<String> = self
+            .recreates
+            .iter()
+            .map(|r| match r.certainty {
+                Certainty::Certain => format!("-/+ link {} (recreate: {})", r.name, r.reason),
+                Certainty::IfKernelDefaultDiffers => {
+                    format!("-/+? link {} (recreate if: {})", r.name, r.reason)
+                }
+            })
+            .collect();
+        f.write_str(&lines.join("\n"))
+    }
+}
+
+/// The recreates going from `previous` to `config`, decided by the same
+/// [`compare`] a live diff runs, against the link the kernel would hold
+/// for `previous`: its declaration encoded as `create_link` sends it and
+/// read back as a dump. Nothing about the live state can be known, so
+/// only recreates are predicted, not what would block them (#513).
+pub(crate) fn diff_against(config: &NetworkConfig, previous: &NetworkConfig) -> OfflineDiff {
+    use crate::netlink::interface_ref::InterfaceRef;
+
+    // An ifindex for every name either config mentions, so parents and
+    // underlays resolve as they do in a dump.
+    let mut index: HashMap<String, u32> = HashMap::new();
+    let mentioned = previous
+        .links
+        .iter()
+        .chain(config.links.iter())
+        .flat_map(|l| {
+            std::iter::once(l.name.as_str())
+                .chain(super::diff::declared_lower(l))
+                .chain(l.master.name())
+        });
+    for name in mentioned {
+        let next = index.len() as u32 + 1;
+        index.entry(name.to_string()).or_insert(next);
+    }
+    let names: HashMap<u32, &str> = index.iter().map(|(n, i)| (*i, n.as_str())).collect();
+
+    let synthesize = |prev: &DeclaredLink| -> Option<LinkMessage> {
+        let mut prev = prev.clone();
+        // What the kernel dumps for a parameter left out: its fixed
+        // default, which `compare` takes as declared.
+        match &mut prev.link_type {
+            DeclaredLinkType::Vlan { protocol, .. } => {
+                protocol.get_or_insert(crate::netlink::link::VlanProtocol::Dot1q);
+            }
+            DeclaredLinkType::Netkit {
+                mode,
+                primary_policy,
+                peer_policy,
+                ..
+            } => {
+                mode.get_or_insert(crate::netlink::link::NetkitMode::L3);
+                primary_policy.get_or_insert(crate::netlink::link::NetkitPolicy::Forward);
+                peer_policy.get_or_insert(crate::netlink::link::NetkitPolicy::Forward);
+            }
+            _ => {}
+        }
+        let link_config = super::apply::link_config(&prev)?;
+        let parent = link_config.parent_ref().and_then(|r| match r {
+            InterfaceRef::Name(n) => index.get(n.as_str()).copied(),
+            InterfaceRef::Index(i) => Some(*i),
+        });
+        let mut b = crate::netlink::builder::MessageBuilder::new(
+            crate::netlink::message::NlMsgType::RTM_NEWLINK,
+            0,
+        );
+        b.append(
+            &crate::netlink::types::link::IfInfoMsg::new().with_index(index[&prev.name] as i32),
+        );
+        link_config.write_to(&mut b, parent);
+        let bytes = b.finish();
+        <LinkMessage as crate::netlink::parse::FromNetlink>::from_bytes(&bytes[16..]).ok()
+    };
+
+    let mut recreates: Vec<OfflineRecreate> = Vec::new();
+    for link in &config.links {
+        let Some(prev) = previous.links.iter().find(|p| p.name == link.name) else {
+            continue;
+        };
+        if prev.link_type.kind().is_none() || link.link_type.kind().is_none() {
+            continue;
+        }
+        let Some(live) = synthesize(prev) else {
+            continue;
+        };
+        let d = compare(link, &live, &names);
+        if !d.recreate.is_empty() || !d.refuse.is_empty() {
+            let mut reasons = d.refuse.clone();
+            reasons.extend(d.recreate);
+            recreates.push(OfflineRecreate {
+                name: link.name.clone(),
+                reason: reasons.join(", "),
+                certainty: Certainty::Certain,
+            });
+        } else if let Some(reason) = undeclared_module_default(link, prev) {
+            recreates.push(OfflineRecreate {
+                name: link.name.clone(),
+                reason,
+                certainty: Certainty::IfKernelDefaultDiffers,
+            });
+        }
+    }
+    // The links stacked on a recreated one go with it, as surely as it does.
+    loop {
+        let mut grew = false;
+        for link in &config.links {
+            if recreates.iter().any(|r| r.name == link.name) {
+                continue;
+            }
+            let Some(lower) = super::diff::declared_lower(link) else {
+                continue;
+            };
+            let Some(certainty) = recreates
+                .iter()
+                .find(|r| r.name == lower)
+                .map(|r| r.certainty)
+            else {
+                continue;
+            };
+            if previous.links.iter().any(|p| p.name == link.name) {
+                recreates.push(OfflineRecreate {
+                    name: link.name.clone(),
+                    reason: format!("it is stacked on {lower}, which is recreated"),
+                    certainty,
+                });
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    OfflineDiff { recreates }
+}
+
+/// A recreating parameter the new config declares and the previous one
+/// left to a module parameter's default, which only the kernel knows.
+fn undeclared_module_default(new: &DeclaredLink, prev: &DeclaredLink) -> Option<String> {
+    match (&new.link_type, &prev.link_type) {
+        (
+            DeclaredLinkType::Vxlan { port: Some(p), .. },
+            DeclaredLinkType::Vxlan { port: None, .. },
+        ) => Some(format!(
+            "vxlan port was the module default (vxlan udp_port, 8472 unless set), now {p}"
+        )),
+        (
+            DeclaredLinkType::Bond {
+                lacp_rate: Some(_), ..
+            },
+            DeclaredLinkType::Bond {
+                lacp_rate: None, ..
+            },
+        ) => Some("bond lacp_rate was the module default, now declared".to_string()),
+        (
+            DeclaredLinkType::Bond {
+                ad_select: Some(_), ..
+            },
+            DeclaredLinkType::Bond {
+                ad_select: None, ..
+            },
+        ) => Some("bond ad_select was the module default, now declared".to_string()),
+        _ => None,
+    }
+}
+
 /// What a diff does with a recreate (or a removal) that would destroy what
 /// the config does not declare (#513).
 #[derive(Debug, Clone, Default)]
@@ -2156,6 +2376,81 @@ mod tests {
         ];
         let got = with_vlans_on(&links, &HashSet::from([2]));
         assert_eq!(got, HashSet::from([2, 3, 4]));
+    }
+
+    /// Offline predictions, from declarations alone (#513).
+    #[test]
+    fn offline_predictions() {
+        use crate::netlink::link::VlanProtocol;
+        let recreated =
+            |before: &NetworkConfig, after: &NetworkConfig| -> Vec<(String, Certainty)> {
+                after
+                    .diff_against(before)
+                    .recreates
+                    .into_iter()
+                    .map(|r| (r.name, r.certainty))
+                    .collect()
+            };
+        let vx = |vni: u32, port: Option<u16>| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy())
+                .link("vx0", move |l| {
+                    let l = l.vxlan(vni).vxlan_underlay_dev("d0");
+                    match port {
+                        Some(p) => l.vxlan_port(p),
+                        None => l,
+                    }
+                })
+                .link("v1", |l| l.vlan("vx0", 5))
+        };
+        // A VNI change recreates the VXLAN and the VLAN stacked on it.
+        assert_eq!(
+            recreated(&vx(100, Some(4789)), &vx(200, Some(4789))),
+            [
+                ("vx0".to_string(), Certainty::Certain),
+                ("v1".to_string(), Certainty::Certain)
+            ]
+        );
+        // A port the previous config left to the module default is a
+        // maybe; so is what is stacked on it.
+        assert_eq!(
+            recreated(&vx(100, None), &vx(100, Some(4789))),
+            [
+                ("vx0".to_string(), Certainty::IfKernelDefaultDiffers),
+                ("v1".to_string(), Certainty::IfKernelDefaultDiffers)
+            ]
+        );
+        // Nothing that changes in place recreates.
+        assert!(
+            vx(100, Some(4789))
+                .diff_against(&vx(100, Some(4789)))
+                .is_empty()
+        );
+        let mtu = |m: u32| NetworkConfig::new().link("d0", move |l| l.dummy().mtu(m));
+        assert!(mtu(1500).diff_against(&mtu(9000)).is_empty());
+        // A VLAN's protocol left out is 802.1Q, which the kernel dumps.
+        let vlan = |p: Option<VlanProtocol>| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy())
+                .link("v1", move |l| {
+                    let l = l.vlan("d0", 10);
+                    match p {
+                        Some(p) => l.vlan_protocol(p),
+                        None => l,
+                    }
+                })
+        };
+        assert!(
+            vlan(Some(VlanProtocol::Dot1q))
+                .diff_against(&vlan(None))
+                .is_empty()
+        );
+        assert_eq!(
+            recreated(&vlan(None), &vlan(Some(VlanProtocol::Dot1ad))),
+            [("v1".to_string(), Certainty::Certain)]
+        );
+        // A link new in this config is created, not recreated.
+        assert!(vlan(None).diff_against(&NetworkConfig::new()).is_empty());
     }
 
     /// The policy and caller ownership decide which blockers go (#513).

@@ -199,6 +199,26 @@ All notable changes to this project will be documented in this file.
     and put them back after, and declared fake qdiscs for `--check`, to
     get the same effect.
 
+- **Offline recreate prediction (#513, part 3).**
+  `NetworkConfig::diff_against(&previous)` predicts, with no kernel,
+  which links going from `previous` to this config recreates:
+  `OfflineDiff { recreates: [OfflineRecreate { name, reason, certainty }] }`.
+  It runs the comparison a live diff runs, against the link the kernel
+  would hold for `previous`: the declaration encoded as the apply sends it
+  and parsed back as a dump. So it cannot drift from the apply.
+  - A parameter `previous` left to a module parameter's default (the
+    VXLAN port, a bond's `lacp_rate` or `ad_select`) makes the recreate
+    `Certainty::IfKernelDefaultDiffers`.
+  - What is stacked on a recreated link is recreated with it.
+  - What the live state would block cannot be known offline. The live
+    diff's `links_to_recreate` says that.
+
+  A root test checks it against the kernel over nine transitions: every
+  certain prediction is recreated live, and nothing live goes
+  unpredicted. nlink-lab can drop its 342-line mirror of `kind.rs`. The
+  per-kind link builders are now built by one `link_config`, and
+  `Box<dyn LinkConfig>` is a `LinkConfig`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
