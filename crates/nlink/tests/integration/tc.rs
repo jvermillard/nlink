@@ -126,8 +126,13 @@ async fn plug_without_limit_installs_and_buffers() -> Result<()> {
 
     // An explicit limit keeps working: replace with one and the qdisc
     // still stands.
-    conn.replace_qdisc_by_index_full(ifindex, parent, None, PlugConfig::new().limit(65536).build())
-        .await?;
+    conn.replace_qdisc_by_index_full(
+        ifindex,
+        parent,
+        None,
+        PlugConfig::new().limit(nlink::Bytes::new(65536)).build(),
+    )
+    .await?;
     let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
     assert!(qdiscs.iter().any(|q| q.kind() == Some("plug")));
 
@@ -2618,5 +2623,186 @@ async fn block_drops_traffic_and_keeps_the_root_qdisc() -> Result<()> {
     );
     conn_a.unblock(pair.a_if, Direction::Egress).await?;
     assert_eq!(deliver_udp(&pair.a, &pair.b, dst, 10), 10);
+    Ok(())
+}
+
+/// The handle of dummy0's root qdisc.
+async fn dummy0_root_handle(conn: &Connection<Route>) -> Result<TcHandle> {
+    let root = conn.get_root_qdisc_by_name("dummy0").await?;
+    Ok(root.expect("a root").handle())
+}
+
+/// The kind of dummy0's ingress-slot qdisc, if any.
+async fn dummy0_hook_kind(conn: &Connection<Route>) -> Result<Option<String>> {
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    Ok(qdiscs
+        .iter()
+        .find(|q| matches!(q.kind(), Some("ingress" | "clsact")))
+        .and_then(|q| q.kind().map(str::to_string)))
+}
+
+/// The kind of dummy0's configured root qdisc, if any.
+async fn dummy0_root_kind(conn: &Connection<Route>) -> Result<Option<String>> {
+    let root = conn.get_root_qdisc_by_name("dummy0").await?;
+    Ok(root
+        .filter(|q| q.handle().as_raw() != 0)
+        .and_then(|q| q.kind().map(str::to_string)))
+}
+
+/// #515: a classful qdisc added or replaced at the root without a handle
+/// sits at `1:`, so its classes can name it; the kernel picked `8001:`.
+/// A live qdisc changed or recreated keeps its handle, and a batch puts an
+/// ingress at the hook, which it sent to the root before.
+#[tokio::test]
+async fn a_classful_root_without_a_handle_sits_at_1() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "sch_prio", "sch_netem", "sch_ingress");
+
+    let (_ns, conn) = setup_tc_ns("default-handle").await?;
+    conn.add_qdisc("dummy0", HtbQdiscConfig::new().default_class(0x10).build())
+        .await?;
+    assert_eq!(dummy0_root_handle(&conn).await?, TcHandle::major_only(1));
+    conn.add_class(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 0x10),
+        HtbClassConfig::new(nlink::Rate::mbit(10)).build(),
+    )
+    .await?;
+
+    // Another classful kind replaces it at the same handle, through the
+    // graft that never leaves the slot bare.
+    conn.del_qdisc("dummy0", TcHandle::ROOT).await?;
+    conn.replace_qdisc("dummy0", PrioConfig::new().build())
+        .await?;
+    assert_eq!(dummy0_root_handle(&conn).await?, TcHandle::major_only(1));
+    // A classless kind takes the kernel's choice; a classful one over it
+    // grafts at 1:.
+    conn.replace_qdisc("dummy0", NetemConfig::new()).await?;
+    assert_ne!(dummy0_root_handle(&conn).await?, TcHandle::major_only(1));
+    conn.replace_qdisc("dummy0", PrioConfig::new().build())
+        .await?;
+    assert_eq!(dummy0_root_handle(&conn).await?, TcHandle::major_only(1));
+    // An explicit handle wins.
+    conn.del_qdisc("dummy0", TcHandle::ROOT).await?;
+    conn.add_qdisc_full(
+        "dummy0",
+        TcHandle::ROOT,
+        Some(TcHandle::major_only(7)),
+        PrioConfig::new(),
+    )
+    .await?;
+    assert_eq!(dummy0_root_handle(&conn).await?, TcHandle::major_only(7));
+
+    let link = conn.get_link_by_name("dummy0").await?.expect("dummy0");
+    conn.del_qdisc("dummy0", TcHandle::ROOT).await?;
+    conn.batch()
+        .add_qdisc(link.ifindex(), HtbQdiscConfig::new().build())
+        .add_qdisc(link.ifindex(), IngressConfig::new())
+        .execute()
+        .await?;
+    assert_eq!(dummy0_root_handle(&conn).await?, TcHandle::major_only(1));
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    assert!(
+        qdiscs.iter().any(|q| q.kind() == Some("ingress")),
+        "{qdiscs:?}"
+    );
+    Ok(())
+}
+
+/// #515: the ingress and clsact qdiscs share a slot, and `del_qdisc` at it
+/// deleted whichever was there. `del_ingress` and `del_clsact` name the
+/// kind, and the kernel refuses the other.
+#[tokio::test]
+async fn del_ingress_and_del_clsact_delete_only_their_kind() -> Result<()> {
+    use nlink::netlink::tc::ClsactConfig;
+    require_root!();
+    nlink::require_modules!("sch_ingress");
+
+    let (_ns, conn) = setup_tc_ns("del-hook-kind").await?;
+    conn.add_qdisc("dummy0", ClsactConfig::new()).await?;
+    let err = conn
+        .del_ingress("dummy0")
+        .await
+        .expect_err("a clsact is not an ingress");
+    assert!(
+        err.to_string().contains("is `clsact`, not `ingress`"),
+        "{err}"
+    );
+    assert_eq!(
+        dummy0_hook_kind(&conn).await?.as_deref(),
+        Some("clsact"),
+        "the clsact stays"
+    );
+    conn.del_clsact("dummy0").await?;
+    assert_eq!(dummy0_hook_kind(&conn).await?, None);
+
+    conn.add_qdisc("dummy0", IngressConfig::new()).await?;
+    assert!(conn.del_clsact("dummy0").await.is_err());
+    assert_eq!(dummy0_hook_kind(&conn).await?.as_deref(), Some("ingress"));
+    conn.del_ingress("dummy0").await?;
+    assert_eq!(dummy0_hook_kind(&conn).await?, None);
+    assert!(conn.del_ingress("dummy0").await.unwrap_err().is_not_found());
+    Ok(())
+}
+
+/// #515: `PerHostLimiter::remove` and `PerPeerImpairer::clear` deleted
+/// whatever root the device had — a user's TBF, the other recipe's tree.
+/// Each removes only a tree it would have built.
+#[tokio::test]
+async fn recipe_remove_deletes_only_its_own_root() -> Result<()> {
+    use nlink::netlink::{impair::PerPeerImpairer, ratelimit::PerHostLimiter};
+    require_root!();
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_tbf",
+        "sch_fq_codel",
+        "sch_netem",
+        "cls_flower"
+    );
+
+    let (_ns, conn) = setup_tc_ns("recipe-scope").await?;
+    let limiter = PerHostLimiter::new("dummy0", nlink::Rate::mbit(10))
+        .limit_ip("10.0.0.2".parse().unwrap(), nlink::Rate::mbit(1));
+    let impairer = PerPeerImpairer::new("dummy0").impair_dst_ip(
+        "10.0.0.3".parse().unwrap(),
+        NetemConfig::new().delay(Duration::from_millis(5)),
+    );
+
+    // A user's TBF: neither recipe touches it.
+    conn.add_qdisc(
+        "dummy0",
+        TbfConfig::new()
+            .rate(nlink::Rate::mbit(10))
+            .burst(nlink::Bytes::kib(32))
+            .limit(nlink::Bytes::kib(64))
+            .build(),
+    )
+    .await?;
+    limiter.remove(&conn).await?;
+    impairer.clear(&conn).await?;
+    assert_eq!(dummy0_root_kind(&conn).await?.as_deref(), Some("tbf"));
+
+    // The limiter's tree: the impairer leaves it, the limiter removes it.
+    limiter.apply(&conn).await?;
+    impairer.clear(&conn).await?;
+    assert_eq!(
+        dummy0_root_kind(&conn).await?.as_deref(),
+        Some("htb"),
+        "not the impairer's"
+    );
+    limiter.remove(&conn).await?;
+    assert_eq!(dummy0_root_kind(&conn).await?, None);
+
+    // And the other way round.
+    impairer.apply(&conn).await?;
+    limiter.remove(&conn).await?;
+    assert_eq!(
+        dummy0_root_kind(&conn).await?.as_deref(),
+        Some("htb"),
+        "not the limiter's"
+    );
+    impairer.clear(&conn).await?;
+    assert_eq!(dummy0_root_kind(&conn).await?, None);
     Ok(())
 }

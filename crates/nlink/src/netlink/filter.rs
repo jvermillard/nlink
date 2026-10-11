@@ -2354,7 +2354,7 @@ impl MatchallFilter {
     ///
     /// // Mirror every ingress packet to eth1.
     /// let filter = MatchallFilter::new()
-    ///     .actions(ActionList::new().with(MirredAction::mirror_by_index(mirror_to)));
+    ///     .actions(ActionList::new().with(MirredAction::mirror_to_egress(mirror_to)));
     /// conn.add_filter("eth0", TcHandle::CLSACT_INGRESS, filter).await?;
     /// # Ok(())
     /// # }

@@ -79,6 +79,29 @@ All notable changes to this project will be documented in this file.
     `StatsTracker::update`. The tracker used to time its own calls, so a
     snapshot handed over late gave a rate over the wrong interval.
 
+- **TC footguns removed (#515, part 4a).**
+  - **A classful qdisc at the root defaults to handle `1:`.** This covers
+    htb, prio, hfsc, drr, qfq, ets, multiq, mq, mqprio, taprio, atm and
+    dsmark, so their classes can name the qdisc; the kernel picked
+    `8001:`. `QdiscConfig::default_handle` returns `Option<TcHandle>`,
+    and this is the first use of it. Before, it was declared, returned
+    `None` for every kind, and nothing read it. A replace that changes or
+    recreates a live qdisc keeps that qdisc's handle, and an explicit
+    handle always wins.
+  - **Byte quantities take `Bytes`:**
+    - `RedConfig::{limit, min, max}`;
+    - `GredConfig::limit`, `BfifoConfig::limit` and `PlugConfig::limit`;
+    - `FqCodelConfig::memory_limit` and `Connection::plug_set_limit`.
+
+    `limit(u32)` meant packets for some kinds and bytes for others. The
+    packet limits stay `u32`. `ChokeConfig`'s limit and thresholds are
+    documented as packets, which is what `sch_choke` counts; they were
+    documented as bytes.
+  - **`PoliceAction` takes `Rate` and `Bytes`:** `rate`, `peakrate` and
+    `avrate` take a `Rate`, and `burst` and `mtu` take `Bytes`. `rate`
+    used to take bytes per second as a bare `u64`, next to a `rate_bps`
+    for bits. `rate_bps` is gone.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -162,6 +185,18 @@ All notable changes to this project will be documented in this file.
   always sent `limit 127`. A limit caps sfq's flows (`sfq_change`), so an
   nlink sfq had 127 flows. The default limit is now 0, which leaves the
   kernel's, as tc does.
+
+- **A recipe removes only its own tree (#515).** `PerHostLimiter::remove`
+  and `PerPeerImpairer::clear` deleted whatever root qdisc the device
+  had: a user's TBF, or the other recipe's tree. `remove` also swallowed
+  every error. Each now deletes the root only when it is the tree it
+  builds: the HTB `1:` with its default class, with fq_codel leaves for
+  the limiter or netem leaves for the impairer. Errors other than
+  "already gone" are returned.
+- **`Batch::add_qdisc` puts a qdisc where `add_qdisc` does (#515).** An
+  ingress or clsact goes to its hook, and a classful kind to `1:`. It
+  used to send every qdisc to the root, where the kernel refuses an
+  ingress.
 
 ### Added
 
@@ -375,6 +410,18 @@ All notable changes to this project will be documented in this file.
   - `Diagnostics::scan_since(&previous)` takes its rates against a report
     the caller kept. A fresh `Diagnostics` used to have no previous sample,
     so its rates were always 0.
+
+- **`del_ingress` and `del_clsact` (#515).** These delete only the kind
+  they name, plus `_by_index` variants. The ingress and clsact qdiscs
+  share one slot, and `TcHandle::INGRESS == TcHandle::CLSACT`, so
+  `del_qdisc` at it deletes whichever is there; a clsact goes with its
+  BPF programs. The new methods send the kind, and the kernel refuses
+  the other one. When it does, the error names what is in the slot, and
+  an empty slot is `QdiscNotFound`.
+- **`MirredAction::{redirect_to_egress, redirect_to_ingress,
+  mirror_to_egress, mirror_to_ingress}` (#515).** The direction is in
+  the name, and the docs say an IFB needs `redirect_to_egress`. The
+  `*_by_index` constructors are deprecated.
 
 ## [0.31.0] - 2026-10-11
 

@@ -232,16 +232,27 @@ impl<'a> Batch<'a> {
 
     /// Add a qdisc in the batch.
     ///
-    /// `ifindex` is the interface index. The qdisc is added as root.
+    /// `ifindex` is the interface index. The qdisc goes where
+    /// [`Connection::add_qdisc`](crate::Connection::add_qdisc) puts it: at
+    /// its kind's fixed parent (ingress, clsact) or the root, and a
+    /// classful kind at `1:` (#515). This ignored the fixed parent before
+    /// 0.32, so an ingress or clsact in a batch was refused.
     pub fn add_qdisc(mut self, ifindex: u32, config: impl QdiscConfig) -> Self {
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_NEWQDISC,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
+        let (parent, handle) = match config.fixed_parent() {
+            Some(parent) => (parent.as_raw(), 0),
+            None => (
+                tc_handle::ROOT,
+                config.default_handle().map_or(0, |h| h.as_raw()),
+            ),
+        };
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
-            .with_parent(tc_handle::ROOT)
-            .with_handle(config.default_handle().unwrap_or(0));
+            .with_parent(parent)
+            .with_handle(handle);
         builder.append(&tcmsg);
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
 

@@ -22,12 +22,12 @@
 //!     .get_link_by_name("eth1")
 //!     .await?
 //!     .ok_or("eth1 not found")?;
-//! let mirror = MirredAction::mirror_by_index(link.ifindex());
+//! let mirror = MirredAction::mirror_to_egress(link.ifindex());
 //!
 //! // Rate limit traffic
 //! let police = PoliceAction::new()
-//!     .rate(1_000_000)  // 1 MB/s
-//!     .burst(32 * 1024)
+//!     .rate(nlink::Rate::mbit(8))
+//!     .burst(nlink::Bytes::kib(32))
 //!     .exceed_drop()
 //!     .build();
 //! # Ok(())
@@ -306,17 +306,16 @@ impl ActionConfig for GactAction {
 /// # let eth2_ifindex: u32 = 4;
 /// use nlink::netlink::action::MirredAction;
 ///
-/// // Redirect to eth1 by index (namespace-safe)
-/// let redirect = MirredAction::redirect_by_index(eth1_ifindex);
+/// // Redirect to eth1: the packet leaves through it.
+/// let redirect = MirredAction::redirect_to_egress(eth1_ifindex);
 ///
-/// // Mirror to eth2 by index
-/// let mirror = MirredAction::mirror_by_index(eth2_ifindex);
+/// // Mirror a copy out of eth2.
+/// let mirror = MirredAction::mirror_to_egress(eth2_ifindex);
 ///
-/// // Redirect on ingress to eth0 by index: the packet is *received* by
-/// // eth0. To shape inbound traffic through an IFB, use the egress form,
-/// // `redirect_by_index(ifb)`: the IFB has to transmit the packet for its
-/// // root qdisc to see it (#458).
-/// let ingress_redirect = MirredAction::ingress_redirect_by_index(eth0_ifindex);
+/// // Redirect to eth0's receive path: the packet is *received* by eth0.
+/// // To shape inbound traffic through an IFB, use `redirect_to_egress(ifb)`:
+/// // the IFB has to transmit the packet for its root qdisc to see it (#458).
+/// let ingress_redirect = MirredAction::redirect_to_ingress(eth0_ifindex);
 /// ```
 #[derive(Debug, Clone)]
 pub struct MirredAction {
@@ -346,39 +345,67 @@ impl MirredAction {
         }
     }
 
-    /// Create an egress redirect action by interface index.
+    /// Redirect to `ifindex`'s **transmit** path: the packet leaves
+    /// through that device, past its root qdisc (`mirred egress redirect`).
     ///
-    /// This is the preferred method for namespace operations as it avoids
-    /// sysfs reads that don't work across namespaces.
-    pub fn redirect_by_index(ifindex: u32) -> Self {
+    /// This is the redirect for IFB shaping: an IFB shapes what it
+    /// transmits, so inbound traffic reaches its root qdisc only this way
+    /// (#458).
+    pub fn redirect_to_egress(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_EGRESS_REDIR, ifindex)
     }
 
-    /// Create an egress mirror action by interface index.
-    ///
-    /// This is the preferred method for namespace operations as it avoids
-    /// sysfs reads that don't work across namespaces.
-    pub fn mirror_by_index(ifindex: u32) -> Self {
-        Self::new_with_ifindex(mirred::TCA_EGRESS_MIRROR, ifindex)
-    }
-
-    /// Create an ingress redirect action by interface index: the packet
-    /// enters `ifindex`'s **receive** path.
+    /// Redirect to `ifindex`'s **receive** path: the packet arrives on that
+    /// device as if it had been received there (`mirred ingress redirect`).
     ///
     /// Not for IFB shaping: a packet redirected this way never passes the
     /// IFB's root qdisc, and the IFB (`IFF_NOARP`) drops ARP, so nothing
-    /// gets through. Redirect to an IFB with
-    /// [`redirect_by_index`](Self::redirect_by_index) (#458).
-    pub fn ingress_redirect_by_index(ifindex: u32) -> Self {
+    /// gets through. Use [`redirect_to_egress`](Self::redirect_to_egress)
+    /// for an IFB (#458).
+    pub fn redirect_to_ingress(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_INGRESS_REDIR, ifindex)
     }
 
-    /// Create an ingress mirror action by interface index.
-    ///
-    /// This is the preferred method for namespace operations as it avoids
-    /// sysfs reads that don't work across namespaces.
-    pub fn ingress_mirror_by_index(ifindex: u32) -> Self {
+    /// Mirror a copy to `ifindex`'s transmit path (`mirred egress
+    /// mirror`); the original continues.
+    pub fn mirror_to_egress(ifindex: u32) -> Self {
+        Self::new_with_ifindex(mirred::TCA_EGRESS_MIRROR, ifindex)
+    }
+
+    /// Mirror a copy to `ifindex`'s receive path (`mirred ingress
+    /// mirror`); the original continues.
+    pub fn mirror_to_ingress(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_INGRESS_MIRROR, ifindex)
+    }
+
+    /// An egress redirect.
+    #[deprecated(
+        since = "0.32.0",
+        note = "use `redirect_to_egress`: the name says the direction (#515)"
+    )]
+    pub fn redirect_by_index(ifindex: u32) -> Self {
+        Self::redirect_to_egress(ifindex)
+    }
+
+    /// An egress mirror.
+    #[deprecated(since = "0.32.0", note = "use `mirror_to_egress` (#515)")]
+    pub fn mirror_by_index(ifindex: u32) -> Self {
+        Self::mirror_to_egress(ifindex)
+    }
+
+    /// An ingress redirect.
+    #[deprecated(
+        since = "0.32.0",
+        note = "use `redirect_to_ingress`, and for an IFB `redirect_to_egress` (#515, #458)"
+    )]
+    pub fn ingress_redirect_by_index(ifindex: u32) -> Self {
+        Self::redirect_to_ingress(ifindex)
+    }
+
+    /// An ingress mirror.
+    #[deprecated(since = "0.32.0", note = "use `mirror_to_ingress` (#515)")]
+    pub fn ingress_mirror_by_index(ifindex: u32) -> Self {
+        Self::mirror_to_ingress(ifindex)
     }
 
     /// Set the action result after mirred.
@@ -471,10 +498,10 @@ impl MirredAction {
             )
         })?;
         Ok(match (direction_ingress, op_mirror) {
-            (false, false) => Self::redirect_by_index(idx),
-            (false, true) => Self::mirror_by_index(idx),
-            (true, false) => Self::ingress_redirect_by_index(idx),
-            (true, true) => Self::ingress_mirror_by_index(idx),
+            (false, false) => Self::redirect_to_egress(idx),
+            (false, true) => Self::mirror_to_egress(idx),
+            (true, false) => Self::redirect_to_ingress(idx),
+            (true, true) => Self::mirror_to_ingress(idx),
         })
     }
 
@@ -507,19 +534,20 @@ impl ActionConfig for MirredAction {
 /// # Example
 ///
 /// ```no_run
+/// use nlink::{Bytes, Rate};
 /// use nlink::netlink::action::PoliceAction;
 ///
-/// // Rate limit to 1 MB/s with 32KB burst
+/// // Rate limit to 8 Mbit/s (1 MB/s) with a 32 KiB burst
 /// let police = PoliceAction::new()
-///     .rate(1_000_000)
-///     .burst(32 * 1024)
+///     .rate(Rate::mbit(8))
+///     .burst(Bytes::kib(32))
 ///     .exceed_drop()
 ///     .build();
 ///
 /// // Rate limit with conform/exceed actions
 /// let police = PoliceAction::new()
-///     .rate(10_000_000)  // 10 MB/s
-///     .burst(64 * 1024)
+///     .rate(Rate::mbit(80))
+///     .burst(Bytes::kib(64))
 ///     .conform_pass()
 ///     .exceed_drop()
 ///     .build();
@@ -562,33 +590,29 @@ impl PoliceAction {
         }
     }
 
-    /// Set the rate in bytes per second.
-    pub fn rate(mut self, bytes_per_sec: u64) -> Self {
-        self.rate = bytes_per_sec;
+    /// Set the rate. A typed [`Rate`](crate::Rate) since 0.32: this took
+    /// bytes per second as a bare `u64`, beside a `rate_bps` that took bits
+    /// (#515).
+    pub fn rate(mut self, rate: crate::util::Rate) -> Self {
+        self.rate = rate.as_bytes_per_sec();
         self
     }
 
-    /// Set the rate in bits per second.
-    pub fn rate_bps(mut self, bits_per_sec: u64) -> Self {
-        self.rate = bits_per_sec / 8;
+    /// Set the peak rate.
+    pub fn peakrate(mut self, rate: crate::util::Rate) -> Self {
+        self.peakrate = Some(rate.as_bytes_per_sec());
         self
     }
 
-    /// Set the peak rate in bytes per second.
-    pub fn peakrate(mut self, bytes_per_sec: u64) -> Self {
-        self.peakrate = Some(bytes_per_sec);
+    /// Set the burst size.
+    pub fn burst(mut self, burst: crate::util::Bytes) -> Self {
+        self.burst = burst.as_u32_saturating();
         self
     }
 
-    /// Set the burst size in bytes.
-    pub fn burst(mut self, bytes: u32) -> Self {
-        self.burst = bytes;
-        self
-    }
-
-    /// Set the MTU.
-    pub fn mtu(mut self, mtu: u32) -> Self {
-        self.mtu = mtu;
+    /// Set the MTU: the largest packet the bucket admits.
+    pub fn mtu(mut self, mtu: crate::util::Bytes) -> Self {
+        self.mtu = mtu.as_u32_saturating();
         self
     }
 
@@ -635,8 +659,8 @@ impl PoliceAction {
     }
 
     /// Set the average rate for stateful policing.
-    pub fn avrate(mut self, bytes_per_sec: u32) -> Self {
-        self.avrate = Some(bytes_per_sec);
+    pub fn avrate(mut self, rate: crate::util::Rate) -> Self {
+        self.avrate = Some(u32::try_from(rate.as_bytes_per_sec()).unwrap_or(u32::MAX));
         self
     }
 
@@ -670,7 +694,7 @@ impl PoliceAction {
                             "police: invalid rate `{s}` (expected tc-style rate like `1mbit`)"
                         ))
                     })?;
-                    act = act.rate(r.as_bytes_per_sec());
+                    act = act.rate(r);
                     i += 2;
                 }
                 "peakrate" => {
@@ -680,7 +704,7 @@ impl PoliceAction {
                             "police: invalid peakrate `{s}` (expected tc-style rate)"
                         ))
                     })?;
-                    act = act.peakrate(r.as_bytes_per_sec());
+                    act = act.peakrate(r);
                     i += 2;
                 }
                 "burst" | "buffer" | "maxburst" => {
@@ -695,7 +719,7 @@ impl PoliceAction {
                             "police: burst `{s}` exceeds u32::MAX bytes"
                         )));
                     }
-                    act = act.burst(bytes as u32);
+                    act = act.burst(crate::util::Bytes::new(bytes));
                     i += 2;
                 }
                 "mtu" => {
@@ -710,7 +734,7 @@ impl PoliceAction {
                             "police: mtu `{s}` exceeds u32::MAX bytes"
                         )));
                     }
-                    act = act.mtu(bytes as u32);
+                    act = act.mtu(crate::util::Bytes::new(bytes));
                     i += 2;
                 }
                 "avrate" => {
@@ -726,7 +750,7 @@ impl PoliceAction {
                             "police: avrate `{s}` exceeds u32::MAX bytes/sec"
                         )));
                     }
-                    act = act.avrate(bps as u32);
+                    act = act.avrate(r);
                     i += 2;
                 }
                 "conform-exceed" => {
@@ -4369,7 +4393,7 @@ impl ActionConfig for PeditAction {
 ///     .ok_or("eth1 not found")?;
 ///
 /// let actions = ActionList::new()
-///     .with(MirredAction::mirror_by_index(link.ifindex()))
+///     .with(MirredAction::mirror_to_egress(link.ifindex()))
 ///     .with(GactAction::pass())
 ///     .build();
 /// # Ok(())
@@ -5393,7 +5417,9 @@ mod psched_wire_tests {
     /// The old encoder wrote the raw byte count.
     #[test]
     fn police_burst_is_psched_ticks_not_bytes() {
-        let cfg = PoliceAction::new().rate(1_250_000).burst(102_400);
+        let cfg = PoliceAction::new()
+            .rate(crate::util::Rate::bytes_per_sec(1_250_000))
+            .burst(crate::util::Bytes::new(102_400));
         let attrs = action_attrs(&cfg);
 
         // struct tc_police: index@0 action@4 limit@8 burst@12 mtu@16 rate@20..
@@ -5415,7 +5441,9 @@ mod psched_wire_tests {
     /// nlink emitted neither, so a policer with a rate could never install.
     #[test]
     fn police_emits_the_mandatory_rate_table() {
-        let cfg = PoliceAction::new().rate(1_250_000).burst(102_400);
+        let cfg = PoliceAction::new()
+            .rate(crate::util::Rate::bytes_per_sec(1_250_000))
+            .burst(crate::util::Bytes::new(102_400));
         let attrs = action_attrs(&cfg);
 
         let rtab = attrs
@@ -5435,7 +5463,7 @@ mod psched_wire_tests {
     /// rate.
     #[test]
     fn police_without_a_rate_emits_no_rate_table() {
-        let cfg = PoliceAction::new().burst(102_400);
+        let cfg = PoliceAction::new().burst(crate::util::Bytes::new(102_400));
         let attrs = action_attrs(&cfg);
         assert!(!attrs.contains_key(&police::TCA_POLICE_RATE));
     }
@@ -5461,8 +5489,8 @@ mod tests {
     #[test]
     fn test_police_action() {
         let police = PoliceAction::new()
-            .rate(1_000_000)
-            .burst(32 * 1024)
+            .rate(crate::util::Rate::bytes_per_sec(1_000_000))
+            .burst(crate::util::Bytes::kib(32))
             .exceed_drop()
             .build();
 
@@ -5769,7 +5797,7 @@ mod tests {
 
     #[test]
     fn add_action_mirred_roundtrips() {
-        let action = MirredAction::redirect_by_index(7);
+        let action = MirredAction::redirect_to_egress(7);
         let frame = build_add_action_frame(action);
         let parsed = parse_action_messages(&frame);
         assert_eq!(parsed.len(), 1);
@@ -5779,8 +5807,8 @@ mod tests {
     #[test]
     fn add_action_police_roundtrips() {
         let action = PoliceAction::new()
-            .rate(1_000_000)
-            .burst(32 * 1024)
+            .rate(crate::util::Rate::bytes_per_sec(1_000_000))
+            .burst(crate::util::Bytes::kib(32))
             .exceed_drop()
             .build();
         let frame = build_add_action_frame(action);
@@ -5971,7 +5999,7 @@ mod tests {
         let a = MirredAction::parse_params(&["egress", "redirect", "ifindex", "7"]).unwrap();
         assert_eq!(
             write_options_bytes(&a),
-            write_options_bytes(&MirredAction::redirect_by_index(7)),
+            write_options_bytes(&MirredAction::redirect_to_egress(7)),
         );
     }
 
@@ -5980,7 +6008,7 @@ mod tests {
         let a = MirredAction::parse_params(&["ingress", "mirror", "ifindex", "11"]).unwrap();
         assert_eq!(
             write_options_bytes(&a),
-            write_options_bytes(&MirredAction::ingress_mirror_by_index(11)),
+            write_options_bytes(&MirredAction::mirror_to_ingress(11)),
         );
     }
 
@@ -6637,8 +6665,8 @@ mod tests {
     fn police_parse_params_rate_and_burst() {
         let a = PoliceAction::parse_params(&["rate", "1mbit", "burst", "32k"]).unwrap();
         let b = PoliceAction::new()
-            .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
-            .burst(32 * 1024);
+            .rate(crate::util::Rate::mbit(1))
+            .burst(crate::util::Bytes::kib(32));
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
@@ -6654,8 +6682,8 @@ mod tests {
         ])
         .unwrap();
         let b = PoliceAction::new()
-            .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
-            .burst(32 * 1024)
+            .rate(crate::util::Rate::mbit(1))
+            .burst(crate::util::Bytes::kib(32))
             .conform(action::TC_ACT_OK)
             .exceed(action::TC_ACT_SHOT);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
@@ -6675,8 +6703,8 @@ mod tests {
         ])
         .unwrap();
         let b = PoliceAction::new()
-            .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
-            .burst(32 * 1024)
+            .rate(crate::util::Rate::mbit(1))
+            .burst(crate::util::Bytes::kib(32))
             .conform(action::TC_ACT_PIPE)
             .exceed(action::TC_ACT_RECLASSIFY);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));

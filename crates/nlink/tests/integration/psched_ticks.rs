@@ -146,7 +146,10 @@ async fn police_with_a_rate_installs() -> Result<()> {
     let (_ns, conn) = setup("police-tick").await?;
 
     // rate 10mbit burst 100k — the exact shape from the issue.
-    let police = PoliceAction::new().rate(1_250_000).burst(102_400).build();
+    let police = PoliceAction::new()
+        .rate(nlink::Rate::mbit(10))
+        .burst(nlink::Bytes::kib(100))
+        .build();
 
     conn.add_action(police)
         .await
