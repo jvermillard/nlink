@@ -19,12 +19,14 @@
 //! let config = NetworkConfig::new()
 //!     .link("br0", |l| l.bridge().up())
 //!     .link("veth0", |l| l.veth("veth1").master("br0").up())
+//!     // The peer: created with veth0, and set up in the same apply.
+//!     .link("veth1", |l| l.up())
 //!     .address("br0", "192.168.100.1/24")?
 //!     .route("10.0.0.0/8", |r| r.via("192.168.100.254"))?;
 //!
 //! // Preview changes
 //! let diff = config.diff(&conn).await?;
-//! println!("{}", diff.summary());
+//! println!("{diff}");
 //!
 //! // Apply changes
 //! config.apply(&conn).await?;

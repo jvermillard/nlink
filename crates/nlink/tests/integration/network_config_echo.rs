@@ -42,6 +42,61 @@ fn dummy_up(name: &str) -> NetworkConfig {
 // Links
 // ============================================================================
 
+/// The peer of a veth pair the apply creates, declared on its own, gets its
+/// state, MTU and master in the same apply. They waited for the next one,
+/// so the pair had no carrier after the first (#475).
+#[tokio::test]
+async fn a_declared_veth_peer_is_set_up_in_the_same_apply() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("veth", "bridge");
+
+    let cfg = NetworkConfig::new()
+        .link("br0", |l| l.bridge().up())
+        .link("br1", |l| l.bridge().up())
+        .link("v0", |l| l.veth("v1").master("br0").up())
+        .link("v1", |l| l.mtu(1400).master("br1").up());
+    let cases = vec![case("veth-peer", vec![cfg]).check(|ns| {
+        let link = &ip_json(ns, &["link", "show", "dev", "v1"])?[0];
+        let up = link["flags"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f == "UP"));
+        let (mtu, master) = (link["mtu"].as_u64(), link["master"].as_str());
+        if !up || mtu != Some(1400) || master != Some("br1") {
+            return Err(format!("v1: up {up}, mtu {mtu:?}, master {master:?}"));
+        }
+        Ok(())
+    })];
+    assert_converges("nce-veth-peer", cases).await
+}
+
+/// A declared link that does not exist and that nothing creates is
+/// reported, and the apply refuses before changing anything. It was
+/// skipped, so a typo applied cleanly (#475).
+#[tokio::test]
+async fn a_declared_link_that_does_not_exist_is_reported() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("nce-missing")?;
+    let conn = ns.connection()?;
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .link("dO", |l| l.mtu(1400));
+    let diff = cfg.diff(&conn).await?;
+    assert_eq!(diff.links_missing, ["dO"], "{diff}");
+    assert!(diff.to_string().contains("! link dO (missing"), "{diff}");
+    let err = cfg.apply(&conn).await.expect_err("the apply is refused");
+    assert!(
+        matches!(&err, nlink::Error::InterfaceNotFound { name } if name == "dO"),
+        "{err}"
+    );
+    assert!(
+        conn.get_link_by_name("d0").await?.is_none(),
+        "the apply went ahead"
+    );
+    Ok(())
+}
+
 /// A VLAN declared down stays down when the apply brings its lower device
 /// up. `vlan_device_event()` brings up every VLAN on a device that comes up,
 /// so it ended the apply up and converged only on the next one (#436).

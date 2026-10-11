@@ -261,7 +261,13 @@ async fn a_stack_dry_run_touches_nothing() -> Result<()> {
 
         let ns = TestNamespace::new("p501-dry")?;
         let stack = nlink::facade::Stack::new()
-            .network(NetworkConfig::new().link("d0", |b| b.dummy()))
+            // `wgd0` is the WireGuard layer's, which an apply creates first:
+            // not a missing link (#475).
+            .network(
+                NetworkConfig::new()
+                    .link("d0", |b| b.dummy())
+                    .link("wgd0", |b| b.mtu(1380)),
+            )
             .nftables(NftablesConfig::new().table("dry", Family::Inet, |t| t))
             .wireguard(WireguardConfig::new().device("wgd0", |d| d.listen_port(51997)));
 
@@ -273,6 +279,8 @@ async fn a_stack_dry_run_touches_nothing() -> Result<()> {
             .await?;
         let diff = report.dry_run.as_ref().expect("a dry run carries the diff");
         assert!(diff.change_count() >= 3, "link, table, device: {diff:?}");
+        let network = diff.network.as_ref().expect("the network layer's diff");
+        assert!(network.links_missing.is_empty(), "{network}");
         assert!(report.network.is_none() && report.wireguard.is_none());
         assert!(!report.is_noop());
 

@@ -46,6 +46,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A declared link that did not exist was skipped without a word
+  (#475).** A link declared without a kind is not created, and when it
+  was missing, its declaration was dropped from the diff.
+  - **The peer of a veth or netkit pair created in the same apply** got
+    its declared state, MTU and master only on the next apply, so after
+    the first apply the pair had no carrier. These settings now go in as
+    modifications, which run after every create.
+  - **Anything else, such as a typo or a device that is not there yet,**
+    is listed in the new `ConfigDiff::links_missing`
+    (`! link X (missing: …)`). The apply fails with
+    `Error::InterfaceNotFound` before it changes anything.
+  - `Stack` does not count its own WireGuard devices as missing, because
+    an apply creates those first.
+
 - **A declared route could silently replace the kernel's connected route
   (#469).** Declared routes are added with `NLM_F_REPLACE`, and the kernel
   replaces the first route at the same destination, table and metric,
@@ -927,6 +941,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`ConfigDiff::links_missing`** (#475): declared links that do not
+  exist and that nothing in the apply creates.
 
 - **`ConfigDiff::routes_refused` and `RouteConflict`** (#469): declared
   routes the apply will not install over a route the config does not
