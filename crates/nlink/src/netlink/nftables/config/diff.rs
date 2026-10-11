@@ -1522,6 +1522,16 @@ impl NftablesConfig {
                 }
             }
         }
+        // Tables declared absent go whenever the kernel has them (#519).
+        for (family, name) in &self.absent {
+            let live = current_tables
+                .iter()
+                .any(|t| t.family == *family && &t.name == name);
+            let at = (*family, name.clone());
+            if live && !diff.tables_to_delete.contains(&at) {
+                diff.tables_to_delete.push(at);
+            }
+        }
 
         // Pass 3: per-table diff for tables present in both sides.
         // For 0.16 simplicity: chains + rules + flowtables in

@@ -85,6 +85,17 @@ impl super::types::NftablesConfig {
     ///
     /// [`diff`]: Self::diff
     pub fn validate(&self) -> Result<()> {
+        for (family, name) in self.absent_tables() {
+            if self
+                .tables()
+                .iter()
+                .any(|t| t.family() == *family && t.name() == name)
+            {
+                return Err(Error::InvalidMessage(format!(
+                    "table {name}: declared and declared absent (#519)"
+                )));
+            }
+        }
         for table in self.tables() {
             for chain in table.chains() {
                 validate_chain(table.name(), table.family(), chain)?;

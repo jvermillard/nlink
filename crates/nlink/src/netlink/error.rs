@@ -262,6 +262,17 @@ pub enum Error {
         remaining: Box<crate::netlink::config::ConfigDiff>,
     },
 
+    /// A [`Stack`](crate::facade::Stack) apply went through, and a second
+    /// plan of every layer still found work to do (#519). Asked for with
+    /// [`ExecOptions::with_verify`](crate::reconcile::ExecOptions::with_verify).
+    /// Its kind is [`ErrorKind::NotConverged`], like
+    /// [`Self::NotConverged`]'s.
+    #[error("the stack apply did not converge; a second plan still finds:\n{remaining}")]
+    StackNotConverged {
+        /// What the second plan found.
+        remaining: Box<crate::facade::StackPlan>,
+    },
+
     /// Qdisc not found.
     #[error("qdisc not found: {kind} on {interface}")]
     QdiscNotFound {
@@ -853,7 +864,7 @@ impl Error {
             Self::PoolExhausted { .. } => ErrorKind::PoolExhausted,
             Self::PoolClosed => ErrorKind::PoolClosed,
             Self::DadFailed { .. } => ErrorKind::DadFailed,
-            Self::NotConverged { .. } => ErrorKind::NotConverged,
+            Self::NotConverged { .. } | Self::StackNotConverged { .. } => ErrorKind::NotConverged,
             Self::Io(e) if e.raw_os_error().is_none() => match e.kind() {
                 std::io::ErrorKind::NotFound => ErrorKind::NotFound,
                 std::io::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,

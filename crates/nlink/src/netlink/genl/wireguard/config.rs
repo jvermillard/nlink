@@ -378,6 +378,7 @@ impl WireguardConfig {
                     .push((declared.ifname.clone(), device_changes));
             }
         }
+        diff.source = Some(std::sync::Arc::new(self.clone()));
 
         Ok(diff)
     }
@@ -532,94 +533,7 @@ impl WireguardConfig {
     /// declare them in a `NetworkConfig` /
     /// [`Stack`](crate::facade::Stack), which orders the layers).
     pub async fn apply(&self, conn: &Connection<Wireguard>) -> Result<WireguardApplyResult> {
-        let diff = self.diff(conn).await?;
-        if !diff.devices_to_add.is_empty() {
-            return Err(crate::netlink::Error::InvalidMessage(format!(
-                "wireguard apply: declared device(s) {} do not exist; create them first \
-                 (WireguardConfig::ensure_devices with a same-namespace Connection<Route>, \
-                 or declare the links in a NetworkConfig/Stack)",
-                diff.devices_to_add.join(", ")
-            )));
-        }
-        let mut result = WireguardApplyResult::default();
-
-        for (ifname, changes) in &diff.devices_to_modify {
-            // Apply device-level changes (private_key,
-            // listen_port, fwmark). All optional — only
-            // fields that were declared get written.
-            // Plan 232 B11 — surface as a typed error instead of
-            // panicking. Invariant should hold because `diff` is
-            // computed against `self`; if a future refactor lets
-            // `self` mutate between the diff and apply, this
-            // path returns a clean error instead of crashing the
-            // caller's task.
-            let declared = self
-                .devices
-                .iter()
-                .find(|d| &d.ifname == ifname)
-                .ok_or_else(|| {
-                    crate::netlink::Error::InvalidMessage(format!(
-                        "wireguard apply: diff references undeclared device `{ifname}`"
-                    ))
-                })?;
-
-            if changes.has_device_level_change() {
-                // Only the fields that differ, as for peers: rewriting an
-                // unchanged listen port of 0 would rebind the device to a
-                // fresh random port as a side effect of, say, a key change.
-                conn.set_device_by_name(ifname, |mut b| {
-                    if changes.private_key_set
-                        && let Some(k) = declared.private_key
-                    {
-                        b = b.private_key(k);
-                    }
-                    if changes.listen_port_set
-                        && let Some(p) = declared.listen_port
-                    {
-                        b = b.listen_port(p);
-                    }
-                    if changes.fwmark_set
-                        && let Some(fw) = declared.fwmark
-                    {
-                        b = b.fwmark(fw);
-                    }
-                    b
-                })
-                .await?;
-                result.device_writes += 1;
-            }
-
-            for added in &changes.peers_to_add {
-                conn.set_peer_by_name(ifname, added.public_key, |b| added.apply_to_builder(b))
-                    .await?;
-                result.peer_writes += 1;
-            }
-
-            for (pk, peer_changes) in &changes.peers_to_modify {
-                // Plan 232 B11 — same shape as the device lookup above.
-                let declared_peer = declared
-                    .peers
-                    .iter()
-                    .find(|p| &p.public_key == pk)
-                    .ok_or_else(|| {
-                        crate::netlink::Error::InvalidMessage(format!(
-                            "wireguard apply: diff references undeclared peer for `{ifname}`"
-                        ))
-                    })?;
-                conn.set_peer_by_name(ifname, *pk, |b| {
-                    declared_peer.apply_changes_to_builder(b, peer_changes)
-                })
-                .await?;
-                result.peer_writes += 1;
-            }
-
-            for pk in &changes.peers_to_remove {
-                conn.del_peer_by_name(ifname, *pk).await?;
-                result.peer_removals += 1;
-            }
-        }
-
-        Ok(result)
+        self.diff(conn).await?.apply_declared(conn, self).await
     }
 
     /// Build a typical single-peer **client** configuration: one
@@ -1412,6 +1326,11 @@ pub struct WireguardConfigDiff {
     /// Create them via [`WireguardConfig::ensure_devices`] (or a
     /// `NetworkConfig`/`Stack` declaring the links), then diff again.
     pub devices_to_add: Vec<String>,
+    /// The config it was computed from, whose declared values an apply
+    /// writes. Never serialized: it holds key material.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) source: Option<std::sync::Arc<WireguardConfig>>,
 }
 
 impl WireguardConfigDiff {
@@ -1443,6 +1362,118 @@ impl WireguardConfigDiff {
                 .iter()
                 .map(|(_, c)| c.change_count())
                 .sum::<usize>()
+    }
+}
+
+impl WireguardConfigDiff {
+    /// Apply this precomputed diff (#519): the config it was computed from
+    /// supplies the declared values it writes. Mirrors
+    /// [`ConfigDiff::apply`](crate::netlink::config::ConfigDiff::apply)
+    /// and [`NftablesDiff::apply`](crate::netlink::nftables::config::NftablesDiff::apply).
+    pub async fn apply(&self, conn: &Connection<Wireguard>) -> Result<WireguardApplyResult> {
+        if self.is_empty() {
+            return Ok(WireguardApplyResult::default());
+        }
+        let Some(config) = self.source.clone() else {
+            return Err(crate::netlink::Error::InvalidMessage(
+                "wireguard apply: this diff was not computed by WireguardConfig::diff".into(),
+            ));
+        };
+        self.apply_declared(conn, &config).await
+    }
+
+    async fn apply_declared(
+        &self,
+        conn: &Connection<Wireguard>,
+        config: &WireguardConfig,
+    ) -> Result<WireguardApplyResult> {
+        if !self.devices_to_add.is_empty() {
+            return Err(crate::netlink::Error::InvalidMessage(format!(
+                "wireguard apply: declared device(s) {} do not exist; create them first \
+                 (WireguardConfig::ensure_devices with a same-namespace Connection<Route>, \
+                 or declare the links in a NetworkConfig/Stack)",
+                self.devices_to_add.join(", ")
+            )));
+        }
+        let mut result = WireguardApplyResult::default();
+
+        for (ifname, changes) in &self.devices_to_modify {
+            // Apply device-level changes (private_key,
+            // listen_port, fwmark). All optional — only
+            // fields that were declared get written.
+            // Plan 232 B11 — surface as a typed error instead of
+            // panicking. Invariant should hold because `diff` is
+            // computed against `self`; if a future refactor lets
+            // `self` mutate between the diff and apply, this
+            // path returns a clean error instead of crashing the
+            // caller's task.
+            let declared = config
+                .devices
+                .iter()
+                .find(|d| &d.ifname == ifname)
+                .ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage(format!(
+                        "wireguard apply: diff references undeclared device `{ifname}`"
+                    ))
+                })?;
+
+            if changes.has_device_level_change() {
+                // Only the fields that differ, as for peers: rewriting an
+                // unchanged listen port of 0 would rebind the device to a
+                // fresh random port as a side effect of, say, a key change.
+                conn.set_device_by_name(ifname, |mut b| {
+                    if changes.private_key_set
+                        && let Some(k) = declared.private_key
+                    {
+                        b = b.private_key(k);
+                    }
+                    if changes.listen_port_set
+                        && let Some(p) = declared.listen_port
+                    {
+                        b = b.listen_port(p);
+                    }
+                    if changes.fwmark_set
+                        && let Some(fw) = declared.fwmark
+                    {
+                        b = b.fwmark(fw);
+                    }
+                    b
+                })
+                .await?;
+                result.device_writes += 1;
+            }
+
+            for added in &changes.peers_to_add {
+                conn.set_peer_by_name(ifname, added.public_key, |b| added.apply_to_builder(b))
+                    .await?;
+                result.peer_writes += 1;
+            }
+
+            for (pk, peer_changes) in &changes.peers_to_modify {
+                // Plan 232 B11 — same shape as the device lookup above.
+                let declared_peer = declared
+                    .peers
+                    .iter()
+                    .find(|p| &p.public_key == pk)
+                    .ok_or_else(|| {
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "wireguard apply: diff references undeclared peer for `{ifname}`"
+                        ))
+                    })?;
+                conn.set_peer_by_name(ifname, *pk, |b| {
+                    declared_peer.apply_changes_to_builder(b, peer_changes)
+                })
+                .await?;
+                result.peer_writes += 1;
+            }
+
+            for pk in &changes.peers_to_remove {
+                conn.del_peer_by_name(ifname, *pk).await?;
+                result.peer_removals += 1;
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -1646,6 +1677,9 @@ impl PeerChanges {
 // =============================================================================
 
 /// Outcome of [`WireguardConfig::apply`]. Plan 196.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 #[must_use = "Inspect the per-kind counters to learn what apply changed"]
 pub struct WireguardApplyResult {

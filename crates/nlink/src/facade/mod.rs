@@ -13,8 +13,9 @@
 //! * [`diff`] — symmetric drift-detection counterparts.
 //! * [`watch`] — `nlink::facade::watch::route_changes()` returns
 //!   a resync-wrapped stream with ENOBUFS recovery built in.
-//! * [`Stack`] — unified bundle for managing network + firewall
-//!   + VPN as one type with a deterministic apply order.
+//! * [`Stack`] — unified bundle for managing network, firewall and
+//!   VPN as one type: planned once ([`StackPlan`]) and applied in a
+//!   deterministic order.
 //!
 //! All four are pure compositional wrappers; they don't change
 //! any existing API. The typed surface remains the precise
@@ -25,4 +26,6 @@ pub mod diff;
 pub mod stack;
 pub mod watch;
 
-pub use stack::{Stack, StackApplyReport, StackDiff};
+pub use stack::{Stack, StackPlan, StackReport};
+#[allow(deprecated)]
+pub use stack::{StackApplyReport, StackDiff};
