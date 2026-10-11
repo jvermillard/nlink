@@ -998,6 +998,39 @@ pub(crate) fn link_config(
             }
             Box::new(c)
         }
+        DeclaredLinkType::Macsec {
+            parent,
+            sci,
+            port,
+            encrypt,
+            protect,
+            include_sci,
+            replay_window,
+        } => {
+            let mut c = crate::netlink::link::MacsecLink::new(&link.name, parent);
+            if let Some(v) = sci {
+                c = c.sci(*v);
+            }
+            if let Some(v) = port {
+                c = c.port(*v);
+            }
+            if let Some(v) = encrypt {
+                c = c.encrypt(*v);
+            }
+            if let Some(v) = protect {
+                c = c.protect(*v);
+            }
+            if let Some(v) = include_sci {
+                c = c.include_sci(*v);
+            }
+            if let Some(w) = replay_window {
+                c = c.replay_protect(true).replay_window(*w);
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
         DeclaredLinkType::Bareudp {
             port,
             ethertype,

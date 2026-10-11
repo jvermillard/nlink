@@ -1186,6 +1186,58 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 }
             }
         }
+        // `macsec_changelink` refuses the SCI and port (EINVAL): those
+        // recreate. The rest change in place, one attribute at a time.
+        DeclaredLinkType::Macsec {
+            parent,
+            sci,
+            port,
+            encrypt,
+            protect,
+            include_sci,
+            replay_window,
+        } => {
+            const SCI: u16 = 1;
+            const WINDOW: u16 = 5;
+            const ENCRYPT: u16 = 7;
+            const PROTECT: u16 = 8;
+            const INC_SCI: u16 = 9;
+            const REPLAY_PROTECT: u16 = 12;
+            if let Some(have) = lower_name(live, names)
+                && have != parent.as_str()
+            {
+                d.recreate.push(format!("macsec parent {have} -> {parent}"));
+            }
+            let have_sci = data.0.get(&SCI).and_then(|p| <[u8; 8]>::try_from(p.get(..8)?).ok()).map(u64::from_be_bytes);
+            if let (Some(want), Some(have)) = (sci, have_sci)
+                && *want != have
+            {
+                d.recreate.push(format!("macsec sci {have:016x} -> {want:016x}"));
+            }
+            if let (Some(want), Some(have)) = (port, have_sci)
+                && sci.is_none()
+                && *want != (have & 0xffff) as u16
+            {
+                d.recreate.push(format!("macsec port {} -> {want}", have & 0xffff));
+            }
+            for (name, attr, want) in [
+                ("encrypt", ENCRYPT, encrypt),
+                ("protect", PROTECT, protect),
+                ("include_sci", INC_SCI, include_sci),
+            ] {
+                if let Some(want) = want
+                    && data.u8(attr).map(|v| v != 0) != Some(*want)
+                {
+                    d.update("macsec", KindAttr::U8(attr, u8::from(*want)), format!("macsec {name} -> {want}"));
+                }
+            }
+            if let Some(want) = replay_window
+                && (data.u8(REPLAY_PROTECT) != Some(1) || data.u32(WINDOW) != Some(*want))
+            {
+                d.update("macsec", KindAttr::U8(REPLAY_PROTECT, 1), format!("macsec replay window -> {want}"));
+                d.update.as_mut().expect("set above").attrs.push(KindAttr::U32(WINDOW, *want));
+            }
+        }
         // No changelink: every difference recreates.
         DeclaredLinkType::Bareudp {
             port,
