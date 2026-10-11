@@ -3647,6 +3647,72 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_link_altname"))
     }
 
+    /// Set IPv4 per-device settings (`/proc/sys/net/ipv4/conf/<dev>/…`)
+    /// over netlink: one `RTM_SETLINK` with `IFLA_AF_SPEC` / `AF_INET` /
+    /// `IFLA_INET_CONF`, each setting nested by its id (#516).
+    pub async fn set_ipv4_devconf_by_index(
+        &self,
+        ifindex: u32,
+        settings: &[(crate::netlink::devconf::Ipv4Devconf, u32)],
+    ) -> Result<()> {
+        use super::types::link::IflaAttr;
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        let spec = builder.nest_start(IflaAttr::AfSpec as u16);
+        let inet = builder.nest_start(libc::AF_INET as u16);
+        let conf = builder.nest_start(crate::netlink::devconf::af::IFLA_INET_CONF);
+        for (d, v) in settings {
+            builder.append_attr_u32(d.id(), *v);
+        }
+        builder.nest_end(conf);
+        builder.nest_end(inet);
+        builder.nest_end(spec);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_ipv4_devconf"))
+    }
+
+    /// Set how the kernel makes a link's IPv6 link-local address
+    /// (`ip link set … addrgenmode`, #516). It takes effect when the link
+    /// next comes up.
+    pub async fn set_addr_gen_mode_by_index(
+        &self,
+        ifindex: u32,
+        mode: crate::netlink::devconf::AddrGenMode,
+    ) -> Result<()> {
+        self.set_inet6_af(ifindex, |b| {
+            b.append_attr_u8(crate::netlink::devconf::af::IFLA_INET6_ADDR_GEN_MODE, mode as u8)
+        })
+        .await
+        .map_err(|e| e.with_context("set_addr_gen_mode"))
+    }
+
+    /// Set a link's IPv6 interface identifier token (`ip token set`,
+    /// #516): SLAAC addresses use it in place of the MAC-derived one.
+    pub async fn set_ipv6_token_by_index(&self, ifindex: u32, token: std::net::Ipv6Addr) -> Result<()> {
+        self.set_inet6_af(ifindex, |b| {
+            b.append_attr(crate::netlink::devconf::af::IFLA_INET6_TOKEN, &token.octets())
+        })
+        .await
+        .map_err(|e| e.with_context("set_ipv6_token"))
+    }
+
+    async fn set_inet6_af(
+        &self,
+        ifindex: u32,
+        f: impl FnOnce(&mut super::builder::MessageBuilder),
+    ) -> Result<()> {
+        use super::types::link::IflaAttr;
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        let spec = builder.nest_start(IflaAttr::AfSpec as u16);
+        let inet6 = builder.nest_start(libc::AF_INET6 as u16);
+        f(&mut builder);
+        builder.nest_end(inet6);
+        builder.nest_end(spec);
+        self.send_ack(builder).await
+    }
+
     async fn link_altname(&self, msg_type: u16, ifindex: u32, altname: &str) -> Result<()> {
         use super::types::link::IflaAttr;
         let mut builder = ack_request(msg_type);

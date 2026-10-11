@@ -252,6 +252,16 @@ fn invert_link_changes(changes: &LinkChanges) -> Option<LinkChanges> {
         set_protodown: changes.set_protodown.map(|_| was.protodown.unwrap_or(false)),
         add_altnames: changes.del_altnames.clone(),
         del_altnames: changes.add_altnames.clone(),
+        set_ipv4_conf: changes
+            .set_ipv4_conf
+            .iter()
+            .filter_map(|(d, _)| was.ipv4_conf.iter().find(|(w, _)| w == d).copied())
+            .collect(),
+        set_addr_gen_mode: changes.set_addr_gen_mode.and(was.addr_gen_mode),
+        // `::` clears a token (`inet6_set_iftoken`).
+        set_ipv6_token: changes
+            .set_ipv6_token
+            .map(|_| was.ipv6_token.unwrap_or(std::net::Ipv6Addr::UNSPECIFIED)),
         ..LinkChanges::default()
     })
 }
