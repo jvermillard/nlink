@@ -34,8 +34,13 @@ impl Percent {
     pub const ZERO: Self = Self(0.0);
     pub const HUNDRED: Self = Self(100.0);
 
-    /// Construct a percentage, clamping to `[0, 100]`.
+    /// Construct a percentage, clamping to `[0, 100]`. NaN is 0 %: it
+    /// used to stay NaN, which the kernel encoding wrote as 0 % while the
+    /// value compared unequal to itself (#598).
     pub fn new(value: f64) -> Self {
+        if value.is_nan() {
+            return Self::ZERO;
+        }
         Self(value.clamp(0.0, 100.0))
     }
 
@@ -131,6 +136,17 @@ pub enum PercentParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NaN is not in `0..=100`; `clamp` keeps it NaN, which wrote as 0 %
+    /// while comparing unequal to itself. It is 0 % now, said so (#598).
+    #[test]
+    fn nan_is_zero() {
+        let p = Percent::new(f64::NAN);
+        assert_eq!(p.as_percent(), 0.0);
+        assert!(p.is_zero());
+        assert_eq!(p, p);
+        assert_eq!(Percent::from_fraction(f64::NAN).as_percent(), 0.0);
+    }
 
     #[test]
     fn percent_construction_clamps() {

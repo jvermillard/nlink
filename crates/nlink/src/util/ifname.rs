@@ -19,7 +19,14 @@ pub enum IfError {
 
 pub type Result<T> = std::result::Result<T, IfError>;
 
-/// Validate an interface name.
+/// Validate an interface name the way the kernel's `dev_valid_name` does.
+///
+/// Refused: an empty name, 16 bytes or more, `.` and `..`, and any `/`,
+/// `:`, NUL or byte the kernel's `isspace` takes: tab, newline, vertical
+/// tab, form feed, carriage return, space, and 0xA0. The check is on
+/// bytes, as the kernel's is, so a character whose UTF-8 encoding holds
+/// 0xA0 (`à` is `C3 A0`) is refused, and a Unicode space without one
+/// (U+2003 is `E2 80 83`) is a valid name, as it is to `ip link` (#598).
 pub fn validate(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(IfError::InvalidName("empty name".to_string()));
@@ -27,20 +34,28 @@ pub fn validate(name: &str) -> Result<()> {
 
     if name.len() >= IFNAMSIZ {
         return Err(IfError::InvalidName(format!(
-            "name too long (max {} chars)",
+            "name too long (max {} bytes)",
             IFNAMSIZ - 1
         )));
     }
 
-    if name.contains('/') || name.contains('\0') {
-        return Err(IfError::InvalidName(
-            "name contains invalid characters".to_string(),
-        ));
+    if name == "." || name == ".." {
+        return Err(IfError::InvalidName(format!("{name:?} is not a name")));
     }
 
-    // Check for whitespace
-    if name.chars().any(|c| c.is_whitespace()) {
-        return Err(IfError::InvalidName("name contains whitespace".to_string()));
+    if name.bytes().any(|b| matches!(b, b'/' | b':' | b'\0')) {
+        return Err(IfError::InvalidName(format!(
+            "{name:?} contains `/`, `:` or NUL"
+        )));
+    }
+
+    if name
+        .bytes()
+        .any(|b| matches!(b, b'\t'..=b'\r' | b' ' | 0xa0))
+    {
+        return Err(IfError::InvalidName(format!(
+            "{name:?} contains whitespace"
+        )));
     }
 
     Ok(())
@@ -122,6 +137,23 @@ mod tests {
         assert!(validate("this_name_is_way_too_long_for_an_interface").is_err());
         assert!(validate("eth/0").is_err());
         assert!(validate("eth 0").is_err());
+    }
+
+    /// The kernel's `dev_valid_name`, byte for byte, as checked against
+    /// 6.12: `.`, `..`, `:`, and every byte its `isspace` takes, which
+    /// includes 0xA0 inside a UTF-8 character (`à` is `C3 A0`). A Unicode
+    /// space that has no such byte is a valid name (#598).
+    #[test]
+    fn validate_matches_dev_valid_name() {
+        for bad in [
+            ".", "..", "a:b", "à0", "a\tb", "a\x0bb", "a\x0cb", "a\rb", "a\nb",
+        ] {
+            assert!(validate(bad).is_err(), "{bad:?} should be refused");
+        }
+        for good in ["...", ".a", "a.b", "été", "a\u{2003}b", "fifteen-bytes-x"] {
+            assert!(validate(good).is_ok(), "{good:?} should be accepted");
+        }
+        assert!(validate("sixteen-bytes-xx").is_err());
     }
 
     #[test]

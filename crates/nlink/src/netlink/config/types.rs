@@ -113,6 +113,31 @@ impl NetworkConfig {
                     "declared more than once",
                 ));
             }
+            // What the kernel refuses mid-apply, after earlier links were
+            // created, is refused here (#598).
+            if let Err(e) = crate::util::ifname::validate(&l.name) {
+                errors.push(ValidationErrorInfo::new(
+                    format!("links.{}", l.name),
+                    e.to_string(),
+                ));
+            }
+            match &l.link_type {
+                DeclaredLinkType::Veth { peer } | DeclaredLinkType::Netkit { peer, .. } => {
+                    if let Err(e) = crate::util::ifname::validate(peer) {
+                        errors.push(ValidationErrorInfo::new(
+                            format!("links.{}", l.name),
+                            format!("peer: {e}"),
+                        ));
+                    }
+                }
+                DeclaredLinkType::Vlan { vlan_id, .. } if *vlan_id > 4094 => {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("links.{}", l.name),
+                        format!("VLAN id {vlan_id} is past 4094; the kernel refuses it (ERANGE)"),
+                    ));
+                }
+                _ => {}
+            }
         }
         let mut routes = HashSet::new();
         for r in &self.routes {
@@ -136,6 +161,14 @@ impl NetworkConfig {
                     format!("qdiscs.{}", q.dev),
                     format!("declared more than once at {:?}", q.effective_parent()),
                 ));
+            }
+            for (what, value) in q.qdisc_type.netem_percents() {
+                if !(0.0..=100.0).contains(&value) {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("qdiscs.{}", q.dev),
+                        format!("netem {what} of {value} is not a percentage in 0..=100"),
+                    ));
+                }
             }
             // `perturb` refuses this, but a JSON document can carry it, and
             // the lowering would saturate it silently (#597).
@@ -1862,6 +1895,67 @@ impl DeclaredQdiscType {
         Some(crate::netlink::tc::HtbQdiscConfig::new().default_class(*default_class))
     }
 
+    /// The percentages a `Netem` declaration carries, by name, for
+    /// [`NetworkConfig::validate`]. The builder clamps them through
+    /// [`Percent`](crate::util::Percent), but a JSON or YAML document sets
+    /// them directly and can carry `.nan` or 150 (#598).
+    fn netem_percents(&self) -> Vec<(&'static str, f64)> {
+        use crate::netlink::tc_options::NetemLossModel;
+        let Self::Netem {
+            loss_percent,
+            duplicate_percent,
+            corrupt_percent,
+            reorder_percent,
+            loss_correlation,
+            delay_correlation,
+            duplicate_correlation,
+            corrupt_correlation,
+            reorder_correlation,
+            loss_model,
+            ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<(&'static str, f64)> = [
+            ("loss", loss_percent),
+            ("duplicate", duplicate_percent),
+            ("corrupt", corrupt_percent),
+            ("reorder", reorder_percent),
+            ("loss correlation", loss_correlation),
+            ("delay correlation", delay_correlation),
+            ("duplicate correlation", duplicate_correlation),
+            ("corrupt correlation", corrupt_correlation),
+            ("reorder correlation", reorder_correlation),
+        ]
+        .into_iter()
+        .filter_map(|(what, v)| v.map(|v| (what, v)))
+        .collect();
+        match loss_model {
+            Some(NetemLossModel::GilbertIntuitive {
+                p13,
+                p31,
+                p32,
+                p14,
+                p23,
+            }) => out.extend([
+                ("loss state p13", *p13),
+                ("loss state p31", *p31),
+                ("loss state p32", *p32),
+                ("loss state p14", *p14),
+                ("loss state p23", *p23),
+            ]),
+            Some(NetemLossModel::GilbertElliot { p, r, h, k1 }) => out.extend([
+                ("loss gemodel p", *p),
+                ("loss gemodel r", *r),
+                ("loss gemodel h", *h),
+                ("loss gemodel 1-k", *k1),
+            ]),
+            _ => {}
+        }
+        out
+    }
+
     /// Lower an `FqCodel` declaration to [`FqCodelConfig`]; `None`
     /// otherwise (#346). Only the fields the declaration sets are written;
     /// the kernel fills in the rest.
@@ -1973,9 +2067,10 @@ impl DeclaredQdiscType {
 ///
 /// Note: the percentage fields on [`DeclaredQdiscType::Netem`] are
 /// stored as raw `f64`. When built through [`QdiscBuilder`] they pass
-/// through [`crate::util::Percent`] (clamped to `0..=100`); a value
-/// deserialized directly here is range-checked by the kernel at
-/// apply time rather than on construction.
+/// through [`crate::util::Percent`] (clamped to `0..=100`). A value a
+/// JSON or YAML document sets directly is checked by
+/// [`NetworkConfig::validate`], which refuses NaN and anything outside
+/// `0..=100` (#598).
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -3121,18 +3216,16 @@ mod plan_228_tests {
 
     #[test]
     fn loss_pct_handles_nan() {
-        // Percent::new uses clamp which for f64 NaN returns NaN.
-        // Document the behaviour at the typed boundary — adversarial
-        // callers learn the failure mode here rather than discovering
-        // a kernel rejection at apply time.
+        // `Percent::new(NaN)` is 0 % (#598). It used to stay NaN through
+        // `clamp`, which wrote as 0 % but made the declaration unequal to
+        // itself.
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::new(f64::NAN))
             .build()
             .unwrap();
-        // NaN propagates through clamp; verify the stored value is NaN.
         let v = netem_loss(&q).expect("loss_percent set");
-        assert!(v.is_nan(), "Percent::new(NaN) → stored NaN (documented)");
+        assert_eq!(v, 0.0, "Percent::new(NaN) is 0 %");
     }
 
     #[test]
@@ -4109,6 +4202,50 @@ mod master_and_validate_tests {
             .route("10.0.0.0/8", |r| r.dev("eth1").metric(200))
             .unwrap();
         distinct.validate().unwrap();
+    }
+
+    /// What the kernel refuses late is refused by `validate()` first:
+    /// interface names `dev_valid_name` rejects (link and peer), VLAN ids
+    /// past 4094, and netem percentages that are not a number in 0..=100,
+    /// which a JSON or YAML document can carry (#598).
+    #[test]
+    fn validate_refuses_what_the_kernel_would() {
+        for name in ["", ".", "..", "a/b", "a b", "a:b", "à0", "sixteen-bytes-xx"] {
+            let err = NetworkConfig::new()
+                .link(name, |l| l.dummy())
+                .validate()
+                .expect_err(name)
+                .to_string();
+            assert!(err.contains("links."), "{name:?}: {err}");
+        }
+        let err = NetworkConfig::new()
+            .link("v0", |l| l.veth("a:b"))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("peer"), "{err}");
+
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy())
+            .link("v4094", |l| l.vlan("d0", 4094))
+            .validate()
+            .unwrap();
+        let err = NetworkConfig::new()
+            .link("d0", |l| l.dummy())
+            .link("v4095", |l| l.vlan("d0", 4095))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("4095"), "{err}");
+
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 100.5] {
+            let mut cfg = NetworkConfig::new().qdisc("d0", |q| q.netem());
+            if let DeclaredQdiscType::Netem { loss_percent, .. } = &mut cfg.qdiscs[0].qdisc_type {
+                *loss_percent = Some(bad);
+            }
+            let err = cfg.validate().expect_err(&format!("{bad}")).to_string();
+            assert!(err.contains("loss"), "{bad}: {err}");
+        }
     }
 
     /// A JSON document can carry an sfq period the kernel's int cannot

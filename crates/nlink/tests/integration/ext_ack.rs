@@ -75,25 +75,21 @@ async fn kernel_error_messages_reach_the_caller() -> Result<()> {
 /// The first test's request is already 36 bytes, so uncapped its TLVs
 /// would sit at payload offset 40 where nlink reads 20. This one adds a
 /// second, larger shape so the test is about the plumbing rather than
-/// one kernel string: a VLAN id the kernel refuses.
+/// one kernel string: a VLAN on loopback, which the kernel refuses with
+/// "8021q: VLANs not supported on device". (It used VLAN id 4095 until
+/// nlink began refusing that before sending, #598.)
 #[tokio::test]
 async fn ext_ack_survives_a_request_long_enough_to_matter() -> Result<()> {
     require_root!();
-    nlink::require_modules!("dummy", "8021q");
+    nlink::require_modules!("8021q");
 
     let ns = TestNamespace::new("extack2")?;
     let conn = ns.connection()?;
-    conn.add_link(DummyLink::new("dummy0")).await?;
-    conn.set_link_up("dummy0").await?;
-    // 4095 is reserved; the kernel rejects it by name.
+    conn.set_link_up("lo").await?;
     let err = conn
-        .add_link(nlink::netlink::link::VlanLink::new(
-            "dummy0.bad",
-            "dummy0",
-            4095,
-        ))
+        .add_link(nlink::netlink::link::VlanLink::new("lo.5", "lo", 5))
         .await
-        .expect_err("VLAN id 4095 must be rejected");
+        .expect_err("a VLAN on loopback must be rejected");
 
     let ext = err.ext_ack().unwrap_or_else(|| {
         panic!(

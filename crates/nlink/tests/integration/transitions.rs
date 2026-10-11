@@ -709,12 +709,12 @@ async fn nftables_fields_change_in_place() -> nlink::Result<()> {
 // Boundaries
 // ============================================================================
 
-/// The edges of the inputs that take numbers and names. What #598 lists
-/// — names `validate()` misses, `"."`/`".."`/`":"` reaching the kernel,
-/// VLAN ids past 4094, a NaN percentage — is left out until it is fixed.
+/// The edges of the inputs that take numbers and names. Each bad input is
+/// refused before the kernel sees it, by the imperative call and by
+/// `NetworkConfig::validate()` (#598).
 #[tokio::test]
 async fn boundaries() -> nlink::Result<()> {
-    use nlink::netlink::link::DummyLink;
+    use nlink::netlink::link::{DummyLink, VlanLink};
     use nlink::netlink::tc::NetemConfig;
     require_root!();
     nlink::require_modules!("dummy", "8021q", "sch_netem");
@@ -722,15 +722,21 @@ async fn boundaries() -> nlink::Result<()> {
     let ns = TestNamespace::new("boundaries")?;
     let conn = ns.connection()?;
 
-    // Interface names: refused before the kernel, or created.
-    for name in ["", "a/b", "a b", "sixteen-bytes-xx"] {
+    // Interface names: what the kernel's `dev_valid_name` refuses is
+    // refused before the kernel (`à` is `C3 A0`, and 0xA0 is a space to
+    // the kernel), and what it takes is created, a Unicode space included.
+    for name in ["", ".", "..", "a/b", "a b", "a:b", "à0", "sixteen-bytes-xx"] {
         let err = conn.add_link(DummyLink::new(name)).await.expect_err(name);
         assert!(matches!(err, nlink::Error::Interface(_)), "{name:?}: {err}");
+        let declared = NetworkConfig::new().link(name, |l| l.dummy());
+        assert!(declared.validate().is_err(), "validate() took {name:?}");
     }
     conn.add_link(DummyLink::new("fifteen-bytes-x")).await?;
+    conn.add_link(DummyLink::new("a\u{2003}b")).await?;
     conn.add_link(DummyLink::new("d0")).await?;
 
-    // VLAN ids 0 (priority-tagged) and 4094 are VLANs.
+    // VLAN ids 0 (priority-tagged) and 4094 are VLANs; 4095 is refused
+    // before the kernel's ERANGE.
     for id in [0u16, 4094] {
         let cfg = NetworkConfig::new()
             .link("d0", |l| l.dummy())
@@ -738,6 +744,15 @@ async fn boundaries() -> nlink::Result<()> {
         let applied = cfg.apply(&conn).await?;
         assert!(applied.is_success(), "vlan {id}: {applied:?}");
     }
+    let err = conn
+        .add_link(VlanLink::new("v4095", "d0", 4095))
+        .await
+        .expect_err("vlan 4095");
+    assert!(err.errno().is_none(), "the kernel should not see it: {err}");
+    let declared = NetworkConfig::new()
+        .link("d0", |l| l.dummy())
+        .link("v4095", |l| l.vlan("d0", 4095));
+    assert!(declared.validate().is_err(), "validate() took vlan 4095");
 
     // Prefix lengths are checked as they parse.
     for (route, ok) in [
@@ -752,9 +767,10 @@ async fn boundaries() -> nlink::Result<()> {
         assert_eq!(parsed.is_ok(), ok, "{route}");
     }
 
-    // Percentages clamp to 0..=100.
+    // Percentages clamp to 0..=100, and NaN is 0.
     assert_eq!(nlink::Percent::new(150.0).as_percent(), 100.0);
     assert_eq!(nlink::Percent::new(-5.0).as_percent(), 0.0);
+    assert_eq!(nlink::Percent::new(f64::NAN).as_percent(), 0.0);
 
     // `ffff:` is the ingress/clsact handle, refused at the root.
     let err = conn

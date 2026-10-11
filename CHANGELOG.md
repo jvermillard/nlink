@@ -1206,6 +1206,34 @@ All notable changes to this project will be documented in this file.
   rounds up, as sfq's `perturb` (#597) and WireGuard's keepalive (#529,
   #602) do. A root test adds a 500 ms UDP entry and finds it in the dump.
 
+- **Interface names, VLAN ids and NaN percentages got past nlink's checks
+  (#598).** Each failed late, after earlier links were created, or
+  changed something silently:
+  - **Interface names.** `util::ifname::validate`, which `add_link`
+    calls, now matches the kernel's `dev_valid_name` byte for byte. It
+    refuses `.`, `..` and `:`, and every byte the kernel's `isspace`
+    takes, 0xA0 included. So `à` (UTF-8 `C3 A0`) is refused. A Unicode
+    space with no such byte, such as U+2003, is now accepted, as the
+    kernel and `ip link` accept it. All of this was checked live on 6.12.
+  - **`NetworkConfig::validate()`** checks every declared link name and
+    veth/netkit peer name. Before, a bad name failed mid-apply.
+  - **VLAN ids past 4094** fail `validate()`, and `VlanLink` refuses them
+    before sending, instead of the kernel's `ERANGE`.
+  - **Netem percentages** (the probabilities, the correlations and the
+    loss-model values) fail `validate()` when they are NaN or outside
+    `0..=100`. A JSON or YAML document can carry those values.
+  - **`Percent::new(f64::NAN)` is 0 %.** `clamp` used to keep NaN, which
+    wrote as 0 % but compared unequal to itself, so the declaration did
+    too.
+  - **A reversed `BridgeVlanTunnelBuilder` range** (`range(end)` below
+    the start) is an error. It underflowed a `u16`: a panic in a debug
+    build, a wrapped tunnel id in a release one.
+
+  The `boundaries` transition test no longer leaves these out.
+  `ext_ack_survives_a_request_long_enough_to_matter` now provokes its
+  kernel error with a VLAN on loopback, since VLAN id 4095 no longer
+  reaches the kernel.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it
