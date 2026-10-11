@@ -137,6 +137,22 @@ impl NetworkConfig {
                     format!("declared more than once at {:?}", q.effective_parent()),
                 ));
             }
+            // `perturb` refuses this, but a JSON document can carry it, and
+            // the lowering would saturate it silently (#597).
+            if let DeclaredQdiscType::Sfq {
+                perturb_secs: Some(p),
+                ..
+            } = q.qdisc_type
+                && i32::try_from(p).is_err()
+            {
+                errors.push(ValidationErrorInfo::new(
+                    format!("qdiscs.{}", q.dev),
+                    format!(
+                        "sfq perturb of {p} seconds is past the kernel's limit of {}",
+                        i32::MAX
+                    ),
+                ));
+            }
         }
         if errors.is_empty() {
             Ok(())
@@ -2531,12 +2547,24 @@ impl QdiscBuilder {
 
     /// Set the sfq hash-perturbation period (`SfqConfig::perturb`).
     ///
-    /// The kernel's field is whole seconds, so sub-second precision is
-    /// truncated — `perturb(Duration::from_millis(1500))` installs 1s.
-    /// Added in 0.28 (#361).
+    /// The kernel's field is whole seconds, and 0 turns perturbation off,
+    /// so a fraction rounds up: `perturb(Duration::from_millis(500))`
+    /// installs 1 s, and 1500 ms installs 2 s. `Duration::ZERO` is off. A
+    /// period past `i32::MAX` seconds, the field's range, makes
+    /// [`build`](Self::build) fail. Kernels with the 2025 sfq fix (6.13,
+    /// and the stable updates) also refuse anything past `INT_MAX / HZ`
+    /// seconds with `EINVAL`. Added in 0.28 (#361); rounds up since 0.31
+    /// (#597).
     pub fn perturb(mut self, period: Duration) -> Self {
         if let Some(DeclaredQdiscType::Sfq { perturb_secs, .. }) = &mut self.qdisc_type {
-            *perturb_secs = Some(period.as_secs().min(u64::from(u32::MAX)) as u32);
+            let secs = period.as_secs() + u64::from(period.subsec_nanos() > 0);
+            match i32::try_from(secs) {
+                Ok(secs) => *perturb_secs = Some(secs.unsigned_abs()),
+                Err(_) => self.errors.push(format!(
+                    "`.perturb({period:?})` is past the kernel's limit of {} seconds",
+                    i32::MAX
+                )),
+            }
         } else {
             self.wrong_kind("perturb", "sfq");
         }
@@ -3366,19 +3394,31 @@ mod plan_228_tests {
         assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
     }
 
-    /// `perturb` takes a `Duration` for consistency with the other
-    /// time-valued setters, but the kernel field is whole seconds.
+    /// `perturb` takes a `Duration`, but the kernel field is whole
+    /// seconds, and 0 turns perturbation off. A fraction rounds up, so a
+    /// sub-second period is never silently "off" (#597).
     #[test]
-    fn sfq_perturb_truncates_to_whole_seconds() {
-        let q = QdiscBuilder::new("eth0")
-            .sfq()
-            .perturb(Duration::from_millis(1_500))
-            .build()
-            .unwrap();
-        let DeclaredQdiscType::Sfq { perturb_secs, .. } = &q.qdisc_type else {
-            panic!("sfq");
+    fn sfq_perturb_rounds_up_to_whole_seconds() {
+        let secs = |d| {
+            let q = QdiscBuilder::new("eth0").sfq().perturb(d).build().unwrap();
+            let DeclaredQdiscType::Sfq { perturb_secs, .. } = q.qdisc_type else {
+                panic!("sfq");
+            };
+            perturb_secs
         };
-        assert_eq!(*perturb_secs, Some(1));
+        assert_eq!(secs(Duration::from_millis(1_500)), Some(2));
+        assert_eq!(secs(Duration::from_millis(500)), Some(1));
+        assert_eq!(secs(Duration::from_secs(1)), Some(1));
+        assert_eq!(secs(Duration::ZERO), Some(0), "zero is still off");
+
+        // The kernel field is an int: past it is a builder error, not a
+        // silent saturation.
+        let err = QdiscBuilder::new("eth0")
+            .sfq()
+            .perturb(Duration::from_secs(u64::from(i32::MAX.unsigned_abs()) + 1))
+            .build()
+            .unwrap_err();
+        assert!(err.iter().any(|e| e.contains("perturb")), "{err:?}");
     }
 
     #[test]
@@ -4069,6 +4109,18 @@ mod master_and_validate_tests {
             .route("10.0.0.0/8", |r| r.dev("eth1").metric(200))
             .unwrap();
         distinct.validate().unwrap();
+    }
+
+    /// A JSON document can carry an sfq period the kernel's int cannot
+    /// hold; the lowering would saturate it, so validate refuses it (#597).
+    #[test]
+    fn validate_refuses_an_sfq_period_past_the_kernel_int() {
+        let mut cfg = NetworkConfig::new().qdisc("eth0", |q| q.sfq());
+        if let DeclaredQdiscType::Sfq { perturb_secs, .. } = &mut cfg.qdiscs[0].qdisc_type {
+            *perturb_secs = Some(u32::MAX);
+        }
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("sfq perturb"), "{err}");
     }
 
     #[cfg(feature = "serde")]
