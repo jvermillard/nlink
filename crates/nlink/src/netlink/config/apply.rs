@@ -993,10 +993,15 @@ async fn create_link(
     if let Some(master) = link.master.name() {
         enslave(conn, &link.name, master).await?;
     }
-    // A port's options, once it is one (#516).
+    // A port's options and VLANs, once it is one (#516).
     if let Some(port) = &link.port {
-        conn.set_bridge_port(link.name.as_str(), port.to_config())
-            .await?;
+        let config = port.to_config();
+        if !config.is_empty() {
+            conn.set_bridge_port(link.name.as_str(), config).await?;
+        }
+        if let Some(vlans) = &port.vlans {
+            set_port_vlans(conn, &link.name, vlans).await?;
+        }
     }
 
     match link.state {
@@ -1042,9 +1047,12 @@ async fn modify_link(
     if changes.unset_master {
         conn.set_link_nomaster(name).await?;
     }
-    // A port's options, after it joined its bridge (#516).
+    // A port's options and VLANs, after it joined its bridge (#516).
     if let Some(port) = &changes.port_update {
         conn.set_bridge_port(name, port.clone()).await?;
+    }
+    if let Some(vlans) = &changes.port_vlans {
+        set_port_vlans(conn, name, vlans).await?;
     }
     // After the master: a bond gives the port it enslaves its own MTU, and a
     // declared one wins.
@@ -1059,6 +1067,46 @@ async fn modify_link(
     }
     if changes.set_down && master_changes {
         conn.set_link_down(name).await?;
+    }
+    Ok(())
+}
+
+/// Make a bridge port's VLANs exactly `want` (#516), against a fresh read:
+/// a port gets the bridge's default PVID when it joins, which no diff made
+/// before the join can know of. Adds go first, which also moves the PVID,
+/// then what is not declared goes.
+async fn set_port_vlans(
+    conn: &Connection<Route>,
+    name: &str,
+    want: &[super::types::PortVlan],
+) -> Result<()> {
+    use crate::netlink::bridge_vlan::BridgeVlanBuilder;
+    let ifindex = conn
+        .get_link_by_name(name)
+        .await?
+        .ok_or_else(|| Error::interface_not_found(name))?
+        .ifindex();
+    let have = conn.get_bridge_vlans_by_index(ifindex).await?;
+    for v in want {
+        let same = have
+            .iter()
+            .any(|h| h.vid() == v.vid && h.is_pvid() == v.pvid && h.is_untagged() == v.untagged);
+        if same {
+            continue;
+        }
+        let mut b = BridgeVlanBuilder::new(v.vid).ifindex(ifindex);
+        if v.pvid {
+            b = b.pvid();
+        }
+        if v.untagged {
+            b = b.untagged();
+        }
+        conn.add_bridge_vlan(b).await?;
+    }
+    for h in &have {
+        if !want.iter().any(|w| w.vid == h.vid()) {
+            conn.del_bridge_vlan_by_index(ifindex, h.vid()).await?;
+        }
     }
     Ok(())
 }

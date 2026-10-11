@@ -337,6 +337,17 @@ All notable changes to this project will be documented in this file.
   address. A root test deletes one of two prefixes and one of two peers.
   It fails without the fix.
 
+- **`get_bridge_vlans` and `get_bridge_vlans_all` return the ports'
+  VLANs (#516).**
+  - `get_bridge_vlans(port)` sent a single-link `RTM_GETLINK`. The kernel
+    answers that with the generic handler, whose reply carries no VLANs,
+    so it returned nothing for every port.
+  - `get_bridge_vlans_all(bridge)` dropped every entry but the bridge's
+    own before matching ports by master, so no port's VLANs came back.
+
+  Both now read the `AF_BRIDGE` dump. A root test adds a VLAN to a port
+  and finds it through both. It fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -837,6 +848,23 @@ All notable changes to this project will be documented in this file.
     through `ip -d -j link` on iproute2 6.15 and 6.1, and fails when they
     aren't compared.
   - **Still to do.** Port VLANs are the second part of row 6.
+
+- **Declared bridge-port VLANs (#516, row 6, second part).**
+  `PortOptions::pvid(vid)`, `untagged(vid)`, `vlan(vid)` and `vlan_with`
+  declare a port's VLANs as its exact set. The JSON form is `"vlans":
+  [{"vid": 10, "pvid": true, "untagged": true}, {"vid": 20}]`.
+  - **Diff.** It reads every port's VLANs from one `AF_BRIDGE` dump in the
+    snapshot.
+  - **Apply.** It makes the port's VLANs the declared ones against a fresh
+    read: adds first (which also moves the PVID), then the undeclared ones
+    go. That includes the default PVID a port gets when it joins, which no
+    diff made before the join could see.
+  - **Validation.** A VID outside 1–4094 or declared twice, and two PVIDs,
+    are validation errors.
+  - **Test.** A transition test moves an access VLAN, untags a trunk VLAN,
+    drops one and adds another, checked through `bridge -j vlan` on
+    iproute2 6.15 and 6.1. It fails when the undeclared VLANs aren't
+    removed.
 
 ## [0.31.0] - 2026-10-11
 

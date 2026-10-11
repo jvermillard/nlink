@@ -291,7 +291,7 @@ impl BridgePortConfig {
     }
 
     /// Returns `true` if no field is set (nothing to write).
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.state.is_none()
             && self.priority.is_none()
             && self.cost.is_none()

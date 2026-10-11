@@ -1125,17 +1125,16 @@ impl Connection<Route> {
         fields(method = "get_bridge_vlans_by_index")
     )]
     pub async fn get_bridge_vlans_by_index(&self, ifindex: u32) -> Result<Vec<BridgeVlanEntry>> {
-        // Request link with BRVLAN filter
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETLINK, NLM_F_REQUEST);
-
-        let ifinfo = IfInfoMsg::new()
-            .with_family(libc::AF_BRIDGE as u8)
-            .with_index(ifindex as i32);
-        builder.append(&ifinfo);
-        builder.append_attr_u32(IflaAttr::ExtMask as u16, rtext_filter::BRVLAN);
-
-        let response = self.send_request(builder).await?;
-        parse_vlan_entries(&response, ifindex)
+        // Only the AF_BRIDGE dump (`rtnl_bridge_getlink`) carries VLANs: a
+        // single-link RTM_GETLINK falls through to the generic handler,
+        // whose reply has none, so this returned nothing for every port
+        // (#516).
+        Ok(self
+            .get_bridge_vlans_dump()
+            .await?
+            .into_iter()
+            .filter(|v| v.ifindex == ifindex)
+            .collect())
     }
 
     /// Get VLAN configuration for all ports of a bridge.
@@ -1173,32 +1172,11 @@ impl Connection<Route> {
         &self,
         bridge_idx: u32,
     ) -> Result<Vec<BridgeVlanEntry>> {
-        // Dump all links with BRVLAN filter
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETLINK, NLM_F_REQUEST | NLM_F_DUMP);
+        let entries = self.get_bridge_vlans_dump().await?;
 
-        let ifinfo = IfInfoMsg::new().with_family(libc::AF_BRIDGE as u8);
-        builder.append(&ifinfo);
-        builder.append_attr_u32(IflaAttr::ExtMask as u16, rtext_filter::BRVLAN);
-
-        let responses = self.send_dump(builder).await?;
-
-        let mut entries = Vec::new();
-        for response in responses {
-            // Parse each response for VLAN entries
-            if let Ok(msg_entries) = parse_vlan_entries_from_dump(&response) {
-                // Filter to ports that belong to this bridge
-                for entry in msg_entries {
-                    // Include if it's the bridge itself or has master == bridge_idx
-                    if entry.ifindex == bridge_idx {
-                        entries.push(entry);
-                    }
-                    // Note: We'd need to check IFLA_MASTER to filter properly,
-                    // but for now include all entries from the dump
-                }
-            }
-        }
-
-        // Re-fetch with proper filtering by checking masters
+        // The bridge's own and its ports'. Every entry was dropped but the
+        // bridge's before the ports were matched, so no port's VLANs came
+        // back (#516).
         let links = self.get_links().await?;
         let port_indices: Vec<u32> = links
             .iter()
@@ -1215,6 +1193,22 @@ impl Connection<Route> {
         }
 
         Ok(filtered)
+    }
+
+    /// Every bridge VLAN entry in the namespace: each bridge's and each
+    /// port's (one `AF_BRIDGE` link dump with `RTEXT_FILTER_BRVLAN`).
+    pub(crate) async fn get_bridge_vlans_dump(&self) -> Result<Vec<BridgeVlanEntry>> {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETLINK, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&IfInfoMsg::new().with_family(libc::AF_BRIDGE as u8));
+        builder.append_attr_u32(IflaAttr::ExtMask as u16, rtext_filter::BRVLAN);
+        let responses = self.send_dump(builder).await?;
+        let mut entries = Vec::new();
+        for response in responses {
+            if let Ok(msg_entries) = parse_vlan_entries_from_dump(&response) {
+                entries.extend(msg_entries);
+            }
+        }
+        Ok(entries)
     }
 
     /// Add VLAN to a bridge port.
@@ -1755,27 +1749,6 @@ impl Connection<Route> {
 // ============================================================================
 // Parsing Helpers
 // ============================================================================
-
-/// Parse VLAN entries from a single netlink response.
-fn parse_vlan_entries(data: &[u8], ifindex: u32) -> Result<Vec<BridgeVlanEntry>> {
-    let mut entries = Vec::new();
-
-    // Skip ifinfomsg header
-    if data.len() < IfInfoMsg::SIZE {
-        return Ok(entries);
-    }
-    let attrs_data = &data[IfInfoMsg::SIZE..];
-
-    // Look for IFLA_AF_SPEC
-    for (attr_type, payload) in AttrIter::new(attrs_data) {
-        if attr_type == IflaAttr::AfSpec as u16 {
-            // Parse nested attributes inside AF_SPEC
-            parse_af_spec_vlans(payload, ifindex, &mut entries);
-        }
-    }
-
-    Ok(entries)
-}
 
 /// Parse VLAN entries from a dump response (may contain multiple messages).
 fn parse_vlan_entries_from_dump(data: &[u8]) -> Result<Vec<BridgeVlanEntry>> {
