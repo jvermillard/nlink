@@ -1348,21 +1348,61 @@ mod tests {
         let pairs: [(i32, ErrorKind, Pred); 18] = [
             (libc::ENOENT, ErrorKind::NotFound, Error::is_not_found),
             (libc::ENODEV, ErrorKind::NotFound, Error::is_not_found),
-            (libc::EEXIST, ErrorKind::AlreadyExists, Error::is_already_exists),
+            (
+                libc::EEXIST,
+                ErrorKind::AlreadyExists,
+                Error::is_already_exists,
+            ),
             (libc::EBUSY, ErrorKind::Busy, Error::is_busy),
-            (libc::EPERM, ErrorKind::PermissionDenied, Error::is_permission_denied),
-            (libc::EACCES, ErrorKind::PermissionDenied, Error::is_permission_denied),
-            (libc::EOPNOTSUPP, ErrorKind::NotSupported, Error::is_not_supported),
-            (libc::EINVAL, ErrorKind::InvalidArgument, Error::is_invalid_argument),
+            (
+                libc::EPERM,
+                ErrorKind::PermissionDenied,
+                Error::is_permission_denied,
+            ),
+            (
+                libc::EACCES,
+                ErrorKind::PermissionDenied,
+                Error::is_permission_denied,
+            ),
+            (
+                libc::EOPNOTSUPP,
+                ErrorKind::NotSupported,
+                Error::is_not_supported,
+            ),
+            (
+                libc::EINVAL,
+                ErrorKind::InvalidArgument,
+                Error::is_invalid_argument,
+            ),
             (libc::EAGAIN, ErrorKind::TryAgain, Error::is_try_again),
             (libc::ERESTART, ErrorKind::Restart, Error::is_restart),
             (libc::ENOBUFS, ErrorKind::Overrun, Error::is_no_buffer_space),
             (libc::ETIMEDOUT, ErrorKind::Timeout, Error::is_timeout),
-            (libc::ENETUNREACH, ErrorKind::NetworkUnreachable, Error::is_network_unreachable),
-            (libc::EHOSTUNREACH, ErrorKind::HostUnreachable, Error::is_host_unreachable),
-            (libc::EADDRINUSE, ErrorKind::AddressInUse, Error::is_address_in_use),
-            (libc::ECONNREFUSED, ErrorKind::ConnectionRefused, Error::is_connection_refused),
-            (libc::EMSGSIZE, ErrorKind::MessageTooLong, Error::is_message_too_long),
+            (
+                libc::ENETUNREACH,
+                ErrorKind::NetworkUnreachable,
+                Error::is_network_unreachable,
+            ),
+            (
+                libc::EHOSTUNREACH,
+                ErrorKind::HostUnreachable,
+                Error::is_host_unreachable,
+            ),
+            (
+                libc::EADDRINUSE,
+                ErrorKind::AddressInUse,
+                Error::is_address_in_use,
+            ),
+            (
+                libc::ECONNREFUSED,
+                ErrorKind::ConnectionRefused,
+                Error::is_connection_refused,
+            ),
+            (
+                libc::EMSGSIZE,
+                ErrorKind::MessageTooLong,
+                Error::is_message_too_long,
+            ),
             (libc::EROFS, ErrorKind::ReadOnly, Error::is_read_only),
         ];
         for (errno, kind, pred) in pairs {
@@ -1382,7 +1422,10 @@ mod tests {
     fn kind_of_the_variants() {
         assert_eq!(Error::Timeout.kind(), ErrorKind::Timeout);
         assert_eq!(Error::interface_not_found("d0").kind(), ErrorKind::NotFound);
-        assert_eq!(Error::namespace_not_found("red").kind(), ErrorKind::NotFound);
+        assert_eq!(
+            Error::namespace_not_found("red").kind(),
+            ErrorKind::NotFound
+        );
         assert_eq!(Error::not_supported("x").kind(), ErrorKind::NotSupported);
         assert_eq!(Error::invalid_message("x").kind(), ErrorKind::Invalid);
         assert_eq!(
@@ -1405,7 +1448,10 @@ mod tests {
             .with_context("replace_qdisc")
             .with_context("apply qdisc on a:eth0");
         let shown = err.to_string();
-        assert!(shown.starts_with("apply qdisc on a:eth0: replace_qdisc"), "{shown}");
+        assert!(
+            shown.starts_with("apply qdisc on a:eth0: replace_qdisc"),
+            "{shown}"
+        );
         assert!(err.is_busy());
 
         let once = Error::from_errno(libc::EBUSY)
@@ -1419,7 +1465,11 @@ mod tests {
 
         let r: Result<()> = Err(Error::from_errno(libc::ENOENT));
         let err = r.context("del_route(10.0.0.0/8, table 100)").unwrap_err();
-        assert!(err.to_string().starts_with("del_route(10.0.0.0/8, table 100)"), "{err}");
+        assert!(
+            err.to_string()
+                .starts_with("del_route(10.0.0.0/8, table 100)"),
+            "{err}"
+        );
         assert_eq!(err.kind(), ErrorKind::NotFound);
     }
 
