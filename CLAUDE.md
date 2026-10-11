@@ -838,6 +838,35 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
+**0.31.0 shipped 2026-10-11** (`0.31.0` tagged — bare, no `v`; both crates
+on crates.io). Narrative in `CHANGELOG.md ## [0.31.0]` +
+`docs/migration_guide/0.30.0-to-0.31.0.md`. The nlink-lab release. nlink-lab
+adopted 0.30.0, reviewed nlink from its side, and filed 76 issues (#534): 53
+bugs, a docs issue and 22 redesigns and features. The cycle fixed all 53 bugs
+and the docs issue and added four small features (#517, #524, #529, #531),
+in 70 PRs. The redesigns move to 0.32.0.
+
+Lessons to carry:
+- **A suite can be large and still blind.** About 2400 tests missed those 53
+  bugs. Nearly all of them were in four shapes no test had:
+  - a declared value changed A→B in place;
+  - a removal of something still referenced;
+  - traffic through ingress or between namespaces;
+  - an event that never came.
+
+  The helpers in `tests/common/` exist for those shapes. A fix lands with a
+  test that fails without it.
+- **Read the kernel back through something other than nlink.** A diff that
+  does not compare a field agrees with anything. A declared fq_codel
+  `flows` change converged on every apply while the kernel kept the old
+  value, by design since 0.28 (#361), until a transition test read it back
+  with `tc` (#596).
+- **A green lane can still be skipping.** 22 module-gated tests were not
+  in the strict list, so CI could pass without running them (#600).
+- **Count what the kernel counts.** fq_codel and sfq report each queued
+  flow as a class, so "has classes" meant "is busy" (#596). Names, VLAN
+  ids and percentages are checked as the kernel checks them (#598).
+
 **0.30.0 shipped 2026-10-09** (`0.30.0` tagged — bare, no `v`; both crates
 on crates.io). Narrative in `CHANGELOG.md ## [0.30.0]` +
 `docs/migration_guide/0.29.0-to-0.30.0.md`. It started from external PR #246

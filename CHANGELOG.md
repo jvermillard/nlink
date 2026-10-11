@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-11
+
+> **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
+> missed them.**
+>
+> nlink-lab adopted 0.30.0, reviewed nlink from its side and filed 76
+> issues (#534). This release fixes the 53 bugs among them and a docs
+> issue. It also adds four small features they asked for:
+> - link options at creation: `master`, `up`, `alias` and `netns` (#517);
+> - `wait_link` and a DAD-aware `wait_addresses_settled` (#524);
+> - a WireGuard `PrivateKey` type (#529);
+> - `PartialEq`, `is_empty()` and JSON Schemas on the declarative configs
+>   and diffs (#531).
+>
+> The redesigns it filed move to 0.32.0.
+>
+> Those bugs sat behind a green suite of about 2400 tests, because no test
+> had their shape:
+> - a declared value changed in place;
+> - a removal of something still referenced;
+> - traffic through ingress or between namespaces;
+> - an event that never came.
+>
+> The helpers in `tests/common/` now cover those shapes, and every fix here
+> came with a test that failed without it. A closing sweep found three more
+> bugs (#596–#598). It changed every declared field in place and read it
+> back with `ip`, `tc` or `nft`, probed the edge values, and installed 13
+> flower lines through both `tc` and nlink. Planning the next cycle found
+> five more (#600–#604). One of them meant CI could pass without running 22
+> module-gated tests.
+>
+> The compile breaks are small and mechanical. The behaviour changes are
+> many: read the behaviour section of the
+> [migration guide](docs/migration_guide/0.30.0-to-0.31.0.md) before
+> upgrading.
+
 ### Breaking Changes
 
 - **Bond `xmit_hash_policy` is typed in `NetworkConfig` (#476).**
