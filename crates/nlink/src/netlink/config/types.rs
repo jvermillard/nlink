@@ -98,10 +98,34 @@ impl NetworkConfig {
 
         let mut errors = self.invalid.clone();
         for r in &self.routes {
+            let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
             if let Some(why) = r.gateway_family_mismatch() {
+                errors.push(ValidationErrorInfo::new(at(), why));
+            }
+            // IPv6 masks host bits away; IPv4 refuses them (EINVAL,
+            // "Invalid prefix for given prefix length") (#518).
+            if let IpAddr::V4(v4) = r.destination {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(r.prefix_len.min(32)))
+                    .unwrap_or(0);
+                if u32::from(v4) & !mask != 0 {
+                    let net = std::net::Ipv4Addr::from(u32::from(v4) & mask);
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        format!(
+                            "host bits are set; the kernel refuses that for IPv4 — declare {net}/{}",
+                            r.prefix_len
+                        ),
+                    ));
+                }
+            }
+            // Table 0 is RT_TABLE_UNSPEC: the kernel puts the route in main
+            // (254), and a diff comparing 0 with 254 re-added it forever.
+            if r.table == Some(0) {
                 errors.push(ValidationErrorInfo::new(
-                    format!("routes.{}/{}", r.destination, r.prefix_len),
-                    why,
+                    at(),
+                    "table 0 is unspecified, which the kernel reads as main (254); \
+                     declare 254 or leave the table out",
                 ));
             }
         }
@@ -121,6 +145,35 @@ impl NetworkConfig {
                     e.to_string(),
                 ));
             }
+            if let Some(why) = l.unaddressable_mac() {
+                errors.push(ValidationErrorInfo::new(format!("links.{}", l.name), why));
+            }
+            match &l.link_type {
+                DeclaredLinkType::Vxlan { vni, .. } if *vni >= 1 << 24 => {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("links.{}", l.name),
+                        format!("VNI {vni} does not fit the 24 bits a VXLAN header has"),
+                    ));
+                }
+                // The kernel refuses to open a VLAN whose lower device is down
+                // (ENETDOWN), and closes it when that goes down.
+                DeclaredLinkType::Vlan { parent, .. }
+                    if l.state == LinkState::Up
+                        && self
+                            .links
+                            .iter()
+                            .any(|p| p.name == *parent && p.state == LinkState::Down) =>
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("links.{}", l.name),
+                        format!(
+                            "a VLAN declared up on {parent}, which is declared down, cannot be \
+                             up (ENETDOWN); declare one of them differently"
+                        ),
+                    ));
+                }
+                _ => {}
+            }
             match &l.link_type {
                 DeclaredLinkType::Veth { peer } | DeclaredLinkType::Netkit { peer, .. } => {
                     if let Err(e) = crate::util::ifname::validate(peer) {
@@ -138,6 +191,12 @@ impl NetworkConfig {
                 }
                 _ => {}
             }
+        }
+        for cycle in self.master_cycles() {
+            errors.push(ValidationErrorInfo::new(
+                format!("links.{}", cycle[0]),
+                format!("masters form a cycle: {}", cycle.join(" → ")),
+            ));
         }
         let mut routes = HashSet::new();
         for r in &self.routes {
@@ -192,6 +251,41 @@ impl NetworkConfig {
         } else {
             Err(crate::netlink::Error::validation(errors))
         }
+    }
+
+    /// Each cycle of declared masters (`a` enslaved to `b`, `b` to `a`),
+    /// once, as the names around it, starting and ending at its first.
+    fn master_cycles(&self) -> Vec<Vec<String>> {
+        use std::collections::HashSet;
+        let master_of = |name: &str| {
+            self.links
+                .iter()
+                .find(|l| l.name == name)
+                .and_then(|l| match &l.master {
+                    MasterSpec::Name(m) => Some(m.as_str()),
+                    _ => None,
+                })
+        };
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cycles = Vec::new();
+        for l in &self.links {
+            let mut path: Vec<&str> = vec![l.name.as_str()];
+            let mut at = l.name.as_str();
+            while let Some(m) = master_of(at) {
+                if let Some(i) = path.iter().position(|p| *p == m) {
+                    let cycle = &path[i..];
+                    if cycle.iter().all(|n| seen.insert(n)) {
+                        let mut names: Vec<String> = cycle.iter().map(|s| s.to_string()).collect();
+                        names.push(m.to_string());
+                        cycles.push(names);
+                    }
+                    break;
+                }
+                path.push(m);
+                at = m;
+            }
+        }
+        cycles
     }
 
     /// Serialize this configuration to a compact JSON string.
@@ -298,16 +392,22 @@ impl NetworkConfig {
     /// separately, and the one without a master released the link from
     /// the master the other named — on every other apply (#462).
     pub fn link(mut self, name: &str, f: impl FnOnce(LinkBuilder) -> LinkBuilder) -> Self {
-        match self.links.iter().position(|l| l.name == name) {
-            Some(i) => {
-                let existing = self.links.remove(i);
-                let link = f(LinkBuilder::from_declared(existing)).build();
-                self.links.insert(i, link);
-            }
-            None => {
-                let builder = f(LinkBuilder::new(name));
-                self.links.push(builder.build());
-            }
+        let at = self.links.iter().position(|l| l.name == name);
+        let builder = match at {
+            Some(i) => f(LinkBuilder::from_declared(self.links.remove(i))),
+            None => f(LinkBuilder::new(name)),
+        };
+        for e in &builder.errors {
+            self.invalid
+                .push(crate::netlink::error::ValidationErrorInfo::new(
+                    format!("links.{name}"),
+                    e.clone(),
+                ));
+        }
+        let link = builder.build();
+        match at {
+            Some(i) => self.links.insert(i, link),
+            None => self.links.push(link),
         }
         self
     }
@@ -454,6 +554,26 @@ pub struct DeclaredLink {
 }
 
 impl DeclaredLink {
+    /// Why the declared MAC address cannot go on this kind of link: an
+    /// ovpn link, or a netkit link in L3 mode, has no hardware address.
+    pub(crate) fn unaddressable_mac(&self) -> Option<&'static str> {
+        self.address?;
+        match &self.link_type {
+            DeclaredLinkType::Ovpn => Some(
+                "a MAC address is declared, but an ovpn link is an L3 device with no hardware address",
+            ),
+            DeclaredLinkType::Netkit { mode, .. }
+                if *mode != Some(crate::netlink::link::NetkitMode::L2) =>
+            {
+                Some(
+                    "a MAC address is declared, but a netkit link in L3 mode (the default) has no \
+                     hardware address; declare .netkit_mode(NetkitMode::L2) to give it one",
+                )
+            }
+            _ => None,
+        }
+    }
+
     /// Get the interface name.
     pub fn name(&self) -> &str {
         &self.name
@@ -760,6 +880,9 @@ pub struct LinkBuilder {
     mtu: Option<u32>,
     master: MasterSpec,
     address: Option<[u8; 6]>,
+    /// Setters called for another kind, which did nothing. `link` moves
+    /// them into the config, where `validate()` reports them (#518).
+    errors: Vec<String>,
 }
 
 impl LinkBuilder {
@@ -771,6 +894,7 @@ impl LinkBuilder {
             mtu: None,
             master: MasterSpec::Unmanaged,
             address: None,
+            errors: Vec::new(),
         }
     }
 
@@ -784,7 +908,22 @@ impl LinkBuilder {
             mtu: link.mtu,
             master: link.master,
             address: link.address,
+            errors: Vec::new(),
         }
+    }
+
+    /// Record a setter called for the wrong kind: it did nothing, which
+    /// [`NetworkConfig::validate`] reports, as `QdiscBuilder` does (#476,
+    /// #518).
+    fn wrong_kind(&mut self, setter: &str, kind: &str) {
+        let is = match self.link_type.kind() {
+            Some(k) => format!("is a {k}"),
+            None => "has no kind (choose the kind first)".to_string(),
+        };
+        self.errors.push(format!(
+            "`.{setter}()` sets a {kind} parameter, but link {} {is}",
+            self.name
+        ));
     }
 
     /// Create a dummy interface.
@@ -824,6 +963,8 @@ impl LinkBuilder {
     pub fn vlan_protocol(mut self, p: VlanProtocol) -> Self {
         if let DeclaredLinkType::Vlan { protocol, .. } = &mut self.link_type {
             *protocol = Some(p);
+        } else {
+            self.wrong_kind("vlan_protocol", "vlan");
         }
         self
     }
@@ -846,6 +987,8 @@ impl LinkBuilder {
     pub fn vxlan_remote(mut self, remote_addr: IpAddr) -> Self {
         if let DeclaredLinkType::Vxlan { remote, .. } = &mut self.link_type {
             *remote = Some(remote_addr);
+        } else {
+            self.wrong_kind("vxlan_remote", "vxlan");
         }
         self
     }
@@ -858,6 +1001,8 @@ impl LinkBuilder {
     pub fn vxlan_local(mut self, local_addr: IpAddr) -> Self {
         if let DeclaredLinkType::Vxlan { local, .. } = &mut self.link_type {
             *local = Some(local_addr);
+        } else {
+            self.wrong_kind("vxlan_local", "vxlan");
         }
         self
     }
@@ -869,6 +1014,8 @@ impl LinkBuilder {
     pub fn vxlan_port(mut self, udp_port: u16) -> Self {
         if let DeclaredLinkType::Vxlan { port, .. } = &mut self.link_type {
             *port = Some(udp_port);
+        } else {
+            self.wrong_kind("vxlan_port", "vxlan");
         }
         self
     }
@@ -881,6 +1028,8 @@ impl LinkBuilder {
         } = &mut self.link_type
         {
             *underlay_dev = Some(dev.into());
+        } else {
+            self.wrong_kind("vxlan_underlay_dev", "vxlan");
         }
         self
     }
@@ -901,6 +1050,8 @@ impl LinkBuilder {
                 parent: parent.clone(),
                 mode,
             };
+        } else {
+            self.wrong_kind("macvlan_mode", "macvlan");
         }
         self
     }
@@ -928,6 +1079,8 @@ impl LinkBuilder {
         } = self.link_type
         {
             *m = mode;
+        } else {
+            self.wrong_kind("bond_mode", "bond");
         }
         self
     }
@@ -936,6 +1089,8 @@ impl LinkBuilder {
     pub fn miimon(mut self, ms: u32) -> Self {
         if let DeclaredLinkType::Bond { miimon, .. } = &mut self.link_type {
             *miimon = Some(ms);
+        } else {
+            self.wrong_kind("miimon", "bond");
         }
         self
     }
@@ -947,6 +1102,8 @@ impl LinkBuilder {
         } = &mut self.link_type
         {
             *xmit_hash_policy = Some(policy);
+        } else {
+            self.wrong_kind("xmit_hash_policy", "bond");
         }
         self
     }
@@ -955,6 +1112,8 @@ impl LinkBuilder {
     pub fn min_links(mut self, count: u32) -> Self {
         if let DeclaredLinkType::Bond { min_links, .. } = &mut self.link_type {
             *min_links = Some(count);
+        } else {
+            self.wrong_kind("min_links", "bond");
         }
         self
     }
@@ -964,6 +1123,8 @@ impl LinkBuilder {
     pub fn bond_ad_select(mut self, sel: BondAdSelect) -> Self {
         if let DeclaredLinkType::Bond { ad_select, .. } = &mut self.link_type {
             *ad_select = Some(sel);
+        } else {
+            self.wrong_kind("bond_ad_select", "bond");
         }
         self
     }
@@ -973,6 +1134,8 @@ impl LinkBuilder {
     pub fn bond_lacp_rate(mut self, rate: BondLacpRate) -> Self {
         if let DeclaredLinkType::Bond { lacp_rate, .. } = &mut self.link_type {
             *lacp_rate = Some(rate);
+        } else {
+            self.wrong_kind("bond_lacp_rate", "bond");
         }
         self
     }
@@ -982,6 +1145,8 @@ impl LinkBuilder {
     pub fn bond_downdelay(mut self, ms: u32) -> Self {
         if let DeclaredLinkType::Bond { downdelay, .. } = &mut self.link_type {
             *downdelay = Some(ms);
+        } else {
+            self.wrong_kind("bond_downdelay", "bond");
         }
         self
     }
@@ -991,6 +1156,8 @@ impl LinkBuilder {
     pub fn bond_updelay(mut self, ms: u32) -> Self {
         if let DeclaredLinkType::Bond { updelay, .. } = &mut self.link_type {
             *updelay = Some(ms);
+        } else {
+            self.wrong_kind("bond_updelay", "bond");
         }
         self
     }
@@ -1000,6 +1167,8 @@ impl LinkBuilder {
     pub fn bond_resend_igmp(mut self, count: u32) -> Self {
         if let DeclaredLinkType::Bond { resend_igmp, .. } = &mut self.link_type {
             *resend_igmp = Some(count);
+        } else {
+            self.wrong_kind("bond_resend_igmp", "bond");
         }
         self
     }
@@ -1041,6 +1210,8 @@ impl LinkBuilder {
     pub fn netkit_mode(mut self, m: NetkitMode) -> Self {
         if let DeclaredLinkType::Netkit { mode, .. } = &mut self.link_type {
             *mode = Some(m);
+        } else {
+            self.wrong_kind("netkit_mode", "netkit");
         }
         self
     }
@@ -1050,6 +1221,8 @@ impl LinkBuilder {
     pub fn netkit_primary_policy(mut self, p: NetkitPolicy) -> Self {
         if let DeclaredLinkType::Netkit { primary_policy, .. } = &mut self.link_type {
             *primary_policy = Some(p);
+        } else {
+            self.wrong_kind("netkit_primary_policy", "netkit");
         }
         self
     }
@@ -1059,6 +1232,8 @@ impl LinkBuilder {
     pub fn netkit_peer_policy(mut self, p: NetkitPolicy) -> Self {
         if let DeclaredLinkType::Netkit { peer_policy, .. } = &mut self.link_type {
             *peer_policy = Some(p);
+        } else {
+            self.wrong_kind("netkit_peer_policy", "netkit");
         }
         self
     }
@@ -1068,6 +1243,8 @@ impl LinkBuilder {
     pub fn netkit_scrub(mut self, s: NetkitScrub) -> Self {
         if let DeclaredLinkType::Netkit { scrub, .. } = &mut self.link_type {
             *scrub = Some(s);
+        } else {
+            self.wrong_kind("netkit_scrub", "netkit");
         }
         self
     }
@@ -1077,6 +1254,8 @@ impl LinkBuilder {
     pub fn netkit_peer_scrub(mut self, s: NetkitScrub) -> Self {
         if let DeclaredLinkType::Netkit { peer_scrub, .. } = &mut self.link_type {
             *peer_scrub = Some(s);
+        } else {
+            self.wrong_kind("netkit_peer_scrub", "netkit");
         }
         self
     }
@@ -3028,9 +3207,9 @@ mod plan_190_tests {
             .bond_lacp_rate(BondLacpRate::Slow)
             .bond_downdelay(100)
             .bond_updelay(100)
-            .bond_resend_igmp(1)
-            .build();
-        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+            .bond_resend_igmp(1);
+        assert_eq!(link.errors.len(), 5, "each setter is recorded (#518)");
+        assert!(matches!(link.build().link_type, DeclaredLinkType::Dummy));
     }
 
     // -------- end Plan 190 §8 --------
@@ -3095,9 +3274,9 @@ mod plan_190_tests {
             .dummy()
             .vxlan_local(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))
             .vxlan_port(4790)
-            .vxlan_underlay_dev("ignored")
-            .build();
-        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+            .vxlan_underlay_dev("ignored");
+        assert_eq!(link.errors.len(), 3, "each setter is recorded (#518)");
+        assert!(matches!(link.build().link_type, DeclaredLinkType::Dummy));
     }
 
     // -------- end Plan 190 §2.1 --------
@@ -3133,9 +3312,9 @@ mod plan_190_tests {
         // VLAN should leave the link_type unchanged.
         let link = LinkBuilder::new("eth0")
             .dummy()
-            .vlan_protocol(VlanProtocol::Dot1ad)
-            .build();
-        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+            .vlan_protocol(VlanProtocol::Dot1ad);
+        assert_eq!(link.errors.len(), 1, "the setter is recorded (#518)");
+        assert!(matches!(link.build().link_type, DeclaredLinkType::Dummy));
     }
 
     #[test]
@@ -4246,6 +4425,60 @@ mod master_and_validate_tests {
             let err = cfg.validate().expect_err(&format!("{bad}")).to_string();
             assert!(err.contains("loss"), "{bad}: {err}");
         }
+    }
+
+    /// What the apply would fail on, or never converge on, is refused by
+    /// `validate()` before anything changes (#518).
+    #[test]
+    fn validate_catches_what_the_apply_would_fail_on() {
+        let refused = |cfg: NetworkConfig, what: &str| {
+            let err = cfg.validate().expect_err(what).to_string();
+            assert!(err.contains(what), "{what}: {err}");
+        };
+        refused(
+            NetworkConfig::new().link("d0", |l| l.dummy().miimon(100)),
+            "bond parameter",
+        );
+        refused(
+            NetworkConfig::new().link("vx0", |l| l.vxlan(1 << 24)),
+            "24 bits",
+        );
+        refused(
+            NetworkConfig::new()
+                .route("10.0.0.1/24", |r| r.dev("d0"))
+                .unwrap(),
+            "host bits",
+        );
+        refused(
+            NetworkConfig::new()
+                .route("10.0.0.0/24", |r| r.dev("d0").table(0))
+                .unwrap(),
+            "table 0",
+        );
+        refused(
+            NetworkConfig::new()
+                .link("a", |l| l.bridge().master("b"))
+                .link("b", |l| l.bridge().master("a")),
+            "cycle",
+        );
+        refused(
+            NetworkConfig::new().link("o0", |l| l.ovpn().address([2, 0, 0, 0, 0, 1])),
+            "hardware address",
+        );
+        refused(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().down())
+                .link("d0.10", |l| l.vlan("d0", 10).up()),
+            "declared down",
+        );
+
+        // IPv6 masks host bits itself, and a VNI just under 2^24 fits.
+        NetworkConfig::new()
+            .route("2001:db8::1/64", |r| r.dev("d0"))
+            .unwrap()
+            .link("vx0", |l| l.vxlan((1 << 24) - 1))
+            .validate()
+            .unwrap();
     }
 
     /// A JSON document can carry an sfq period the kernel's int cannot

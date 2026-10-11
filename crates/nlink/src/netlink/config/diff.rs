@@ -166,7 +166,9 @@ pub struct ConfigDiff {
     /// apply creates as its peer. A typo, or a device not there yet. The
     /// apply fails on the first, before it changes anything, with
     /// [`Error::InterfaceNotFound`](crate::Error::InterfaceNotFound). They
-    /// were skipped without a word (#475).
+    /// were skipped without a word (#475). So is a parent (VLAN, macvlan,
+    /// VXLAN underlay) or master a declared link names that the config
+    /// does not declare and that does not exist (#518).
     pub links_missing: Vec<String>,
 
     /// Addresses to add.
@@ -577,7 +579,6 @@ pub async fn compute_diff_with_options(
     opts: &DiffOptions,
 ) -> Result<ConfigDiff> {
     config.validate()?;
-    check_vlan_states(config)?;
     let mut diff = ConfigDiff::default();
 
     // Fetch current state
@@ -839,6 +840,24 @@ fn diff_links<'a>(
         }
     }
 
+    // A parent or master a declared link names, which the config does not
+    // declare and which does not exist: the apply created the links before
+    // the one that needed it and then failed (#518).
+    for declared in &config.links {
+        for name in declared_lower(declared)
+            .into_iter()
+            .chain(declared.master.name())
+        {
+            if !current.contains_key(name)
+                && !created_peers.contains(name)
+                && !config.links.iter().any(|l| l.name == name)
+                && !diff.links_missing.iter().any(|m| m == name)
+            {
+                diff.links_missing.push(name.to_string());
+            }
+        }
+    }
+
     // A bridge's MTU follows its ports: `br_add_if()` / `br_del_if()` call
     // `br_mtu_auto_adjust()`, which sets the bridge to its smallest port's
     // MTU unless `BROPT_MTU_SET_BY_USER` is set — and only `br_change_mtu()`
@@ -1064,37 +1083,6 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
                 .collect()
         },
     );
-}
-
-/// Refuse a VLAN declared up on a lower device declared down (#437). The
-/// kernel cannot hold that state: `vlan_dev_open()` refuses to open a VLAN
-/// whose lower device is down (ENETDOWN), and `vlan_device_event()` closes
-/// every VLAN on a device that goes down — so the first apply ended with the
-/// VLAN down and the second failed. (Only a VLAN with loose binding follows
-/// neither rule, and `NetworkConfig` does not declare one.)
-fn check_vlan_states(config: &NetworkConfig) -> Result<()> {
-    for declared in &config.links {
-        let DeclaredLinkType::Vlan { parent, .. } = &declared.link_type else {
-            continue;
-        };
-        if declared.state != LinkState::Up {
-            continue;
-        }
-        let lower_down = config
-            .links
-            .iter()
-            .any(|l| l.name == *parent && l.state == LinkState::Down);
-        if lower_down {
-            return Err(crate::Error::InvalidMessage(format!(
-                "link {}: a VLAN declared up on {parent}, which is declared down, cannot \
-                 be up — the kernel refuses to open a VLAN whose lower device is down \
-                 (ENETDOWN) and closes it when the lower device goes down; declare one \
-                 of them differently",
-                declared.name
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn compute_link_changes(

@@ -322,6 +322,31 @@ async fn a_declared_link_that_does_not_exist_is_reported() -> nlink::Result<()> 
     Ok(())
 }
 
+/// A parent or master a declared link names, which the config does not
+/// declare and which does not exist, is reported with the missing links.
+/// The apply used to create what came before it and then fail (#518).
+#[tokio::test]
+async fn a_missing_parent_or_master_is_reported() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "bridge");
+
+    let ns = TestNamespace::new("nce-missing-ref")?;
+    let conn = ns.connection()?;
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .link("v9", |l| l.vlan("eth9", 9))
+        .link("d1", |l| l.dummy().master("br9"));
+    let diff = cfg.diff(&conn).await?;
+    assert_eq!(diff.links_missing, ["eth9", "br9"], "{diff}");
+    let err = cfg.apply(&conn).await.expect_err("the apply is refused");
+    assert!(err.is_not_found(), "{err}");
+    assert!(
+        conn.get_link_by_name("d0").await?.is_none(),
+        "the apply went ahead"
+    );
+    Ok(())
+}
+
 /// A VLAN declared down stays down when the apply brings its lower device
 /// up. `vlan_device_event()` brings up every VLAN on a device that comes up,
 /// so it ended the apply up and converged only on the next one (#436).
