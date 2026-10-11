@@ -68,8 +68,8 @@ pub struct ApplyOptions {
     pub continue_on_error: bool,
     /// Remove kernel resources not declared in the config (full
     /// reconcile). Scoped conservatively — see [`DiffOptions::purge`].
-    /// Addresses: global scope, on interfaces the config declares an
-    /// address on. Routes: `static`/`boot` protocol, in the tables
+    /// Addresses: global scope and permanent, on the interfaces the
+    /// config declares and [`Self::purge_address_devs`]. Routes: `static`/`boot` protocol, in the tables
     /// the config owns (main, every table a declared route names, and
     /// [`Self::purge_tables`]). Kernel-managed resources (link-local,
     /// loopback, RA/DHCP routes, links, qdiscs) are never touched.
@@ -78,6 +78,9 @@ pub struct ApplyOptions {
     /// Extra route tables to purge from — see
     /// [`DiffOptions::purge_tables`]. Ignored unless `purge` is on.
     pub purge_tables: Vec<u32>,
+    /// Extra interfaces to purge addresses from — see
+    /// [`DiffOptions::purge_address_devs`]. Ignored unless `purge` is on.
+    pub purge_address_devs: Vec<String>,
 }
 
 impl ApplyOptions {
@@ -113,6 +116,17 @@ impl ApplyOptions {
     /// [`DiffOptions::purge_tables`].
     pub fn with_purge_tables(mut self, tables: impl IntoIterator<Item = u32>) -> Self {
         self.purge_tables.extend(tables);
+        self
+    }
+
+    /// Add interfaces to the address purge scope. See
+    /// [`DiffOptions::purge_address_devs`].
+    pub fn with_purge_address_devs<S: Into<String>>(
+        mut self,
+        devs: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.purge_address_devs
+            .extend(devs.into_iter().map(Into::into));
         self
     }
 }
@@ -185,7 +199,8 @@ pub async fn apply_config(
 ) -> Result<ApplyResult> {
     let diff_opts = DiffOptions::default()
         .purge(options.purge)
-        .purge_tables(options.purge_tables.iter().copied());
+        .purge_tables(options.purge_tables.iter().copied())
+        .purge_address_devs(options.purge_address_devs.iter().cloned());
     let diff = compute_diff_with_options(config, conn, &diff_opts).await?;
     apply_diff(&diff, conn, options).await
 }

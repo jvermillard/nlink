@@ -1608,6 +1608,90 @@ async fn purge_tolerates_an_address_the_link_change_flushed() -> nlink::Result<(
     assert_converges("nce-addr-purge", cases).await
 }
 
+/// The global addresses on `dev`, as `addr/prefix`, read with `ip`.
+fn global_addrs(ns: &TestNamespace, dev: &str) -> Result<Vec<String>, String> {
+    let addrs = ip_json(ns, &["addr", "show", "dev", dev, "scope", "global"])?;
+    Ok(addrs[0]["addr_info"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        // `ip -j` closes the list with an object that has no address.
+        .filter_map(|a| {
+            Some(format!(
+                "{}/{}",
+                a["local"].as_str()?,
+                a["prefixlen"].as_u64().unwrap_or(0)
+            ))
+        })
+        .collect())
+}
+
+/// A purge reaches a declared link whose last declared address left the
+/// config. It used to manage only the links that still had one, so the
+/// old address stayed (#470).
+#[tokio::test]
+async fn purge_removes_a_links_last_address() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let cases = vec![
+        case(
+            "last-address-dropped",
+            vec![
+                dummy_up("d0")
+                    .address("d0", "10.70.0.1/24")?
+                    .address("d0", "fd00:70::1/64")?,
+                dummy_up("d0"),
+            ],
+        )
+        .purging()
+        .check(|ns| match global_addrs(ns, "d0")? {
+            held if held.is_empty() => Ok(()),
+            held => Err(format!("d0 kept {held:?}")),
+        }),
+    ];
+    assert_converges("nce-addr-last", cases).await
+}
+
+/// A purge leaves alone an address the kernel will expire — SLAAC, a
+/// privacy address, a DHCP lease — since the next RA or renewal puts it
+/// back. It removed them, so the diff never converged where an RA source
+/// or DHCP client ran (#470). An undeclared permanent address still goes.
+#[tokio::test]
+async fn purge_keeps_addresses_with_a_lifetime() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("nce-addr-dyn")?;
+    let cfg = dummy_up("d0").address("d0", "10.71.0.1/24")?;
+    assert_transition(&ns, std::slice::from_ref(&cfg), true, async |_, _| Ok(())).await?;
+    let lifetime = ["valid_lft", "300", "preferred_lft", "300"];
+    ns.exec("ip", &["addr", "add", "10.71.0.8/24", "dev", "d0"])?;
+    ns.exec(
+        "ip",
+        &[&["addr", "add", "10.71.0.9/24", "dev", "d0"][..], &lifetime].concat(),
+    )?;
+    ns.exec(
+        "ip",
+        &[
+            &["-6", "addr", "add", "fd00:71::9/64", "dev", "d0", "nodad"][..],
+            &lifetime,
+        ]
+        .concat(),
+    )?;
+    assert_transition(&ns, &[cfg], true, async |_, _| {
+        let mut held = global_addrs(&ns, "d0")?;
+        held.sort();
+        let want = ["10.71.0.1/24", "10.71.0.9/24", "fd00:71::9/64"];
+        if held != want {
+            return Err(format!("want {want:?} on d0, it has {held:?}"));
+        }
+        Ok(())
+    })
+    .await
+}
+
 // ============================================================================
 // Routes
 // ============================================================================
