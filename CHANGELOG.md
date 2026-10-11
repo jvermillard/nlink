@@ -1155,6 +1155,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Every link builder can set master, up, alias and namespace as it
+  creates the link (#517).** `LinkCreateExt` (implemented for every
+  `LinkConfig`) adds `.master()`, `.up()`, `.alias()` and
+  `.netns(impl AsFd)`. `add_link` sends `IFLA_MASTER`, `IFF_UP` and
+  `IFLA_NET_NS_FD` in the one request, so there are no follow-up
+  `set_link_master`/`set_link_up` round trips. A link created in another
+  namespace is never in the host's one first, and its master is looked up
+  where it lands.
+  - The alias is set right after the create, in the link's namespace,
+    because the kernel ignores `IFLA_IFALIAS` on a create.
+  - A veth peer cannot be created up: the kernel configures it before the
+    pair is linked (`ENOTCONN`).
+
 - **Waiting for a link, and for IPv6 duplicate address detection (#524).**
   - `Connection::wait_link(iface, LinkCond, timeout)` waits for
     `AdminUp`, `Running`, `OperUp` or `Carrier` and returns the link.

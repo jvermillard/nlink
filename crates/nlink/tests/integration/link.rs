@@ -922,3 +922,84 @@ async fn a_duplicate_ipv6_address_fails_the_wait() -> Result<()> {
     }
     Ok(())
 }
+
+// ============================================================================
+// #517 — master, up, alias and namespace at creation
+// ============================================================================
+
+/// A link takes its master, its up state and an alias in the one
+/// `add_link`. The alias is read back through `ip`, and is set after the
+/// create because the kernel ignores `IFLA_IFALIAS` on one.
+#[tokio::test]
+async fn a_link_is_created_enslaved_up_and_tagged() -> Result<()> {
+    use nlink::netlink::link::LinkCreateExt;
+    require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    let ns = TestNamespace::new("create-opts")?;
+    let conn = ns.connection()?;
+    conn.add_link(BridgeLink::new("br0")).await?;
+    conn.add_link(
+        DummyLink::new("d0")
+            .mtu(1400)
+            .master("br0")
+            .up()
+            .alias("lab:d0"),
+    )
+    .await?;
+
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0 exists");
+    let br0 = conn.get_link_by_name("br0").await?.expect("br0 exists");
+    assert!(d0.is_up());
+    assert_eq!(d0.master(), Some(br0.ifindex()));
+    assert_eq!(d0.mtu(), Some(1400));
+    assert_eq!(d0.alias(), Some("lab:d0"));
+    let shown = ns.exec("ip", &["-j", "-d", "link", "show", "dev", "d0"])?;
+    assert!(shown.contains(r#""ifalias":"lab:d0""#), "{shown}");
+
+    conn.set_link_alias("d0", "").await?;
+    assert_eq!(
+        conn.get_link_by_name("d0").await?.expect("d0").alias(),
+        None
+    );
+    Ok(())
+}
+
+/// A link created in another namespace goes straight there — with no
+/// window in the creating one — and finds its master there.
+#[tokio::test]
+async fn a_link_is_created_in_another_namespace() -> Result<()> {
+    use nlink::netlink::link::LinkCreateExt;
+    require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    let here = TestNamespace::new("create-here")?;
+    let there = TestNamespace::new("create-there")?;
+    let there_conn = there.connection()?;
+    there_conn.add_link(BridgeLink::new("brt")).await?;
+
+    let fd = std::fs::File::open(format!("/var/run/netns/{}", there.name()))?;
+    let conn = here.connection()?;
+    conn.add_link(
+        DummyLink::new("dt")
+            .netns(&fd)
+            .master("brt")
+            .up()
+            .alias("moved"),
+    )
+    .await?;
+
+    assert!(
+        conn.get_link_by_name("dt").await?.is_none(),
+        "dt stayed here"
+    );
+    let dt = there_conn
+        .get_link_by_name("dt")
+        .await?
+        .expect("dt is there");
+    let brt = there_conn.get_link_by_name("brt").await?.expect("brt");
+    assert!(dt.is_up());
+    assert_eq!(dt.master(), Some(brt.ifindex()));
+    assert_eq!(dt.alias(), Some("moved"));
+    Ok(())
+}
