@@ -1189,6 +1189,15 @@ All notable changes to this project will be documented in this file.
   from the builder and a `validate()` error from JSON, where it used to
   saturate silently.
 
+- **Changing a live WireGuard peer's keepalive to under a second still
+  sent 0 (#602).** #529 rounded a sub-second `persistent_keepalive` up to
+  1 s on the path that adds a peer. The path that updates one still
+  truncated, so a change to 500 ms turned keepalive off. The diff
+  compared against the rounded value, so it was never empty again. The
+  update now rounds the same way. So does the JSON diff, which printed
+  0. A root transition test changes a peer from 25 s to 500 ms and reads
+  1 back with `wg`.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it
