@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`NetworkConfig::validate()` refuses what the apply would fail on
+  (#518).** It runs before every diff and apply, so these are refused
+  before anything changes. Before, each failed mid-apply, after earlier
+  links were created, or never converged:
+  - a kind setter called on another kind, which did nothing, such as
+    `.miimon()` on a dummy. `LinkBuilder` now records it, as
+    `QdiscBuilder` does since #476;
+  - a VNI past 24 bits;
+  - an IPv4 route with host bits set (`10.0.0.1/24`), which the kernel
+    refuses with `EINVAL`. IPv6 masks them, as before;
+  - route table 0, which the kernel reads as main while the diff
+    compared it as 0 forever;
+  - a cycle of masters;
+  - a VLAN declared up on a lower device declared down, and a MAC
+    address on an ovpn or L3 netkit link. Both checks used to run later,
+    in the diff and the apply.
+
+  The diff also reports a parent (VLAN, macvlan, VXLAN underlay) or master
+  that a declared link names, when the config does not declare it and it
+  does not exist, in `links_missing`. So the apply refuses before creating
+  anything.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
