@@ -72,7 +72,7 @@ use super::{
     tc_recipe_internals::{
         DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_classid,
         flower_matches, fq_codel_target_matches, htb_class_matches, htb_class_rates_match,
-        root_conflict,
+        recipe_owns_root, root_conflict,
     },
 };
 
@@ -620,8 +620,10 @@ impl RateLimiter {
                     .get_filters_by_parent_index(ifindex, hook)
                     .await?
                     .is_empty();
+                // `del_ingress`: the kernel itself refuses if a clsact
+                // took the slot since the dump (#515).
                 if hook == TcHandle::INGRESS && empty {
-                    gone_is_ok(conn.del_qdisc_by_index(ifindex, TcHandle::INGRESS).await)?;
+                    gone_is_ok(conn.del_ingress_by_index(ifindex).await)?;
                 }
             }
         }
@@ -935,7 +937,7 @@ async fn add_ifb_redirect(
     use super::filter::MatchallFilter;
 
     let filter = MatchallFilter::new()
-        .actions(ActionList::new().with(MirredAction::redirect_by_index(ifb_ifindex)));
+        .actions(ActionList::new().with(MirredAction::redirect_to_egress(ifb_ifindex)));
     conn.add_filter_by_index_full(
         ifindex,
         hook,
@@ -1284,10 +1286,24 @@ impl PerHostLimiter {
         Ok(())
     }
 
-    /// Remove the per-host rate limits.
+    /// Remove the per-host rate limits: the device's root qdisc, if it is
+    /// a tree a `PerHostLimiter` built — the HTB `1:` with its default
+    /// class and fq_codel leaves (#515). Another root, a user's or a
+    /// `PerPeerImpairer`'s, is left alone; this deleted whatever root the
+    /// device had, and swallowed every error. An error other than "already
+    /// gone" is returned now.
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
-        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
+        let Some(link) = conn.get_link_by_name(&self.dev).await? else {
+            return Ok(());
+        };
+        let tree = dump_live_tree(conn, link.ifindex()).await?;
+        if recipe_owns_root(&tree, DEFAULT_CLASS_MINOR, "fq_codel") {
+            gone_is_ok(
+                conn.del_qdisc_by_index(link.ifindex(), TcHandle::ROOT)
+                    .await,
+            )?;
+        }
         Ok(())
     }
 

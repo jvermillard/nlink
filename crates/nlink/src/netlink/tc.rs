@@ -76,7 +76,7 @@ impl<T: QdiscConfig + ?Sized> QdiscConfig for Box<T> {
     fn has_options(&self) -> bool {
         (**self).has_options()
     }
-    fn default_handle(&self) -> Option<u32> {
+    fn default_handle(&self) -> Option<TcHandle> {
         (**self).default_handle()
     }
     fn in_place(&self, live: &TcMessage) -> InPlace {
@@ -100,7 +100,7 @@ impl<T: QdiscConfig + ?Sized> QdiscConfig for &T {
     fn has_options(&self) -> bool {
         (**self).has_options()
     }
-    fn default_handle(&self) -> Option<u32> {
+    fn default_handle(&self) -> Option<TcHandle> {
         (**self).default_handle()
     }
     fn in_place(&self, live: &TcMessage) -> InPlace {
@@ -125,6 +125,15 @@ pub enum InPlace {
     /// the same request, so the slot is never bare: the kind has no change
     /// operation, or a parameter only creation honours differs.
     Recreate,
+}
+
+/// The handle a classful qdisc gets at the root when none is given:
+/// `1:` (#515).
+pub const CLASSFUL_ROOT_HANDLE: TcHandle = TcHandle::major_only(1);
+
+/// `config`'s default handle, when it goes at the root.
+fn root_default_handle(parent: TcHandle, config: &impl QdiscConfig) -> Option<TcHandle> {
+    parent.is_root().then(|| config.default_handle()).flatten()
 }
 
 /// Trait for qdisc configurations that can be applied.
@@ -156,8 +165,16 @@ pub trait QdiscConfig: Send + Sync {
         true
     }
 
-    /// Get the default handle for this qdisc type, if any.
-    fn default_handle(&self) -> Option<u32> {
+    /// The handle a qdisc of this kind gets at the root when none is
+    /// given (#515): `1:` for a classful kind, so its classes and filters
+    /// can name it, where the kernel — and tc(8) — would pick `8001:`.
+    /// `None`, the default, leaves the choice to the kernel.
+    ///
+    /// Only an add or replace at the root with no handle uses it; a
+    /// replace that changes or recreates a live qdisc keeps that qdisc's
+    /// handle. This was declared, returned `None` for every kind, and was
+    /// read by nothing that mattered, before 0.32.
+    fn default_handle(&self) -> Option<TcHandle> {
         None
     }
 
@@ -1327,8 +1344,8 @@ impl FqCodelConfig {
     }
 
     /// Set the memory limit in bytes.
-    pub fn memory_limit(mut self, bytes: u32) -> Self {
-        self.memory_limit = Some(bytes);
+    pub fn memory_limit(mut self, bytes: crate::util::Bytes) -> Self {
+        self.memory_limit = Some(bytes.as_u32_saturating());
         self
     }
 
@@ -1974,6 +1991,11 @@ impl QdiscConfig for MqConfig {
         "mq"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
         // mq has no options; the kernel materializes one child class
         // per hardware TX queue automatically.
@@ -2137,6 +2159,11 @@ impl EtsConfig {
 impl QdiscConfig for EtsConfig {
     fn kind(&self) -> &'static str {
         "ets"
+    }
+
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2629,6 +2656,11 @@ impl QdiscConfig for HtbQdiscConfig {
         "htb"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     /// `sch_htb` has no change operation: "Change operation not supported
     /// by specified qdisc".
     fn in_place(&self, _live: &TcMessage) -> InPlace {
@@ -2787,6 +2819,11 @@ impl PrioConfig {
 impl QdiscConfig for PrioConfig {
     fn kind(&self) -> &'static str {
         "prio"
+    }
+
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3005,12 +3042,13 @@ impl QdiscConfig for SfqConfig {
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::Bytes;
 /// use nlink::netlink::tc::RedConfig;
 ///
 /// let config = RedConfig::new()
-///     .limit(100 * 1024)    // 100KB limit
-///     .min(30 * 1024)       // 30KB min threshold
-///     .max(90 * 1024)       // 90KB max threshold
+///     .limit(Bytes::kib(100))
+///     .min(Bytes::kib(30))
+///     .max(Bytes::kib(90))
 ///     .ecn(true)            // Enable ECN marking
 ///     .build();
 ///
@@ -3057,20 +3095,20 @@ impl RedConfig {
     }
 
     /// Set the queue limit in bytes.
-    pub fn limit(mut self, bytes: u32) -> Self {
-        self.limit = bytes;
+    pub fn limit(mut self, bytes: crate::util::Bytes) -> Self {
+        self.limit = bytes.as_u32_saturating();
         self
     }
 
     /// Set the minimum threshold in bytes.
-    pub fn min(mut self, bytes: u32) -> Self {
-        self.min = bytes;
+    pub fn min(mut self, bytes: crate::util::Bytes) -> Self {
+        self.min = bytes.as_u32_saturating();
         self
     }
 
     /// Set the maximum threshold in bytes.
-    pub fn max(mut self, bytes: u32) -> Self {
-        self.max = bytes;
+    pub fn max(mut self, bytes: crate::util::Bytes) -> Self {
+        self.max = bytes.as_u32_saturating();
         self
     }
 
@@ -3305,21 +3343,22 @@ impl ChokeConfig {
         }
     }
 
-    /// Set the queue limit in bytes.
-    pub fn limit(mut self, bytes: u32) -> Self {
-        self.limit = bytes;
+    /// Set the queue limit in **packets**: `sch_choke` counts packets, as
+    /// tc-choke(8) says; this said bytes before 0.32 (#515).
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = packets;
         self
     }
 
-    /// Set the minimum threshold in bytes.
-    pub fn min(mut self, bytes: u32) -> Self {
-        self.min = bytes;
+    /// Set the minimum threshold in **packets**.
+    pub fn min(mut self, packets: u32) -> Self {
+        self.min = packets;
         self
     }
 
-    /// Set the maximum threshold in bytes.
-    pub fn max(mut self, bytes: u32) -> Self {
-        self.max = bytes;
+    /// Set the maximum threshold in **packets**.
+    pub fn max(mut self, packets: u32) -> Self {
+        self.max = packets;
         self
     }
 
@@ -3606,6 +3645,11 @@ impl QdiscConfig for AtmConfig {
         "atm"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
         // The atm qdisc accepts no TCA_OPTIONS; classes carry the VC
         // binding. Send no options.
@@ -3695,8 +3739,8 @@ impl GredConfig {
     }
 
     /// Set the global queue limit in bytes.
-    pub fn limit(mut self, bytes: u32) -> Self {
-        self.limit = Some(bytes);
+    pub fn limit(mut self, bytes: crate::util::Bytes) -> Self {
+        self.limit = Some(bytes.as_u32_saturating());
         self
     }
 
@@ -4687,10 +4731,11 @@ impl QdiscConfig for PfifoConfig {
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::Bytes;
 /// use nlink::netlink::tc::BfifoConfig;
 ///
 /// let config = BfifoConfig::new()
-///     .limit(100 * 1024)  // 100KB
+///     .limit(Bytes::kib(100))
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
@@ -4718,8 +4763,8 @@ impl BfifoConfig {
     }
 
     /// Set the queue limit in bytes.
-    pub fn limit(mut self, bytes: u32) -> Self {
-        self.limit = bytes;
+    pub fn limit(mut self, bytes: crate::util::Bytes) -> Self {
+        self.limit = bytes.as_u32_saturating();
         self
     }
 
@@ -5289,6 +5334,11 @@ impl QdiscConfig for MultiqConfig {
         "multiq"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::multiq::TcMultiqQopt;
 
@@ -5630,6 +5680,11 @@ impl QdiscConfig for DsmarkConfig {
         "dsmark"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::dsmark::*;
 
@@ -5720,6 +5775,11 @@ impl QdiscConfig for DrrConfig {
         "drr"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
         // DRR qdisc has no options, only classes have options
         Ok(())
@@ -5788,6 +5848,11 @@ impl QfqConfig {
 impl QdiscConfig for QfqConfig {
     fn kind(&self) -> &'static str {
         "qfq"
+    }
+
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
     }
 
     fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
@@ -6458,9 +6523,9 @@ impl QdiscConfig for CakeConfig {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PlugConfig;
 ///
-/// // Create plug qdisc with 10000 byte limit
+/// // Create plug qdisc with a 10000-byte limit
 /// let config = PlugConfig::new()
-///     .limit(10000)
+///     .limit(nlink::Bytes::new(10000))
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
@@ -6509,8 +6574,8 @@ impl PlugConfig {
     }
 
     /// Set the queue limit in bytes.
-    pub fn limit(mut self, bytes: u32) -> Self {
-        self.limit = Some(bytes);
+    pub fn limit(mut self, bytes: crate::util::Bytes) -> Self {
+        self.limit = Some(bytes.as_u32_saturating());
         self
     }
 
@@ -6783,6 +6848,11 @@ impl MqprioConfig {
 impl QdiscConfig for MqprioConfig {
     fn kind(&self) -> &'static str {
         "mqprio"
+    }
+
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -7189,6 +7259,11 @@ impl QdiscConfig for TaprioConfig {
         "taprio"
     }
 
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::{mqprio::TcMqprioQopt, taprio::*};
 
@@ -7361,6 +7436,11 @@ impl HfscConfig {
 impl QdiscConfig for HfscConfig {
     fn kind(&self) -> &'static str {
         "hfsc"
+    }
+
+    /// Classful: `1:` at the root unless a handle is given.
+    fn default_handle(&self) -> Option<TcHandle> {
+        Some(CLASSFUL_ROOT_HANDLE)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -8583,6 +8663,7 @@ impl Connection<Route> {
         // handle, the kernel grafts the new qdisc in its place, for `tc`
         // and for this. `replace_qdisc` is the verb for "whatever is there".
         let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        let handle = handle.or_else(|| root_default_handle(parent, &config));
         self.send_qdisc(
             ifindex,
             parent,
@@ -8595,7 +8676,12 @@ impl Connection<Route> {
         .map_err(|e| e.with_context("add_qdisc"))
     }
 
-    /// Delete a qdisc from an interface.
+    /// Delete a qdisc from an interface: whatever is at `parent`.
+    ///
+    /// At `TcHandle::INGRESS` that is the ingress *or* the clsact qdisc —
+    /// the two share the slot, and the constants are one value. Use
+    /// [`del_ingress`](Self::del_ingress) or [`del_clsact`](Self::del_clsact)
+    /// to delete only the one you mean.
     ///
     /// # Example
     ///
@@ -8662,27 +8748,93 @@ impl Connection<Route> {
         parent: TcHandle,
         handle: Option<TcHandle>,
     ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        self.del_qdisc_inner(ifindex, parent, handle, None).await
+    }
 
+    /// Delete the `ingress` qdisc, and nothing else (#515).
+    ///
+    /// The ingress and clsact qdiscs share one slot, and
+    /// `TcHandle::INGRESS` and `TcHandle::CLSACT` are the same value, so
+    /// [`del_qdisc`](Self::del_qdisc) at it deletes whichever is there — a
+    /// clsact, with every BPF program on it, when the caller meant an
+    /// ingress. This names the kind, and the kernel refuses (`EINVAL`,
+    /// "Invalid qdisc name") when the slot holds a clsact.
+    pub async fn del_ingress(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        self.del_ingress_by_index(ifindex).await
+    }
+
+    /// [`del_ingress`](Self::del_ingress) by interface index.
+    pub async fn del_ingress_by_index(&self, ifindex: u32) -> Result<()> {
+        self.del_qdisc_inner(ifindex, TcHandle::INGRESS, None, Some("ingress"))
+            .await
+    }
+
+    /// Delete the `clsact` qdisc, and nothing else; the kernel refuses
+    /// when the slot holds an `ingress`. See [`del_ingress`](Self::del_ingress).
+    pub async fn del_clsact(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        self.del_clsact_by_index(ifindex).await
+    }
+
+    /// [`del_clsact`](Self::del_clsact) by interface index.
+    pub async fn del_clsact_by_index(&self, ifindex: u32) -> Result<()> {
+        self.del_qdisc_inner(ifindex, TcHandle::CLSACT, None, Some("clsact"))
+            .await
+    }
+
+    /// One `RTM_DELQDISC`; with `kind`, the kernel deletes only a qdisc of
+    /// that kind (`tc_get_qdisc` compares `TCA_KIND`).
+    async fn del_qdisc_inner(
+        &self,
+        ifindex: u32,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
+        kind: Option<&str>,
+    ) -> Result<()> {
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(qdisc_handle);
+            .with_parent(parent.as_raw())
+            .with_handle(handle.map_or(0, |h| h.as_raw()));
 
         let mut builder = ack_request(NlMsgType::RTM_DELQDISC);
         builder.append(&tcmsg);
+        if let Some(kind) = kind {
+            builder.append_attr_str(TcaAttr::Kind as u16, kind);
+        }
 
-        self.send_ack(builder).await.map_err(|e| {
-            if e.is_not_found() {
-                Error::QdiscNotFound {
-                    kind: handle.unwrap_or(parent).to_string(),
-                    interface: format!("ifindex {ifindex}"),
-                }
-            } else {
-                e.with_context(format!("del_qdisc(ifindex {ifindex}, parent={})", parent))
-            }
-        })
+        let not_found = || Error::QdiscNotFound {
+            kind: kind.map_or_else(|| handle.unwrap_or(parent).to_string(), str::to_string),
+            interface: format!("ifindex {ifindex}"),
+        };
+        let Err(e) = self.send_ack(builder).await else {
+            return Ok(());
+        };
+        if e.is_not_found() {
+            return Err(not_found());
+        }
+        // A kind that does not match is "Invalid qdisc name", and so is an
+        // empty slot, which holds the kernel's placeholder; look to say
+        // which.
+        if let Some(kind) = kind
+            && e.is_invalid_argument()
+        {
+            let live = self.get_qdiscs_by_index(ifindex).await?;
+            let there = live
+                .iter()
+                .find(|q| q.parent() == parent && q.handle().as_raw() != 0);
+            return Err(match there.and_then(|q| q.kind()) {
+                None => not_found(),
+                Some(other) => Error::InvalidMessage(format!(
+                    "del_qdisc(ifindex {ifindex}, parent={parent}): the qdisc there is \
+                     `{other}`, not `{kind}`; left in place"
+                )),
+            });
+        }
+        let kind = kind.map_or_else(String::new, |k| format!(", kind={k}"));
+        Err(e.with_context(format!(
+            "del_qdisc(ifindex {ifindex}, parent={parent}{kind})"
+        )))
     }
 
     /// Replace a qdisc (add or update) — whatever is in the root slot.
@@ -8783,15 +8935,18 @@ impl Connection<Route> {
             .find(|q| q.parent() == parent && q.handle().as_raw() != 0);
         let replace = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
         let raw = |h: Option<TcHandle>| h.map_or(0, |h| h.as_raw());
+        // A new qdisc in the slot takes the kind's default handle at the
+        // root (#515); a live one changed or recreated keeps its own.
+        let new_handle = handle.or_else(|| root_default_handle(parent, &config));
 
         let Some(live) = live else {
             return self
-                .send_qdisc(ifindex, parent, raw(handle), replace, &config, false)
+                .send_qdisc(ifindex, parent, raw(new_handle), replace, &config, false)
                 .await
                 .map_err(|e| e.with_context("replace_qdisc"));
         };
         let same_kind = live.kind() == Some(config.kind());
-        let at_live_handle = handle.is_some_and(|h| h == live.handle());
+        let at_live_handle = new_handle.is_some_and(|h| h == live.handle());
 
         if same_kind && config.in_place(&live) == InPlace::Change {
             // `qdisc_change`, encoded for a change.
@@ -8804,7 +8959,7 @@ impl Connection<Route> {
             // A different kind under its own handle: the kernel creates it
             // and grafts it over the live one.
             return self
-                .send_qdisc(ifindex, parent, raw(handle), replace, &config, false)
+                .send_qdisc(ifindex, parent, raw(new_handle), replace, &config, false)
                 .await
                 .map_err(|e| e.with_context("replace_qdisc"));
         }
@@ -8849,7 +9004,11 @@ impl Connection<Route> {
             .ok_or_else(|| {
                 Error::not_supported("replace_qdisc: no free qdisc handle to graft through")
             })?;
-        let fin = handle.unwrap_or(live.handle());
+        let fin = if same_kind {
+            handle.unwrap_or(live.handle())
+        } else {
+            new_handle.unwrap_or(live.handle())
+        };
         for step in [temporary, fin] {
             self.send_qdisc(ifindex, parent, step.as_raw(), replace, &config, false)
                 .await
@@ -9054,12 +9213,12 @@ impl Connection<Route> {
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
-        bytes: u32,
+        bytes: crate::util::Bytes,
     ) -> Result<()> {
         use super::types::tc::qdisc::plug::TCQ_PLUG_LIMIT;
 
-        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_LIMIT, bytes))
-            .await
+        let limit = PlugAction(TCQ_PLUG_LIMIT, bytes.as_u32_saturating());
+        self.change_qdisc(dev, parent, limit).await
     }
 
     /// Apply a netem configuration to an interface.
@@ -9943,7 +10102,9 @@ mod tests {
 
     #[test]
     fn test_plug_builder() {
-        let config = PlugConfig::new().limit(10000).build();
+        let config = PlugConfig::new()
+            .limit(crate::util::Bytes::new(10000))
+            .build();
 
         assert_eq!(config.limit, Some(10000));
         assert_eq!(config.kind(), "plug");
@@ -9964,7 +10125,9 @@ mod tests {
         bare.write_options(&mut b).unwrap();
         assert_eq!(b.len(), header, "nothing to write without a limit");
 
-        let limited = PlugConfig::new().limit(65536).build();
+        let limited = PlugConfig::new()
+            .limit(crate::util::Bytes::new(65536))
+            .build();
         assert!(limited.has_options());
         let mut b = MessageBuilder::new(0, 0);
         limited.write_options(&mut b).unwrap();

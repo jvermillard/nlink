@@ -245,7 +245,7 @@ conn.add_filter(
     "eth0", TcHandle::INGRESS,
     MatchallFilter::new().actions(
         nlink::netlink::action::ActionList::new()
-            .with(MirredAction::redirect_by_index(ifb)),
+            .with(MirredAction::redirect_to_egress(ifb)),
     ).build(),
 ).await?;
 

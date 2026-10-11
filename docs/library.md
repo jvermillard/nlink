@@ -1023,8 +1023,8 @@ conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Filter with police action (rate limit)
 let police = PoliceAction::new()
-    .rate(1_000_000)    // bytes per second
-    .burst(10000)
+    .rate(nlink::Rate::mbit(8))
+    .burst(nlink::Bytes::new(10000))
     .exceed_drop()
     .build();
 
@@ -1040,7 +1040,7 @@ let filter = FlowerFilter::new()
     .ipv4()
     .ip_proto_tcp()
     .dst_port(443)
-    .actions(ActionList::new().with(MirredAction::mirror_by_index(eth1)))
+    .actions(ActionList::new().with(MirredAction::mirror_to_egress(eth1)))
     .build();
 conn.add_filter_full("eth0", TcHandle::INGRESS, None, 0x0800, 20, filter).await?;
 # Ok(())

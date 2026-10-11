@@ -84,7 +84,7 @@ use super::{
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
         DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_classid,
-        flower_matches, htb_class_rates_match, netem_matches, root_conflict,
+        flower_matches, htb_class_rates_match, netem_matches, recipe_owns_root, root_conflict,
     },
 };
 use crate::util::Rate;
@@ -400,12 +400,20 @@ impl PerPeerImpairer {
         Ok(())
     }
 
-    /// Remove the impairment by deleting the root qdisc.
+    /// Remove the impairment: the device's root qdisc, if it is a tree a
+    /// `PerPeerImpairer` built — the HTB `1:` with its default class and
+    /// netem leaves (#515). Another root, a user's or a
+    /// `PerHostLimiter`'s, is left alone; this deleted whatever root the
+    /// device had.
     ///
     /// Idempotent: a missing root qdisc is treated as success.
     #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target))]
     pub async fn clear(&self, conn: &Connection<Route>) -> Result<()> {
         let ifindex = conn.resolve_interface(&self.target).await?;
+        let tree = dump_live_tree(conn, ifindex).await?;
+        if !recipe_owns_root(&tree, DEFAULT_CLASS_MINOR, "netem") {
+            return Ok(());
+        }
         match conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await {
             Ok(()) => Ok(()),
             Err(e) if e.is_not_found() || matches!(&e, Error::QdiscNotFound { .. }) => Ok(()),

@@ -190,6 +190,24 @@ pub(crate) fn root_conflict(
     None
 }
 
+/// Whether the device's root is a tree a recipe built (#515): the HTB at
+/// `1:` with default class `default_minor`, whose leaf qdiscs under it are
+/// all `leaf_kind`. `PerHostLimiter` and `PerPeerImpairer` build the same
+/// root — HTB `1:`, default `0xffff` — and tell their trees apart by the
+/// leaves: fq_codel for the one, netem for the other. A recipe's
+/// `remove`/`clear` deletes the root only when this holds; it used to delete
+/// whatever root the device had.
+pub(crate) fn recipe_owns_root(tree: &LiveTree, default_minor: u16, leaf_kind: &str) -> bool {
+    let root = TcHandle::major_only(1);
+    tree.configured_root_qdisc()
+        .is_some_and(|q| root_conflict(q, tree, root, default_minor).is_none())
+        && tree
+            .leaf_qdiscs
+            .values()
+            .filter(|q| q.parent().major() == root.major() && q.handle_raw() != 0)
+            .all(|q| q.kind() == Some(leaf_kind))
+}
+
 /// Get parsed HTB class options for a live class message.
 pub(crate) fn htb_class_options(class: &TcMessage) -> Option<HtbClassOptions> {
     if class.kind()? != "htb" {
