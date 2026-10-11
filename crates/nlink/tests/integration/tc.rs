@@ -1140,6 +1140,90 @@ async fn fq_pie_ecn_prob_matches_tc() -> Result<()> {
     Ok(())
 }
 
+/// #635: cake sent its flags only when on and `cake_change` keeps a flag it
+/// is not sent, so a replace never turned `nat`, `wash`, `ingress` or
+/// autorate off, and `no-split-gso` never reached the kernel. And tc sends
+/// a twentieth of the RTT as the target, which nlink did not. A transition
+/// that turns everything off, then the same tokens through `tc` and through
+/// nlink on two devices.
+#[tokio::test]
+async fn cake_replace_turns_flags_off_and_matches_tc() -> Result<()> {
+    use nlink::netlink::{tc::CakeConfig, tc_options::CakeOptions};
+    require_root!();
+    nlink::require_modules!("sch_cake");
+
+    let (ns, conn) = setup_tc_ns("cake-635").await?;
+    conn.add_link(DummyLink::new("dummy1")).await?;
+    let cake = |dev: &'static str| {
+        let conn = &conn;
+        async move {
+            let root = conn.get_root_qdisc_by_name(dev).await?.expect("a root");
+            Result::Ok(match root.options() {
+                Some(QdiscOptions::Cake(o)) => o,
+                other => panic!("not cake: {other:?}"),
+            })
+        }
+    };
+    let flags = |o: &CakeOptions| (o.nat, o.wash, o.ingress, o.autorate, o.split_gso);
+
+    let on = [
+        "bandwidth",
+        "10mbit",
+        "nat",
+        "wash",
+        "ingress",
+        "autorate-ingress",
+    ];
+    conn.add_qdisc("dummy0", CakeConfig::parse_params(&on)?)
+        .await?;
+    assert_eq!(
+        flags(&cake("dummy0").await?),
+        (true, true, true, true, true)
+    );
+    let off = ["bandwidth", "10mbit", "no-split-gso"];
+    conn.replace_qdisc("dummy0", CakeConfig::parse_params(&off)?)
+        .await?;
+    let now = cake("dummy0").await?;
+    assert_eq!(flags(&now), (false, false, false, false, false), "{now:?}");
+
+    for tokens in [
+        &["rtt", "50ms"][..],
+        &[
+            "bandwidth",
+            "10mbit",
+            "diffserv4",
+            "dual-srchost",
+            "nat",
+            "wash",
+            "ack-filter",
+            "overhead",
+            "18",
+            "mpu",
+            "64",
+            "no-split-gso",
+        ],
+        &[],
+    ] {
+        conn.del_qdisc("dummy0", TcHandle::ROOT).await.ok();
+        ns.exec_ignore("tc", &["qdisc", "del", "dev", "dummy1", "root"]);
+        let mut args = vec!["qdisc", "add", "dev", "dummy1", "root", "cake"];
+        args.extend(tokens);
+        ns.exec("tc", &args)?;
+        conn.add_qdisc("dummy0", CakeConfig::parse_params(tokens)?)
+            .await?;
+        assert_eq!(
+            root_qdisc_line(&ns, "dummy0")?,
+            root_qdisc_line(&ns, "dummy1")?,
+            "{tokens:?}"
+        );
+        // tc does not print the target.
+        let (ours, theirs) = (cake("dummy0").await?, cake("dummy1").await?);
+        assert_eq!(ours.target_us, theirs.target_us, "{tokens:?}");
+        assert_eq!(ours.raw, theirs.raw, "{tokens:?}");
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Class Tests
 // ============================================================================

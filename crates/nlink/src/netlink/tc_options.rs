@@ -1907,11 +1907,9 @@ fn parse_cake_options(data: &[u8]) -> CakeOptions {
                     opts.nat = v != 0;
                 }
             }
-            TCA_CAKE_RAW => {
-                if let Some(v) = read_u32(payload) {
-                    opts.raw = v != 0;
-                }
-            }
+            // Raw mode is the attribute's presence: `cake_dump` puts it with
+            // the value 0 (#635).
+            TCA_CAKE_RAW => opts.raw = true,
             TCA_CAKE_WASH => {
                 if let Some(v) = read_u32(payload) {
                     opts.wash = v != 0;
@@ -2728,6 +2726,19 @@ mod tests {
         assert_eq!(opts.alpha, 2);
         assert_eq!(opts.beta, 20);
         assert!(opts.ecn);
+    }
+
+    /// #635: `cake_dump` signals raw mode by `TCA_CAKE_RAW`'s presence,
+    /// with the value 0.
+    #[test]
+    fn cake_raw_is_the_attributes_presence() {
+        use super::super::types::tc::qdisc::cake::TCA_CAKE_RAW;
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&8u16.to_ne_bytes());
+        blob.extend_from_slice(&TCA_CAKE_RAW.to_ne_bytes());
+        blob.extend_from_slice(&0u32.to_ne_bytes());
+        assert!(parse_cake_options(&blob).raw);
+        assert!(!parse_cake_options(&[]).raw);
     }
 
     #[test]

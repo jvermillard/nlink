@@ -5844,7 +5844,8 @@ pub enum CakeAckFilter {
 pub struct CakeConfig {
     /// Bandwidth shaping limit. `None` = unlimited (let cake autorate).
     pub bandwidth: Option<crate::util::Rate>,
-    /// Estimated round-trip time (drives CoDel target).
+    /// Estimated round-trip time. Unless [`target`](Self::target) is set,
+    /// a twentieth of it is sent as the target too, as tc(8) does (#635).
     pub rtt: Option<Duration>,
     /// Explicit CoDel target delay (overrides RTT-derived default).
     pub target: Option<Duration>,
@@ -5865,6 +5866,8 @@ pub struct CakeConfig {
     /// ACK filtering mode.
     pub ack_filter: Option<CakeAckFilter>,
     /// Enable autorate-ingress (estimate bandwidth from observed flow).
+    /// This flag and the four below are sent whether on or off, so a replace
+    /// turns one off; the kernel keeps a flag it is not sent (#635).
     pub autorate: bool,
     /// Enable NAT mode (rewrite addresses for hash classification).
     pub nat: bool,
@@ -5874,7 +5877,9 @@ pub struct CakeConfig {
     pub wash: bool,
     /// Treat as ingress qdisc (use IFB for inbound shaping).
     pub ingress: bool,
-    /// Split GSO super-segments before queueing.
+    /// Split GSO super-segments before queueing. On by default, as in the
+    /// kernel; it was off here and never sent, so `no-split-gso` had no
+    /// effect (#635).
     pub split_gso: bool,
 }
 
@@ -5904,7 +5909,7 @@ impl CakeConfig {
             raw: false,
             wash: false,
             ingress: false,
-            split_gso: false,
+            split_gso: true,
         }
     }
 
@@ -6013,7 +6018,7 @@ impl CakeConfig {
         self
     }
 
-    /// Enable GSO super-segment splitting.
+    /// Enable or disable GSO super-segment splitting (on by default).
     pub fn split_gso(mut self, enable: bool) -> Self {
         self.split_gso = enable;
         self
@@ -6297,11 +6302,19 @@ impl QdiscConfig for CakeConfig {
         if let Some(bw) = self.bandwidth {
             builder.append_attr_u64(TCA_CAKE_BASE_RATE64, bw.as_bytes_per_sec());
         }
+        let us = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
         if let Some(rtt) = self.rtt {
-            builder.append_attr_u32(TCA_CAKE_RTT, rtt.as_micros() as u32);
+            builder.append_attr_u32(TCA_CAKE_RTT, us(rtt));
         }
-        if let Some(target) = self.target {
-            builder.append_attr_u32(TCA_CAKE_TARGET, target.as_micros() as u32);
+        // tc(8) sends a twentieth of the RTT as the target with every
+        // `rtt`, and has no `target` of its own; without it the kernel
+        // kept 5 ms whatever the RTT (#635).
+        let target = self
+            .target
+            .map(us)
+            .or_else(|| self.rtt.map(|rtt| (us(rtt) / 20).max(1)));
+        if let Some(target) = target {
+            builder.append_attr_u32(TCA_CAKE_TARGET, target);
         }
         if let Some(overhead) = self.overhead {
             builder.append_attr(TCA_CAKE_OVERHEAD, &overhead.to_ne_bytes());
@@ -6354,24 +6367,19 @@ impl QdiscConfig for CakeConfig {
             };
             builder.append_attr_u32(TCA_CAKE_ACK_FILTER, v);
         }
-        if self.autorate {
-            builder.append_attr_u32(TCA_CAKE_AUTORATE, 1);
-        }
-        if self.nat {
-            builder.append_attr_u32(TCA_CAKE_NAT, 1);
-        }
+        // The flags are sent whether on or off: `cake_change` keeps one it
+        // is not sent, so a replace could never turn one off, and
+        // `split_gso`, on in the kernel by default, could not be turned off
+        // at all (#635). `raw` is the exception: the kernel reads only the
+        // attribute's presence, and turns raw mode off with an overhead.
+        builder.append_attr_u32(TCA_CAKE_AUTORATE, u32::from(self.autorate));
+        builder.append_attr_u32(TCA_CAKE_NAT, u32::from(self.nat));
         if self.raw {
             builder.append_attr_u32(TCA_CAKE_RAW, 1);
         }
-        if self.wash {
-            builder.append_attr_u32(TCA_CAKE_WASH, 1);
-        }
-        if self.ingress {
-            builder.append_attr_u32(TCA_CAKE_INGRESS, 1);
-        }
-        if self.split_gso {
-            builder.append_attr_u32(TCA_CAKE_SPLIT_GSO, 1);
-        }
+        builder.append_attr_u32(TCA_CAKE_WASH, u32::from(self.wash));
+        builder.append_attr_u32(TCA_CAKE_INGRESS, u32::from(self.ingress));
+        builder.append_attr_u32(TCA_CAKE_SPLIT_GSO, u32::from(self.split_gso));
         Ok(())
     }
 }
@@ -9507,6 +9515,37 @@ mod psched_wire_tests {
     /// override it. This is CLAUDE.md's "silent skipping is a bug" contract
     /// violated one layer *below* the parser: the parser dutifully accepted
     /// the token and the encoder threw it away (#213).
+    /// #635: cake's flags go out whether on or off, `split_gso` on by
+    /// default, and an RTT without a target brings a twentieth of itself
+    /// as the target, as tc(8) sends it.
+    #[test]
+    fn cake_sends_its_flags_off_and_a_target_with_the_rtt() {
+        use crate::netlink::types::tc::qdisc::cake::*;
+        let attrs = qdisc_attrs(&CakeConfig::new());
+        for (ty, want) in [
+            (TCA_CAKE_AUTORATE, 0),
+            (TCA_CAKE_NAT, 0),
+            (TCA_CAKE_WASH, 0),
+            (TCA_CAKE_INGRESS, 0),
+            (TCA_CAKE_SPLIT_GSO, 1),
+        ] {
+            assert_eq!(u32_at(&attrs, ty, 0), want, "attribute {ty}");
+        }
+        assert!(!attrs.contains_key(&TCA_CAKE_RAW));
+        assert!(!attrs.contains_key(&TCA_CAKE_TARGET), "no RTT, no target");
+
+        let cfg = CakeConfig::new().rtt(std::time::Duration::from_millis(50));
+        let attrs = qdisc_attrs(&cfg);
+        assert_eq!(u32_at(&attrs, TCA_CAKE_RTT, 0), 50_000);
+        assert_eq!(u32_at(&attrs, TCA_CAKE_TARGET, 0), 2_500);
+        let cfg = cfg.target(std::time::Duration::from_millis(4));
+        assert_eq!(u32_at(&qdisc_attrs(&cfg), TCA_CAKE_TARGET, 0), 4_000);
+        let cfg = CakeConfig::parse_params(&["no-split-gso", "rtt", "10us"]).unwrap();
+        let attrs = qdisc_attrs(&cfg);
+        assert_eq!(u32_at(&attrs, TCA_CAKE_SPLIT_GSO, 0), 0);
+        assert_eq!(u32_at(&attrs, TCA_CAKE_TARGET, 0), 1, "tc's floor of 1 µs");
+    }
+
     /// #631: `TCA_FQ_PIE_ECN_PROB` is a whole percentage, as tc(8) sends
     /// it; it was written per-mille, so 20 % went out as 200.
     #[test]
