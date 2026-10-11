@@ -572,7 +572,7 @@ pub async fn compute_diff_with_options(
     // entries, neighbours and nexthop objects, which no declaration can
     // describe, so those are read too — only when there is one (#426).
     let extras = if kind::recreates_any(config, &current_links) {
-        kind::LinkExtras::read(conn).await?
+        kind::LinkExtras::read(conn, &current_qdiscs).await?
     } else {
         kind::LinkExtras::default()
     };

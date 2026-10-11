@@ -42,6 +42,90 @@ fn dummy_up(name: &str) -> NetworkConfig {
 // Links
 // ============================================================================
 
+/// A declared root or ingress qdisc does not cover the classes, leaf qdiscs
+/// and filters under it, none of which a declaration can describe. The
+/// recreate check looked at the qdisc slot alone, so a VLAN id change took
+/// a whole HTB tree, or an ingress redirect, with it and put back the bare
+/// qdisc (#472).
+#[tokio::test]
+async fn a_recreate_that_would_destroy_a_tc_tree_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "sch_htb", "sch_ingress", "cls_u32");
+
+    let vlan = |id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v1", move |l| l.vlan("d0", id).up())
+            .qdisc("v1", |q| q.htb().default_class(0x10))
+            .qdisc("v1", |q| q.ingress())
+    };
+    let class = [
+        "class", "add", "dev", "v1", "parent", "1:", "classid", "1:10", "htb",
+    ];
+    let class = [&class[..], &["rate", "10mbit"]].concat();
+    let cases: [(&str, Vec<Vec<&str>>, &str); 3] = [
+        ("htb-class", vec![class.clone()], "class htb 1:10 on v1"),
+        (
+            "leaf-qdisc",
+            vec![
+                class.clone(),
+                vec![
+                    "qdisc", "add", "dev", "v1", "parent", "1:10", "handle", "10:", "pfifo",
+                ],
+            ],
+            "qdisc pfifo 10: on v1",
+        ),
+        (
+            "ingress-filter",
+            vec![vec![
+                "filter", "add", "dev", "v1", "parent", "ffff:", "protocol", "ip", "prio", "7",
+                "u32", "match", "u32", "0", "0", "action", "drop",
+            ]],
+            "filter u32 pref 7 on v1",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, extra, names) in cases {
+        let ns = TestNamespace::new("nce-tc-tree")?;
+        let conn = ns.connection()?;
+        let first = vlan(10).apply(&conn).await?;
+        assert!(first.is_success(), "[{name}] {first:?}");
+        for args in extra {
+            ns.exec("tc", &args)?;
+        }
+        let tree = || -> nlink::Result<String> {
+            let classes = ns.exec("tc", &["class", "show", "dev", "v1"])?;
+            let filters = ns.exec("tc", &["filter", "show", "dev", "v1", "ingress"])?;
+            Ok(classes + &filters)
+        };
+        let before = tree()?;
+        let shown = vlan(20).diff(&conn).await?.to_string();
+        if !shown.contains(names) {
+            failures.push(format!(
+                "[{name}] the diff does not name `{names}`:\n{shown}"
+            ));
+        }
+        match vlan(20).apply(&conn).await {
+            Ok(r) => failures.push(format!("[{name}] the apply went ahead: {:?}", r.summary)),
+            Err(e) if !e.is_not_supported() => failures.push(format!("[{name}] {e}")),
+            Err(_) => {}
+        }
+        let id = at_path(
+            &ip_link_json(&ns, "v1").map_err(nlink::Error::InvalidMessage)?,
+            "linkinfo.info_data.id",
+        )
+        .clone();
+        let after = tree()?;
+        if id != serde_json::json!(10) || after != before {
+            failures.push(format!(
+                "[{name}] the kernel changed: v1 vlan id {id}, tree\n{before}\nnow\n{after}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    Ok(())
+}
+
 /// A purging apply does not refuse a recreate over what it deletes anyway:
 /// an address on the link, or a route through it, that left the config.
 /// Changing a VLAN id and dropping one of its addresses took two applies
