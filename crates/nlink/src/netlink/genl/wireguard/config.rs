@@ -1295,8 +1295,9 @@ impl DeclaredWgPeer {
         if changes.persistent_keepalive_set
             && let Some(ka) = self.persistent_keepalive
         {
-            let secs: u16 = ka.as_secs().try_into().unwrap_or(u16::MAX);
-            b = b.persistent_keepalive(secs);
+            // Rounded as on the add path: truncating sent 0 for a
+            // sub-second interval, which is "off" (#602).
+            b = b.persistent_keepalive(keepalive_secs(ka));
         }
         if changes.allowed_ips_set {
             for ip in &self.allowed_ips {
@@ -1581,7 +1582,7 @@ mod diff_serde {
         s: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         match d {
-            Some(d) => s.serialize_some(&d.as_secs()),
+            Some(d) => s.serialize_some(&super::keepalive_secs(*d)),
             None => s.serialize_none(),
         }
     }
@@ -2366,5 +2367,21 @@ mod tests {
         assert_eq!(dev[1]["peers-to-modify"][0]["changes"]["endpoint-set"], true);
         assert_eq!(dev[1]["peers-to-remove"][0], b64_encode_32(&key(0xDD)));
         assert_eq!(json["devices-to-add"][0], "wg1");
+    }
+
+    /// The diff shows the keepalive the kernel gets: 500 ms is 1 s, not
+    /// the 0 that truncation printed (#602).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn diff_serde_rounds_a_sub_second_keepalive_up() {
+        let peer = DeclaredWgPeer {
+            public_key: key(0xAA),
+            preshared_key: None,
+            endpoint: None,
+            persistent_keepalive: Some(Duration::from_millis(500)),
+            allowed_ips: vec![],
+        };
+        let json = serde_json::to_value(&peer).expect("serialize");
+        assert_eq!(json["persistent-keepalive-secs"], 1);
     }
 }
