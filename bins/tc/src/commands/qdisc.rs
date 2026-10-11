@@ -310,6 +310,13 @@ async fn dispatch_qdisc(
             // Bind through the ParseParams trait so the dispatcher's
             // contract is type-checked, not just convention.
             let cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
+            // `ingress` and `clsact` live at their hook, not at the
+            // default `--parent root`, which the kernel refuses for them;
+            // tc(8) takes `tc qdisc add dev X clsact` the same way.
+            let parent = match nlink::netlink::tc::QdiscConfig::fixed_parent(&cfg) {
+                Some(fixed) if parent.is_root() => fixed,
+                _ => parent,
+            };
             run_typed_qdisc(conn, dev, parent, handle, cfg, verb).await
         }};
     }

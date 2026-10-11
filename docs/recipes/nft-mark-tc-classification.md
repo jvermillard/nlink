@@ -160,8 +160,8 @@ tc.add_filter_full(
     "eth0",
     TcHandle::major_only(1),
     Some(TcHandle::from(THROTTLED)),
-    0x0003, // ETH_P_ALL
-    100,
+    nlink::EthProto::ALL,
+    nlink::FilterPriority::new(100),
     FwFilter::new()
         .mask(QOS_MASK)
         .classid(TcHandle::new(1, 0x10))

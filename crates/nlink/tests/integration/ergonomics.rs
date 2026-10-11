@@ -95,7 +95,12 @@ async fn del_if_exists_family_swallows_absence_and_reports_deletion() -> nlink::
     );
     assert!(
         !conn
-            .del_filter_if_exists("lo", nlink::TcHandle::ROOT, 0x0800, 100)
+            .del_filter_if_exists(
+                "lo",
+                nlink::TcHandle::ROOT,
+                nlink::EthProto::new(0x0800),
+                nlink::FilterPriority::new(100)
+            )
             .await?
     );
 

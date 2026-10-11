@@ -5050,27 +5050,19 @@ fn ctinfo_parse_u32(what: &str, s: &str) -> Result<u32> {
     })
 }
 
-/// Parse an ethertype: a common name (`ipv4`, `ipv6`, `mpls_uc`,
-/// `mpls_mc`), a `0x`-prefixed hex value, or a decimal u16.
+/// Parse an ethertype as tc(8) reads one: a protocol name, or a number
+/// in any base `strtoul` takes (`0x` hex, a leading `0` octal, decimal).
+/// `ip6` is kept as an alias of `ipv6`.
 fn parse_ethertype(kind: &str, s: &str) -> Result<u16> {
-    match s {
-        "ipv4" | "ip" => Ok(0x0800),
-        "ipv6" | "ip6" => Ok(0x86DD),
-        "mpls_uc" => Ok(0x8847),
-        "mpls_mc" => Ok(0x8848),
-        _ => {
-            let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                u16::from_str_radix(hex, 16)
-            } else {
-                s.parse::<u16>()
-            };
-            parsed.map_err(|_| {
-                Error::InvalidMessage(format!(
-                    "{kind}: invalid protocol `{s}` (expected ipv4, ipv6, mpls_uc, mpls_mc, 0xNN, or decimal u16)"
-                ))
-            })
-        }
-    }
+    let s = if s == "ip6" { "ipv6" } else { s };
+    s.parse::<crate::EthProto>()
+        .map(crate::EthProto::as_u16)
+        .map_err(|_| {
+            Error::InvalidMessage(format!(
+                "{kind}: invalid protocol `{s}` (expected a protocol name such as ipv4, ipv6, \
+                 mpls_uc, or a number)"
+            ))
+        })
 }
 
 /// Parse an IPv4 address or `<min>-<max>` range. Single addresses

@@ -234,7 +234,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
             .ip_proto_udp()
             .dst_port(5060)
             .classid(TcHandle::new(1, 0x10))
-            .priority(100)
+            .priority(nlink::FilterPriority::new(100))
             .build(),
     )
     .await?;
@@ -248,7 +248,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
             .ip_proto_tcp()
             .dst_port(1935)
             .classid(TcHandle::new(1, 0x20))
-            .priority(200)
+            .priority(nlink::FilterPriority::new(200))
             .build(),
     )
     .await?;

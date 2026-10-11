@@ -46,10 +46,11 @@ use super::{
     builder::MessageBuilder,
     connection::{ack_request, create_request, replace_request},
     error::{Error, Result},
+    eth_proto::EthProto,
     interface_ref::InterfaceRef,
     message::NlMsgType,
     protocol::Route,
-    tc_handle::TcHandle,
+    tc_handle::{FilterPriority, TcHandle},
     types::tc::{
         TcMsg, TcaAttr,
         filter::{basic, bpf, ematch, flower, fw, matchall, tcindex, u32 as u32_mod},
@@ -57,7 +58,7 @@ use super::{
 };
 
 /// Ethernet protocol: all protocols.
-const ETH_P_ALL: u16 = 0x0003;
+const ETH_P_ALL: u16 = EthProto::ALL.as_u16();
 
 // ============================================================================
 // FilterConfig trait
@@ -103,7 +104,7 @@ pub trait FilterConfig: Send + Sync {
     ///
     /// Defaulted so external impls stay source-compatible, same as
     /// [`set_chain`](Self::set_chain).
-    fn protocol(&self) -> Option<u16> {
+    fn protocol(&self) -> Option<EthProto> {
         None
     }
 
@@ -117,7 +118,7 @@ pub trait FilterConfig: Send + Sync {
     ///
     /// Default no-op so external `FilterConfig` impls stay source-compatible,
     /// same as [`set_chain`](Self::set_chain).
-    fn set_protocol(&mut self, protocol: u16) {
+    fn set_protocol(&mut self, protocol: EthProto) {
         let _ = protocol;
     }
 
@@ -128,7 +129,7 @@ pub trait FilterConfig: Send + Sync {
     /// value `add_filter` silently discarded — so explicit priority ordering
     /// was ignored and filters landed in an unintended evaluation order
     /// relative to operator-installed rules (#201).
-    fn priority(&self) -> Option<u16> {
+    fn priority(&self) -> Option<FilterPriority> {
         None
     }
 }
@@ -146,7 +147,7 @@ pub trait FilterConfig: Send + Sync {
 /// `FlowerFilter` default to `ETH_P_ALL` (0x0003), so a filter that used to
 /// be silently installed as IPv4-only now matches all traffic, as its builder
 /// always claimed.
-pub const DEFAULT_FILTER_PROTOCOL: u16 = 0x0800;
+pub const DEFAULT_FILTER_PROTOCOL: EthProto = EthProto::IP;
 
 // ============================================================================
 // U32Filter
@@ -247,14 +248,14 @@ impl U32Filter {
     }
 
     /// Set the priority (lower = higher priority).
-    pub fn priority(mut self, prio: u16) -> Self {
-        self.priority = prio;
+    pub fn priority(mut self, priority: FilterPriority) -> Self {
+        self.priority = priority.as_u16();
         self
     }
 
     /// Set the protocol (default: ETH_P_IP = 0x0800).
-    pub fn protocol(mut self, proto: u16) -> Self {
-        self.protocol = proto;
+    pub fn protocol(mut self, protocol: EthProto) -> Self {
+        self.protocol = protocol.as_u16();
         self
     }
 
@@ -326,6 +327,7 @@ impl U32Filter {
     /// it is the start of the IP header. The usual pair:
     ///
     /// ```no_run
+    /// # use nlink::{EthProto, FilterPriority};
     /// # async fn example() -> nlink::Result<()> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::{TcHandle, netlink::filter::U32Filter};
@@ -333,12 +335,12 @@ impl U32Filter {
     /// let table = U32Filter::handle(2, 0, 0);
     /// // Table 2:, one bucket.
     /// conn.add_filter_full("eth0", TcHandle::major_only(1), Some(TcHandle::from_raw(table)),
-    ///     0x0800, 1, U32Filter::new().divisor(1)).await?;
+    ///     EthProto::IP, FilterPriority::new(1), U32Filter::new().divisor(1)).await?;
     /// // In the root table: UDP goes on to 2:, with the next header IHL*4 bytes in.
-    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, 0x0800, 1,
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, EthProto::IP, FilterPriority::new(1),
     ///     U32Filter::new().match_ip_proto(17).offset_at(0, 0x0f00, 6).link(table)).await?;
     /// // In 2: — the port, wherever the IP header ends.
-    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, 0x0800, 1,
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, EthProto::IP, FilterPriority::new(1),
     ///     U32Filter::new().ht(table).match_nexthdr_dst_port(53)
     ///         .classid(TcHandle::new(1, 0x10))).await?;
     /// # Ok(())
@@ -735,16 +737,16 @@ impl FilterConfig for U32Filter {
         self.chain = Some(chain);
     }
 
-    fn protocol(&self) -> Option<u16> {
-        Some(self.protocol)
+    fn protocol(&self) -> Option<EthProto> {
+        Some(EthProto::new(self.protocol))
     }
 
-    fn set_protocol(&mut self, protocol: u16) {
-        self.protocol = protocol;
+    fn set_protocol(&mut self, protocol: EthProto) {
+        self.protocol = protocol.as_u16();
     }
 
-    fn priority(&self) -> Option<u16> {
-        Some(self.priority)
+    fn priority(&self) -> Option<FilterPriority> {
+        Some(FilterPriority::new(self.priority))
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1187,14 +1189,14 @@ impl FlowerFilter {
     }
 
     /// Set the priority.
-    pub fn priority(mut self, prio: u16) -> Self {
-        self.priority = prio;
+    pub fn priority(mut self, priority: FilterPriority) -> Self {
+        self.priority = priority.as_u16();
         self
     }
 
     /// Set the protocol.
-    pub fn protocol(mut self, proto: u16) -> Self {
-        self.protocol = proto;
+    pub fn protocol(mut self, protocol: EthProto) -> Self {
+        self.protocol = protocol.as_u16();
         self
     }
 
@@ -1348,6 +1350,7 @@ impl FlowerFilter {
     /// same rules as [`src_port_range`](Self::src_port_range) apply.
     ///
     /// ```no_run
+    /// # use nlink::{EthProto, FilterPriority};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::filter::FlowerFilter;
@@ -1360,7 +1363,7 @@ impl FlowerFilter {
     ///     .ip_proto_udp()
     ///     .dst_port_range(8000, 8100)
     ///     .build();
-    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, 0x0800, 1, filter)
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, EthProto::IP, FilterPriority::new(1), filter)
     ///     .await?;
     /// # Ok(())
     /// # }
@@ -1457,6 +1460,7 @@ impl FlowerFilter {
     /// classid means nothing, could not act at all (#450).
     ///
     /// ```no_run
+    /// # use nlink::{EthProto, FilterPriority};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::TcHandle;
@@ -1470,7 +1474,8 @@ impl FlowerFilter {
     ///     .dst_port(23)
     ///     .actions(ActionList::new().with(GactAction::drop()))
     ///     .build();
-    /// conn.add_filter_full("eth0", TcHandle::INGRESS, None, 0x0800, 10, telnet).await?;
+    /// conn.add_filter_full("eth0", TcHandle::INGRESS, None, EthProto::IP, FilterPriority::new(10), telnet)
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1495,7 +1500,6 @@ impl FlowerFilter {
     /// restricted to 0x88a8 frames asked for a 0x8100 TPID and matched
     /// nothing.
     fn effective_eth_type(&self) -> Option<u16> {
-        const ETH_P_ALL: u16 = 0x0003;
         self.eth_type
             .or((!matches!(self.protocol, 0 | ETH_P_ALL)).then_some(self.protocol))
             .or((self.vlan_id.is_some() || self.vlan_prio.is_some()).then_some(0x8100))
@@ -1748,22 +1752,14 @@ fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
     })
 }
 
+/// An `eth_type` value, read as tc(8) reads a protocol (`ll_proto_a2n`):
+/// a name, or a number in any base `strtoul` takes. A bare number was read
+/// as hex before 0.32, so `2048` meant 0x2048 rather than IPv4 (#515).
 fn parse_flower_eth_type(s: &str) -> crate::Result<u16> {
-    use crate::Error;
-    Ok(match s {
-        "ip" | "ipv4" => 0x0800,
-        "ipv6" => 0x86dd,
-        "arp" => 0x0806,
-        "vlan" | "802.1q" => 0x8100,
-        "802.1ad" => 0x88a8,
-        other => {
-            let trimmed = other.strip_prefix("0x").unwrap_or(other);
-            u16::from_str_radix(trimmed, 16).map_err(|_| {
-                Error::InvalidMessage(format!(
-                    "flower: invalid eth_type `{other}` (expected name or hex)"
-                ))
-            })?
-        }
+    s.parse::<EthProto>().map(EthProto::as_u16).map_err(|_| {
+        crate::Error::InvalidMessage(format!(
+            "flower: invalid eth_type `{s}` (expected a protocol name or a number)"
+        ))
     })
 }
 
@@ -1948,16 +1944,16 @@ impl FilterConfig for FlowerFilter {
         self.chain = Some(chain);
     }
 
-    fn protocol(&self) -> Option<u16> {
-        Some(self.protocol)
+    fn protocol(&self) -> Option<EthProto> {
+        Some(EthProto::new(self.protocol))
     }
 
-    fn set_protocol(&mut self, protocol: u16) {
-        self.protocol = protocol;
+    fn set_protocol(&mut self, protocol: EthProto) {
+        self.protocol = protocol.as_u16();
     }
 
-    fn priority(&self) -> Option<u16> {
-        Some(self.priority)
+    fn priority(&self) -> Option<FilterPriority> {
+        Some(FilterPriority::new(self.priority))
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2297,14 +2293,14 @@ impl MatchallFilter {
     }
 
     /// Set the priority.
-    pub fn priority(mut self, prio: u16) -> Self {
-        self.priority = prio;
+    pub fn priority(mut self, priority: FilterPriority) -> Self {
+        self.priority = priority.as_u16();
         self
     }
 
     /// Set the protocol.
-    pub fn protocol(mut self, proto: u16) -> Self {
-        self.protocol = proto;
+    pub fn protocol(mut self, protocol: EthProto) -> Self {
+        self.protocol = protocol.as_u16();
         self
     }
 
@@ -2462,16 +2458,16 @@ impl FilterConfig for MatchallFilter {
         self.chain = Some(chain);
     }
 
-    fn protocol(&self) -> Option<u16> {
-        Some(self.protocol)
+    fn protocol(&self) -> Option<EthProto> {
+        Some(EthProto::new(self.protocol))
     }
 
-    fn set_protocol(&mut self, protocol: u16) {
-        self.protocol = protocol;
+    fn set_protocol(&mut self, protocol: EthProto) {
+        self.protocol = protocol.as_u16();
     }
 
-    fn priority(&self) -> Option<u16> {
-        Some(self.priority)
+    fn priority(&self) -> Option<FilterPriority> {
+        Some(FilterPriority::new(self.priority))
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3002,14 +2998,14 @@ impl BpfFilter {
     }
 
     /// Set the priority.
-    pub fn priority(mut self, prio: u16) -> Self {
-        self.priority = prio;
+    pub fn priority(mut self, priority: FilterPriority) -> Self {
+        self.priority = priority.as_u16();
         self
     }
 
     /// Set the protocol.
-    pub fn protocol(mut self, proto: u16) -> Self {
-        self.protocol = proto;
+    pub fn protocol(mut self, protocol: EthProto) -> Self {
+        self.protocol = protocol.as_u16();
         self
     }
 
@@ -3178,16 +3174,16 @@ impl FilterConfig for BpfFilter {
         self.chain = Some(chain);
     }
 
-    fn protocol(&self) -> Option<u16> {
-        Some(self.protocol)
+    fn protocol(&self) -> Option<EthProto> {
+        Some(EthProto::new(self.protocol))
     }
 
-    fn set_protocol(&mut self, protocol: u16) {
-        self.protocol = protocol;
+    fn set_protocol(&mut self, protocol: EthProto) {
+        self.protocol = protocol.as_u16();
     }
 
-    fn priority(&self) -> Option<u16> {
-        Some(self.priority)
+    fn priority(&self) -> Option<FilterPriority> {
+        Some(FilterPriority::new(self.priority))
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3389,14 +3385,14 @@ impl BasicFilter {
     }
 
     /// Set the priority.
-    pub fn priority(mut self, prio: u16) -> Self {
-        self.priority = prio;
+    pub fn priority(mut self, priority: FilterPriority) -> Self {
+        self.priority = priority.as_u16();
         self
     }
 
     /// Set the protocol.
-    pub fn protocol(mut self, proto: u16) -> Self {
-        self.protocol = proto;
+    pub fn protocol(mut self, protocol: EthProto) -> Self {
+        self.protocol = protocol.as_u16();
         self
     }
 
@@ -3531,16 +3527,16 @@ impl FilterConfig for BasicFilter {
         self.chain = Some(chain);
     }
 
-    fn protocol(&self) -> Option<u16> {
-        Some(self.protocol)
+    fn protocol(&self) -> Option<EthProto> {
+        Some(EthProto::new(self.protocol))
     }
 
-    fn set_protocol(&mut self, protocol: u16) {
-        self.protocol = protocol;
+    fn set_protocol(&mut self, protocol: EthProto) {
+        self.protocol = protocol.as_u16();
     }
 
-    fn priority(&self) -> Option<u16> {
-        Some(self.priority)
+    fn priority(&self) -> Option<FilterPriority> {
+        Some(FilterPriority::new(self.priority))
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -4525,14 +4521,14 @@ impl FlowFilter {
     }
 
     /// Set filter priority.
-    pub fn priority(mut self, priority: u16) -> Self {
-        self.priority = priority;
+    pub fn priority(mut self, priority: FilterPriority) -> Self {
+        self.priority = priority.as_u16();
         self
     }
 
     /// Set the protocol.
-    pub fn protocol(mut self, protocol: u16) -> Self {
-        self.protocol = protocol;
+    pub fn protocol(mut self, protocol: EthProto) -> Self {
+        self.protocol = protocol.as_u16();
         self
     }
 
@@ -4691,16 +4687,16 @@ impl FilterConfig for FlowFilter {
         self.chain = Some(chain);
     }
 
-    fn protocol(&self) -> Option<u16> {
-        Some(self.protocol)
+    fn protocol(&self) -> Option<EthProto> {
+        Some(EthProto::new(self.protocol))
     }
 
-    fn set_protocol(&mut self, protocol: u16) {
-        self.protocol = protocol;
+    fn set_protocol(&mut self, protocol: EthProto) {
+        self.protocol = protocol.as_u16();
     }
 
-    fn priority(&self) -> Option<u16> {
-        Some(self.priority)
+    fn priority(&self) -> Option<FilterPriority> {
+        Some(FilterPriority::new(self.priority))
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -4759,10 +4755,10 @@ impl FilterConfig for FlowFilter {
 /// `priority == 0` tells the kernel to auto-assign, which is what the
 /// convenience `add_filter` / `replace_filter` entry points used to do
 /// unconditionally — along with hardcoding `ETH_P_IP` (#201).
-fn filter_info(config: &impl FilterConfig) -> (u16, u16) {
+fn filter_info(config: &impl FilterConfig) -> (EthProto, FilterPriority) {
     (
         config.protocol().unwrap_or(DEFAULT_FILTER_PROTOCOL),
-        config.priority().unwrap_or(0),
+        config.priority().unwrap_or(FilterPriority::new(0)),
     )
 }
 
@@ -4819,8 +4815,8 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
         handle: Option<TcHandle>,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         config: impl FilterConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -4850,8 +4846,8 @@ impl Connection<Route> {
         ifindex: u32,
         parent: TcHandle,
         handle: Option<TcHandle>,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
@@ -4862,7 +4858,7 @@ impl Connection<Route> {
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
-            .with_filter_info(protocol, priority);
+            .with_filter_info(protocol.as_u16(), priority.as_u16());
 
         let mut builder = create_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
@@ -4891,6 +4887,7 @@ impl Connection<Route> {
     /// # Example
     ///
     /// ```no_run
+    /// # use nlink::{EthProto, FilterPriority};
     /// use nlink::{TcHandle, netlink::filter::FlowerFilter};
     /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
     /// let filter = FlowerFilter::new()
@@ -4898,7 +4895,7 @@ impl Connection<Route> {
     ///     .ipv4()
     ///     .ip_proto_tcp()
     ///     .dst_port(80)
-    ///     .priority(200)          // pin it — see below
+    ///     .priority(FilterPriority::new(200)) // pin it — see below
     ///     .build();
     /// conn.replace_filter("eth0", TcHandle::major_only(1), filter).await?;
     /// # Ok(())
@@ -4944,8 +4941,8 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
         handle: Option<TcHandle>,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         config: impl FilterConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -4977,8 +4974,8 @@ impl Connection<Route> {
         ifindex: u32,
         parent: TcHandle,
         handle: Option<TcHandle>,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
@@ -4989,7 +4986,7 @@ impl Connection<Route> {
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
-            .with_filter_info(protocol, priority);
+            .with_filter_info(protocol.as_u16(), priority.as_u16());
 
         let mut builder = replace_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
@@ -5017,6 +5014,7 @@ impl Connection<Route> {
     /// # Example
     ///
     /// ```no_run
+    /// # use nlink::{EthProto, FilterPriority};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # use nlink::TcHandle;
     /// # use nlink::netlink::filter::U32Filter;
@@ -5025,7 +5023,8 @@ impl Connection<Route> {
     ///     .classid(TcHandle::new(1, 0x20))  // Change to different class
     ///     .match_dst_port(80)
     ///     .build();
-    /// conn.change_filter("eth0", TcHandle::major_only(1), 0x0800, 100, filter).await?;
+    /// conn.change_filter("eth0", TcHandle::major_only(1), EthProto::IP, FilterPriority::new(100), filter)
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -5034,8 +5033,8 @@ impl Connection<Route> {
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         config: impl FilterConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -5050,8 +5049,8 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
         handle: Option<TcHandle>,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         config: impl FilterConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -5065,8 +5064,8 @@ impl Connection<Route> {
         &self,
         ifindex: u32,
         parent: TcHandle,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         config: impl FilterConfig,
     ) -> Result<()> {
         self.change_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
@@ -5084,8 +5083,8 @@ impl Connection<Route> {
         ifindex: u32,
         parent: TcHandle,
         handle: Option<TcHandle>,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
@@ -5096,7 +5095,7 @@ impl Connection<Route> {
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
-            .with_filter_info(protocol, priority);
+            .with_filter_info(protocol.as_u16(), priority.as_u16());
 
         let mut builder = ack_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
@@ -5122,10 +5121,12 @@ impl Connection<Route> {
     /// # Example
     ///
     /// ```no_run
+    /// # use nlink::{EthProto, FilterPriority};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # use nlink::TcHandle;
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
-    /// conn.del_filter("eth0", TcHandle::major_only(1), 0x0800, 100).await?;
+    /// conn.del_filter("eth0", TcHandle::major_only(1), EthProto::IP, FilterPriority::new(100))
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -5134,8 +5135,8 @@ impl Connection<Route> {
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_filter_by_index(ifindex, parent, protocol, priority)
@@ -5151,8 +5152,8 @@ impl Connection<Route> {
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
     ) -> Result<bool> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         // "If it exists" has to cover the parent too. With no qdisc at
@@ -5191,15 +5192,15 @@ impl Connection<Route> {
         &self,
         ifindex: u32,
         parent: TcHandle,
-        protocol: u16,
-        priority: u16,
+        protocol: EthProto,
+        priority: FilterPriority,
     ) -> Result<()> {
         let parent_handle = parent.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
-            .with_filter_info(protocol, priority);
+            .with_filter_info(protocol.as_u16(), priority.as_u16());
 
         let mut builder = create_request(NlMsgType::RTM_DELTFILTER);
         builder.append(&tcmsg);
@@ -5424,13 +5425,17 @@ mod filter_info_tests {
     /// filter at all — with no error returned.
     #[test]
     fn explicit_protocol_and_priority_reach_the_wire() {
-        const ETH_P_ALL: u16 = 0x0003;
+        use crate::{EthProto, FilterPriority};
 
-        let f = MatchallFilter::new().protocol(ETH_P_ALL).priority(1);
-        assert_eq!(filter_info(&f), (ETH_P_ALL, 1));
+        let f = MatchallFilter::new()
+            .protocol(EthProto::ALL)
+            .priority(FilterPriority::new(1));
+        assert_eq!(filter_info(&f), (EthProto::ALL, FilterPriority::new(1)));
 
-        let f = FlowerFilter::new().protocol(0x86DD).priority(7); // ETH_P_IPV6
-        assert_eq!(filter_info(&f), (0x86DD, 7));
+        let f = FlowerFilter::new()
+            .protocol(EthProto::IPV6)
+            .priority(FilterPriority::new(7));
+        assert_eq!(filter_info(&f), (EthProto::IPV6, FilterPriority::new(7)));
     }
 
     /// Matchall and flower default to ETH_P_ALL. That default is the whole
@@ -5453,7 +5458,7 @@ mod filter_info_tests {
         assert_eq!(FwFilter::new().priority(), None);
         assert_eq!(
             filter_info(&FwFilter::new()),
-            (DEFAULT_FILTER_PROTOCOL, 0),
+            (DEFAULT_FILTER_PROTOCOL, crate::FilterPriority::new(0)),
         );
     }
 }
@@ -5514,7 +5519,7 @@ mod tests {
         let filter = U32Filter::new()
             .classid(TcHandle::new(1, 0x10))
             .match_dst_ipv4(Ipv4Addr::new(192, 168, 1, 0), 24)
-            .priority(100)
+            .priority(crate::FilterPriority::new(100))
             .build();
 
         assert_eq!(filter.classid, Some(TcHandle::new(1, 0x10).as_raw()));
@@ -5699,7 +5704,7 @@ mod tests {
         let filter = BpfFilter::new(42)
             .name("my_prog")
             .direct_action()
-            .priority(100)
+            .priority(crate::FilterPriority::new(100))
             .chain(5);
 
         assert_eq!(filter.fd, 42);
@@ -5835,6 +5840,17 @@ mod tests {
     fn flower_parse_params_eth_type_hex() {
         let f = FlowerFilter::parse_params(&["eth_type", "0x806"]).unwrap();
         assert_eq!(f.eth_type, Some(0x0806));
+    }
+
+    /// #515: a bare number is decimal, as tc(8) reads a protocol
+    /// (`ll_proto_a2n`, base 0); it was read as hex, so 2048 meant 0x2048.
+    #[test]
+    fn flower_parse_params_eth_type_numbers_as_tc_reads_them() {
+        for (text, want) in [("2048", 0x0800), ("34525", 0x86DD), ("04000", 0x0800)] {
+            let f = FlowerFilter::parse_params(&["eth_type", text]).unwrap();
+            assert_eq!(f.eth_type, Some(want), "{text}");
+        }
+        assert!(FlowerFilter::parse_params(&["eth_type", "0x10000"]).is_err());
     }
 
     #[test]
@@ -7343,12 +7359,15 @@ fn flower_eth_type_key(f: &FlowerFilter) -> crate::Result<Option<u16>> {
 /// filter for want of one (#433).
 #[test]
 fn flower_takes_its_ethertype_from_the_filter_protocol() {
-    let f = FlowerFilter::new().protocol(0x0800).ip_proto_tcp().dst_port(80);
+    let f = FlowerFilter::new()
+        .protocol(crate::EthProto::IP)
+        .ip_proto_tcp()
+        .dst_port(80);
     assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x0800));
-    let f = FlowerFilter::new().protocol(0x86DD).ip_proto(0x3a);
+    let f = FlowerFilter::new().protocol(crate::EthProto::IPV6).ip_proto(0x3a);
     assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x86DD));
     // A filter with no keys carries it too, as tc(8)'s does.
-    let f = FlowerFilter::new().protocol(0x0806);
+    let f = FlowerFilter::new().protocol(crate::EthProto::ARP);
     assert_eq!(flower_eth_type_key(&f).unwrap(), Some(0x0806));
 
     // `all` names no ethertype, so L3/L4 keys still need one; tc(8) refuses
@@ -7369,19 +7388,19 @@ fn flower_takes_its_ethertype_from_the_filter_protocol() {
 #[test]
 fn flower_set_protocol_supplies_the_ethertype() {
     let mut f = FlowerFilter::parse_params(&["ip_proto", "tcp", "dst_port", "80"]).unwrap();
-    f.set_protocol(0x86DD);
-    assert_eq!(FilterConfig::protocol(&f), Some(0x86DD));
+    f.set_protocol(crate::EthProto::IPV6);
+    assert_eq!(FilterConfig::protocol(&f), Some(crate::EthProto::IPV6));
     assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x86DD));
 
     let mut f = FlowerFilter::parse_params(&["vlan_id", "20"]).unwrap();
-    f.set_protocol(0x88A8);
+    f.set_protocol(crate::EthProto::VLAN_8021AD);
     assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x88A8));
     // Under `all` a VLAN key still implies 802.1Q…
-    f.set_protocol(0x0003);
+    f.set_protocol(crate::EthProto::ALL);
     assert_eq!(flower_eth_type_key(&f).unwrap(), Some(0x8100));
     // …and an ethertype set on the filter wins over the protocol.
     let mut f = FlowerFilter::new().qinq().vlan_id(20);
-    f.set_protocol(0x8100);
+    f.set_protocol(crate::EthProto::VLAN_8021Q);
     assert_eq!(flower_eth_type_key(&f).unwrap(), Some(0x88A8));
 
     // Every shipped config that carries a protocol stores it.
@@ -7394,8 +7413,8 @@ fn flower_set_protocol_supplies_the_ethertype() {
         Box::new(FlowFilter::new()),
     ];
     for c in &mut configs {
-        c.set_protocol(0x86DD);
-        assert_eq!(c.protocol(), Some(0x86DD), "{}", c.kind());
+        c.set_protocol(crate::EthProto::IPV6);
+        assert_eq!(c.protocol(), Some(crate::EthProto::IPV6), "{}", c.kind());
     }
 }
 

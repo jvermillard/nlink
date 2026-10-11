@@ -118,8 +118,8 @@ conn.add_filter_full(
     dev,
     TcHandle::major_only(1),
     None,
-    0x0003,         // ETH_P_ALL
-    100,            // priority
+    nlink::EthProto::ALL,
+    nlink::FilterPriority::new(100),
     CgroupFilter::new().build(),
 ).await?;
 # Ok(())

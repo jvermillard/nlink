@@ -241,13 +241,15 @@ impl TcMessage {
     /// The protocol lives in the lower 16 bits of `tcm_info` in network byte
     /// order (the kernel compares it against `skb->protocol`), so this
     /// converts back from big-endian.
-    pub fn protocol(&self) -> u16 {
-        u16::from_be((self.header.tcm_info & 0xFFFF) as u16)
+    pub fn protocol(&self) -> crate::netlink::eth_proto::EthProto {
+        crate::netlink::eth_proto::EthProto::new(u16::from_be(
+            (self.header.tcm_info & 0xFFFF) as u16,
+        ))
     }
 
     /// For filters: the priority, held in the upper 16 bits of `tcm_info`.
-    pub fn priority(&self) -> u16 {
-        (self.header.tcm_info >> 16) as u16
+    pub fn priority(&self) -> crate::netlink::tc_handle::FilterPriority {
+        crate::netlink::tc_handle::FilterPriority::new((self.header.tcm_info >> 16) as u16)
     }
 
     /// Get the kind (type name) if present.
@@ -578,14 +580,14 @@ impl TcMessage {
     /// Returns `None` for a qdisc or class, whose `tcm_info` carries something
     /// else entirely (the refcount, for a qdisc).
     #[inline]
-    pub fn filter_protocol(&self) -> Option<u16> {
+    pub fn filter_protocol(&self) -> Option<crate::netlink::eth_proto::EthProto> {
         self.is_filter().then(|| self.protocol())
     }
 
     /// Get the filter priority, if this is a filter. `Option` wrapper over
     /// [`priority`](Self::priority).
     #[inline]
-    pub fn filter_priority(&self) -> Option<u16> {
+    pub fn filter_priority(&self) -> Option<crate::netlink::tc_handle::FilterPriority> {
         self.is_filter().then(|| self.priority())
     }
 
@@ -1042,7 +1044,7 @@ mod classification_tests {
         assert!(f.is_filter());
         assert!(!f.is_qdisc());
         assert!(!f.is_class());
-        assert_eq!(f.filter_priority(), Some(1));
+        assert_eq!(f.filter_priority(), Some(crate::FilterPriority::new(1)));
     }
 
     /// A filter attached to a root qdisc has tcm_parent = 1:0 and a handle
@@ -1243,8 +1245,8 @@ mod tests {
 
         assert_eq!(msg.protocol(), 0x0800, "ETH_P_IP, host byte order");
         assert_eq!(msg.priority(), 100);
-        assert_eq!(msg.filter_protocol(), Some(0x0800));
-        assert_eq!(msg.filter_priority(), Some(100));
+        assert_eq!(msg.filter_protocol(), Some(crate::EthProto::IP));
+        assert_eq!(msg.filter_priority(), Some(crate::FilterPriority::new(100)));
 
         // Layout check: priority is the major half, protocol the minor half.
         let info = msg.info();

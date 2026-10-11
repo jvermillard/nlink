@@ -63,6 +63,7 @@ use std::{
 use super::{
     Connection,
     error::{Error, Result},
+    eth_proto::EthProto,
     link::IfbLink,
     messages::{LinkMessage, TcMessage},
     protocol::Route,
@@ -905,8 +906,8 @@ async fn redirects_to(
     ifindex: u32,
     hook: TcHandle,
     ifb_ifindex: u32,
-) -> Result<Vec<(u16, u16)>> {
-    let mut out: Vec<(u16, u16)> = Vec::new();
+) -> Result<Vec<(EthProto, FilterPriority)>> {
+    let mut out: Vec<(EthProto, FilterPriority)> = Vec::new();
     for f in conn.get_filters_by_parent_index(ifindex, hook).await? {
         let to_ifb = mirred_targets(&f)
             .iter()
@@ -922,8 +923,6 @@ async fn redirects_to(
 /// of the recipe band. It used to sit at 1, in the operator band.
 const INGRESS_REDIRECT_PRIORITY: FilterPriority = FilterPriority::recipe(0);
 
-/// `ETH_P_ALL`: the redirect takes every protocol.
-const ETH_P_ALL: u16 = 0x0003;
 
 /// Install the matchall egress redirect from `ifindex`'s ingress hook
 /// (`hook`: the ingress qdisc's, or a clsact's ingress) to `ifb_ifindex`.
@@ -942,8 +941,8 @@ async fn add_ifb_redirect(
         ifindex,
         hook,
         None,
-        ETH_P_ALL,
-        INGRESS_REDIRECT_PRIORITY.as_u16(),
+        EthProto::ALL,
+        INGRESS_REDIRECT_PRIORITY,
         filter,
     )
     .await
@@ -957,7 +956,7 @@ enum IfbRedirect {
     /// IFB some other way (the u32 *ingress* redirect at priority 1 every
     /// release before 0.31 installed) and have to go first — the kernel
     /// refuses a different filter kind at the same priority and protocol.
-    Replace(Vec<(u16, u16)>),
+    Replace(Vec<(EthProto, FilterPriority)>),
 }
 
 /// Read the ingress hook `hook` of `ifindex` for the redirect to
@@ -1784,7 +1783,7 @@ impl PerHostLimiter {
 
         // The priorities the desired filters take: the list `apply()`
         // installs and step 3c just reconciled.
-        let mut desired: HashSet<u16> = HashSet::new();
+        let mut desired: HashSet<FilterPriority> = HashSet::new();
         for (i, rule) in self.rules.iter().enumerate() {
             let classid = TcHandle::new(1, (i + 2) as u16);
             desired.extend(
@@ -1795,7 +1794,7 @@ impl PerHostLimiter {
         }
         let is_rule_class = |c: TcHandle| c.major() == 1 && (2..=max_minor).contains(&c.minor());
 
-        let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
+        let mut stale_filters: Vec<(FilterPriority, EthProto, TcHandle)> = Vec::new();
         for f in &tree.root_filters {
             let prio = f.priority();
             // Step 3c reconciled every priority a rule wants, from this same
@@ -1831,7 +1830,7 @@ impl PerHostLimiter {
             report.unmanaged.push(UnmanagedObject {
                 kind: "filter",
                 handle: f.parent(),
-                priority: Some(FilterPriority::new(prio)),
+                priority: Some(prio),
             });
         }
         for (prio, proto, parent) in stale_filters {
@@ -1844,7 +1843,7 @@ impl PerHostLimiter {
             report.stale_removed.push(StaleObject {
                 kind: "filter",
                 handle: parent,
-                priority: Some(FilterPriority::new(prio)),
+                priority: Some(prio),
             });
         }
         for handle in &stale_classes {
@@ -1889,7 +1888,7 @@ impl PerHostLimiter {
     /// replace one with the other on every pass. The layout before 0.30
     /// could do that past 100 rules.
     fn check_rules(&self) -> Result<()> {
-        let mut taken: HashMap<u16, usize> = HashMap::new();
+        let mut taken: HashMap<FilterPriority, usize> = HashMap::new();
         for (i, rule) in self.rules.iter().enumerate() {
             for (_, prio, _) in rule_filters(i, rule, TcHandle::new(1, (i + 2) as u16))? {
                 if let Some(other) = taken.insert(prio, i) {
@@ -1958,15 +1957,15 @@ fn rule_filters(
     index: usize,
     rule: &HostRule,
     classid: TcHandle,
-) -> Result<Vec<(u16, u16, super::filter::FlowerFilter)>> {
+) -> Result<Vec<(EthProto, FilterPriority, super::filter::FlowerFilter)>> {
     use super::filter::FlowerFilter;
 
     // tcm_info etherproto values. The kernel walks the per-protocol
     // dispatch table before flower's own KEY_ETH_TYPE attribute is
     // consulted, so passing the wrong value here means the filter
     // never matches its intended packets.
-    const ETH_P_IP: u16 = 0x0800;
-    const ETH_P_IPV6: u16 = 0x86DD;
+    const ETH_P_IP: EthProto = EthProto::IP;
+    const ETH_P_IPV6: EthProto = EthProto::IPV6;
 
     // `.ipv4()` / `.ipv6()` on the port filters is load-bearing, not
     // decoration: cls_flower discards `ip_proto` and the port keys unless
@@ -1981,7 +1980,7 @@ fn rule_filters(
              at most {MAX_RULES} rules (four priorities each, from {FIRST_RULE_PRIORITY})"
         )));
     }
-    let priority = FIRST_RULE_PRIORITY + PRIORITIES_PER_RULE * index as u16;
+    let priority = FilterPriority::new(FIRST_RULE_PRIORITY + PRIORITIES_PER_RULE * index as u16);
     let base = || FlowerFilter::new().classid(classid);
     let prefix_of = |ip: &IpAddr, subnet: Option<u8>| {
         subnet.unwrap_or(if ip.is_ipv4() { 32 } else { 128 })
@@ -1989,8 +1988,8 @@ fn rule_filters(
     // TCP and UDP, IPv4 and IPv6, each with `port` set on it, at the rule's
     // four priorities.
     let tcp_and_udp = |set_port: &dyn Fn(FlowerFilter) -> FlowerFilter| {
-        let filter = |eth_p: u16, offset: u16, proto: fn(FlowerFilter) -> FlowerFilter| {
-            let prio = priority + offset;
+        let filter = |eth_p: EthProto, offset: u16, proto: fn(FlowerFilter) -> FlowerFilter| {
+            let prio = FilterPriority::new(priority.as_u16() + offset);
             let family = if eth_p == ETH_P_IP {
                 base().ipv4()
             } else {
@@ -2306,7 +2305,7 @@ mod tests {
         let range = rule_filters(0, &limiter.rules[0], TcHandle::new(1, 2)).unwrap();
         let prios: Vec<(u16, u16)> = range
             .iter()
-            .map(|(proto, prio, _)| (*proto, *prio))
+            .map(|(proto, prio, _)| (proto.as_u16(), prio.as_u16()))
             .collect();
         assert_eq!(
             prios,
@@ -2361,7 +2360,7 @@ mod tests {
                 let value = |id: u16| attrs.iter().find(|(t, _)| *t == id).map(|(_, p)| p.clone());
                 assert_eq!(
                     value(TCA_FLOWER_KEY_ETH_TYPE),
-                    Some(proto.to_be_bytes().to_vec())
+                    Some(proto.as_u16().to_be_bytes().to_vec())
                 );
                 assert!(
                     attrs
@@ -2369,7 +2368,11 @@ mod tests {
                         .any(|(t, _)| *t == port_key || *t == TCA_FLOWER_KEY_UDP_DST),
                     "rule {i} prio {prio}: no port key in {attrs:?}"
                 );
-                shape.push((*proto, *prio, value(TCA_FLOWER_KEY_IP_PROTO).unwrap()[0]));
+                shape.push((
+                    proto.as_u16(),
+                    prio.as_u16(),
+                    value(TCA_FLOWER_KEY_IP_PROTO).unwrap()[0],
+                ));
             }
             let first = 100 + 4 * i as u16;
             assert_eq!(
@@ -2406,7 +2409,7 @@ mod tests {
             let prios: Vec<u16> = rule_filters(i, rule, TcHandle::new(1, (i + 2) as u16))
                 .unwrap()
                 .into_iter()
-                .map(|(_, p, _)| p)
+                .map(|(_, p, _)| p.as_u16())
                 .collect();
             let base = 100 + 4 * i as u16;
             assert!(

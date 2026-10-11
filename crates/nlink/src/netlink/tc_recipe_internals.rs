@@ -109,7 +109,10 @@ impl LiveTree {
     }
 
     /// Look up a filter at the root parent by priority.
-    pub(crate) fn filter_at_priority(&self, priority: u16) -> Option<&TcMessage> {
+    pub(crate) fn filter_at_priority(
+        &self,
+        priority: crate::netlink::tc_handle::FilterPriority,
+    ) -> Option<&TcMessage> {
         self.root_filters.iter().find(|f| f.priority() == priority)
     }
 }
@@ -482,7 +485,7 @@ const RECIPE_FLOWER_VALUE_KEYS: &[u16] = {
 /// * the live filter selects on no *extra* recipe-vocabulary value.
 pub(crate) fn flower_matches(
     desired: &super::filter::FlowerFilter,
-    desired_protocol: u16,
+    desired_protocol: super::eth_proto::EthProto,
     live: &TcMessage,
 ) -> bool {
     use super::filter::FilterConfig;
@@ -898,11 +901,14 @@ mod tests {
 // #270 — flower match-key comparison
 // ========================================================================
 
-/// Render a `FlowerFilter` the way the kernel would echo it back on a
-/// dump: kind `"flower"`, the writer's own option blob, and `tcm_info`
-/// carrying the ethertype in network order.
-fn live_flower(filter: &crate::netlink::filter::FlowerFilter, protocol: u16) -> TcMessage {
-    use crate::netlink::filter::FilterConfig;
+    /// Render a `FlowerFilter` the way the kernel would echo it back on a
+    /// dump: kind `"flower"`, the writer's own option blob, and `tcm_info`
+    /// carrying the ethertype in network order.
+    fn live_flower(
+        filter: &crate::netlink::filter::FlowerFilter,
+        protocol: crate::EthProto,
+    ) -> TcMessage {
+        use crate::netlink::filter::FilterConfig;
 
     let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
     let start = builder.len();
@@ -910,25 +916,25 @@ fn live_flower(filter: &crate::netlink::filter::FlowerFilter, protocol: u16) -> 
     let end = builder.len();
     let blob = builder.as_bytes()[start..end].to_vec();
 
-    let mut msg = TcMessage {
-        kind: Some("flower".to_string()),
-        options: Some(blob),
-        ..TcMessage::default()
-    };
-    msg.header.tcm_info = protocol.to_be() as u32;
-    msg
-}
+        let mut msg = TcMessage {
+            kind: Some("flower".to_string()),
+            options: Some(blob),
+            ..TcMessage::default()
+        };
+        msg.header.tcm_info = protocol.as_u16().to_be() as u32;
+        msg
+    }
 
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
+    const ETH_P_IP: crate::EthProto = crate::EthProto::IP;
+    const ETH_P_IPV6: crate::EthProto = crate::EthProto::IPV6;
 
-fn dst_v4(addr: &str, prefix: u8, classid: TcHandle) -> crate::netlink::filter::FlowerFilter {
-    crate::netlink::filter::FlowerFilter::new()
-        .classid(classid)
-        .priority(1)
-        .dst_ipv4(addr.parse().unwrap(), prefix)
-        .build()
-}
+    fn dst_v4(addr: &str, prefix: u8, classid: TcHandle) -> crate::netlink::filter::FlowerFilter {
+        crate::netlink::filter::FlowerFilter::new()
+            .classid(classid)
+            .priority(crate::FilterPriority::new(1))
+            .dst_ipv4(addr.parse().unwrap(), prefix)
+            .build()
+    }
 
 #[test]
 fn flower_classid_reads_the_target_class() {
@@ -971,7 +977,7 @@ fn flower_matches_rejects_src_where_dst_was_asked_for() {
     let live = live_flower(
         &crate::netlink::filter::FlowerFilter::new()
             .classid(cid)
-            .priority(1)
+            .priority(crate::FilterPriority::new(1))
             .src_ipv4("10.0.0.1".parse().unwrap(), 32)
             .build(),
         ETH_P_IP,
@@ -985,7 +991,7 @@ fn flower_matches_rejects_a_v4_rule_turned_v6() {
     let live = live_flower(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP);
     let want = crate::netlink::filter::FlowerFilter::new()
         .classid(cid)
-        .priority(1)
+        .priority(crate::FilterPriority::new(1))
         .dst_ipv6("fd00::1".parse().unwrap(), 128)
         .build();
     assert!(!flower_matches(&want, ETH_P_IPV6, &live));
@@ -1008,7 +1014,7 @@ fn flower_matches_rejects_a_live_filter_that_matches_on_more() {
     let live = live_flower(
         &crate::netlink::filter::FlowerFilter::new()
             .classid(cid)
-            .priority(1)
+            .priority(crate::FilterPriority::new(1))
             .dst_ipv4("10.0.0.1".parse().unwrap(), 32)
             .ipv4()
             .ip_proto_tcp()
@@ -1025,7 +1031,7 @@ fn flower_matches_rejects_a_different_port() {
     let mk = |port: u16| {
         crate::netlink::filter::FlowerFilter::new()
             .classid(cid)
-            .priority(1)
+            .priority(crate::FilterPriority::new(1))
             .ipv4()
             .ip_proto_tcp()
             .dst_port(port)
@@ -1041,14 +1047,14 @@ fn flower_matches_rejects_tcp_where_udp_was_asked_for() {
     let cid = TcHandle::new(1, 2);
     let tcp = crate::netlink::filter::FlowerFilter::new()
         .classid(cid)
-        .priority(1)
+        .priority(crate::FilterPriority::new(1))
         .ipv4()
         .ip_proto_tcp()
         .dst_port(53)
         .build();
     let udp = crate::netlink::filter::FlowerFilter::new()
         .classid(cid)
-        .priority(1)
+        .priority(crate::FilterPriority::new(1))
         .ipv4()
         .ip_proto_udp()
         .dst_port(53)
@@ -1066,7 +1072,7 @@ fn flower_matches_takes_the_ethertype_from_the_protocol_like_the_install_path() 
     let cid = TcHandle::new(1, 2);
     let want = crate::netlink::filter::FlowerFilter::new()
         .classid(cid)
-        .priority(1)
+        .priority(crate::FilterPriority::new(1))
         .ip_proto_udp()
         .dst_port(53)
         .build();

@@ -509,7 +509,7 @@ async fn per_host_rule_changing_shape_leaves_no_old_filter() -> nlink::Result<()
             .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
             .await?
             .iter()
-            .map(|f| f.priority())
+            .map(|f| f.priority().as_u16())
             .collect();
         if left != [100] {
             failures.push(format!(
@@ -553,7 +553,7 @@ async fn per_host_reconcile_moves_filters_out_of_the_operator_band() -> nlink::R
             .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
             .await?
             .iter()
-            .map(|f| (f.priority(), f.protocol()))
+            .map(|f| (f.priority().as_u16(), f.protocol().as_u16()))
             .collect();
         prios.sort();
         prios.dedup();
@@ -563,7 +563,13 @@ async fn per_host_reconcile_moves_filters_out_of_the_operator_band() -> nlink::R
     // What 0.29 left on the device: the same classes, with the filters at
     // its priorities, and an operator filter of its own in the operator band.
     for (prio, proto) in filters(&conn, ifindex).await? {
-        conn.del_filter_by_index(ifindex, root, proto, prio).await?;
+        conn.del_filter_by_index(
+            ifindex,
+            root,
+            nlink::EthProto::new(proto),
+            nlink::FilterPriority::new(prio),
+        )
+        .await?;
     }
     let (rule0, rule1) = (TcHandle::new(1, 2), TcHandle::new(1, 3));
     let port80 = |f: FlowerFilter| f.classid(rule1).dst_port(80);
@@ -583,8 +589,15 @@ async fn per_host_reconcile_moves_filters_out_of_the_operator_band() -> nlink::R
         ),
     ];
     for (proto, prio, filter) in old {
-        conn.add_filter_by_index_full(ifindex, root, None, proto, prio, filter)
-            .await?;
+        conn.add_filter_by_index_full(
+            ifindex,
+            root,
+            None,
+            nlink::EthProto::new(proto),
+            nlink::FilterPriority::new(prio),
+            filter,
+        )
+        .await?;
     }
 
     let mut failures = Vec::new();
