@@ -2263,109 +2263,57 @@ impl Connection<Route> {
         self.parse_response(&response)
     }
 
-    /// Get a specific IPv4 route by destination and prefix length.
+    /// The route the kernel would use for `destination`: a FIB lookup,
+    /// [`lookup_route`](Self::lookup_route) for one family.
     ///
-    /// Uses RTM_GETROUTE without NLM_F_DUMP to query the kernel directly,
-    /// which is more efficient than dumping all routes for large routing tables.
-    ///
-    /// Returns `None` if no matching route is found.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
-    /// use std::net::Ipv4Addr;
-    ///
-    /// // Look up route to 10.0.0.0/8
-    /// if let Some(route) = conn.get_route_v4(Ipv4Addr::new(10, 0, 0, 0), 8).await? {
-    ///     println!("Gateway: {:?}", route.gateway());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// It was documented as "a specific route by destination and prefix
+    /// length", and it never was one (#510): `RTM_GETROUTE` without a dump
+    /// is a lookup of the address. `prefix_len` was sent as the request's
+    /// `dst_len`, which the kernel ignores — or, with strict checking,
+    /// refuses unless it is 32. It is ignored now. `None` when the
+    /// kernel reports no such route (`ENOENT`); an unreachable destination
+    /// is the error [`lookup_route`](Self::lookup_route) describes.
+    #[deprecated(
+        since = "0.31.0",
+        note = "a FIB lookup of the address, not an exact-prefix get; use `lookup_route`"
+    )]
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_route_v4"))]
     pub async fn get_route_v4(
         &self,
         destination: std::net::Ipv4Addr,
         prefix_len: u8,
     ) -> Result<Option<RouteMessage>> {
-        use crate::netlink::types::route::{RtMsg, RtaAttr};
-
-        // Build RTM_GETROUTE request WITHOUT NLM_F_DUMP
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETROUTE, NLM_F_REQUEST);
-
-        let rtmsg = RtMsg::new()
-            .with_family(libc::AF_INET as u8)
-            .with_dst_len(prefix_len);
-        builder.append(&rtmsg);
-        builder.append_attr(RtaAttr::Dst as u16, &destination.octets());
-
-        // Send single request (not dump)
-        match self.send_request(builder).await {
-            Ok(response) => {
-                // Parse the response - skip netlink header
-                if response.len() >= NLMSG_HDRLEN {
-                    let payload = &response[NLMSG_HDRLEN..];
-                    if let Ok(msg) = RouteMessage::from_bytes(payload) {
-                        return Ok(Some(msg));
-                    }
-                }
-                Ok(None)
-            }
+        let _ = prefix_len;
+        match self.lookup_route(destination.into()).await {
+            Ok(route) => Ok(Some(route)),
             Err(e) if e.is_not_found() => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// Get a specific IPv6 route by destination and prefix length.
+    /// The route the kernel would use for `destination`: a FIB lookup,
+    /// [`lookup_route`](Self::lookup_route) for one family.
     ///
-    /// Uses RTM_GETROUTE without NLM_F_DUMP to query the kernel directly,
-    /// which is more efficient than dumping all routes for large routing tables.
-    ///
-    /// Returns `None` if no matching route is found.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
-    /// use std::net::Ipv6Addr;
-    ///
-    /// // Look up route to 2001:db8::/32
-    /// let dest: Ipv6Addr = "2001:db8::".parse()?;
-    /// if let Some(route) = conn.get_route_v6(dest, 32).await? {
-    ///     println!("Gateway: {:?}", route.gateway());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// It was documented as "a specific route by destination and prefix
+    /// length", and it never was one (#510): `RTM_GETROUTE` without a dump
+    /// is a lookup of the address. `prefix_len` was sent as the request's
+    /// `dst_len`, which the kernel ignores — or, with strict checking,
+    /// refuses unless it is 128. It is ignored now. `None` when the
+    /// kernel reports no such route (`ENOENT`); an unreachable destination
+    /// is the error [`lookup_route`](Self::lookup_route) describes.
+    #[deprecated(
+        since = "0.31.0",
+        note = "a FIB lookup of the address, not an exact-prefix get; use `lookup_route`"
+    )]
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_route_v6"))]
     pub async fn get_route_v6(
         &self,
         destination: std::net::Ipv6Addr,
         prefix_len: u8,
     ) -> Result<Option<RouteMessage>> {
-        use crate::netlink::types::route::{RtMsg, RtaAttr};
-
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETROUTE, NLM_F_REQUEST);
-
-        let rtmsg = RtMsg::new()
-            .with_family(libc::AF_INET6 as u8)
-            .with_dst_len(prefix_len);
-        builder.append(&rtmsg);
-        builder.append_attr(RtaAttr::Dst as u16, &destination.octets());
-
-        match self.send_request(builder).await {
-            Ok(response) => {
-                if response.len() >= NLMSG_HDRLEN {
-                    let payload = &response[NLMSG_HDRLEN..];
-                    if let Ok(msg) = RouteMessage::from_bytes(payload) {
-                        return Ok(Some(msg));
-                    }
-                }
-                Ok(None)
-            }
+        let _ = prefix_len;
+        match self.lookup_route(destination.into()).await {
+            Ok(route) => Ok(Some(route)),
             Err(e) if e.is_not_found() => Ok(None),
             Err(e) => Err(e),
         }

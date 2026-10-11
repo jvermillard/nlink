@@ -397,8 +397,6 @@ impl RouteCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         // Parse destination prefix
-        use std::net::IpAddr;
-
         use nlink::util::addr::parse_prefix;
 
         let (dst_addr, prefix_len) = parse_prefix(destination).map_err(|e| {
@@ -406,24 +404,14 @@ impl RouteCmd {
         })?;
 
         // Ask the kernel which route it would actually use for this
-        // destination (RTM_GETROUTE, longest-prefix match) rather than
-        // dumping every route and requiring an exact prefix match — the
-        // latter returned "not found" for e.g. `ip route get 8.8.8.8`
-        // whenever only a default/covering route existed.
-        let route = match dst_addr {
-            IpAddr::V4(v4) => conn.get_route_v4(v4, prefix_len).await?,
-            IpAddr::V6(v6) => conn.get_route_v6(v6, prefix_len).await?,
-        };
-
-        match route {
-            Some(r) => print_all(std::slice::from_ref(&r), format, opts)?,
-            None => {
-                return Err(nlink::netlink::Error::InvalidMessage(format!(
-                    "route to {} not found",
-                    destination
-                )));
-            }
-        }
+        // destination (RTM_GETROUTE, a FIB lookup), as `ip route get` does,
+        // rather than dumping every route and requiring an exact prefix
+        // match — that returned "not found" for e.g. `ip route get 8.8.8.8`
+        // whenever only a default/covering route existed. The prefix length
+        // is not part of a lookup.
+        let _ = prefix_len;
+        let route = conn.lookup_route(dst_addr).await?;
+        print_all(std::slice::from_ref(&route), format, opts)?;
 
         Ok(())
     }
