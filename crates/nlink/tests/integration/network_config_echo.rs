@@ -380,6 +380,116 @@ async fn a_recreate_is_reported_and_its_blockers_are_typed() -> nlink::Result<()
     Ok(())
 }
 
+/// A recreate policy and caller-owned state decide what a recreate may
+/// destroy; what it destroyed is reported for the caller to put back (#513).
+#[tokio::test]
+async fn a_recreate_policy_and_caller_owned_state_let_a_recreate_through() -> nlink::Result<()> {
+    use nlink::netlink::config::{ApplyOptions, Blocker, BlockerFilter, Owned, RecreatePolicy};
+    use nlink::netlink::types::route::RouteProtocol;
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "sch_netem");
+
+    let ns = TestNamespace::new("nce-policy")?;
+    let conn = ns.connection()?;
+    // v1 keeps a declared address: deleting a device's last IPv4 address
+    // flushes every IPv4 route through it (`fib_disable_ip`), which would
+    // take the zebra route below with the stray address.
+    let vlan = |id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v1", |l| l.vlan("d0", id).up())
+            .address("v1", "10.96.0.1/24")
+            .unwrap()
+    };
+    assert!(vlan(10).apply(&conn).await?.is_success());
+
+    // The caller's own netem on v1: refused by default, let through when
+    // the caller says it owns v1's root qdisc, and reported.
+    ns.exec(
+        "tc",
+        &["qdisc", "add", "dev", "v1", "root", "netem", "delay", "5ms"],
+    )?;
+    let err = vlan(20).apply(&conn).await.expect_err("refused by default");
+    assert!(err.is_not_supported(), "{err}");
+    let owned = ApplyOptions::default().with_caller_owned([Owned::RootQdisc { dev: "v1".into() }]);
+    let applied = vlan(20).apply_with_options(&conn, owned).await?;
+    assert!(
+        applied
+            .destroyed
+            .iter()
+            .any(|b| matches!(b, Blocker::Qdisc { qdisc, .. } if qdisc == "netem")),
+        "{:?}",
+        applied.destroyed
+    );
+
+    // A zebra route through v1: a filter that lets routing-daemon routes go
+    // lets it through; an undeclared address next to it still refuses.
+    ns.exec(
+        "ip",
+        &[
+            "route",
+            "add",
+            "10.94.0.0/24",
+            "dev",
+            "v1",
+            "proto",
+            "zebra",
+        ],
+    )?;
+    ns.exec("ip", &["addr", "add", "10.95.0.1/24", "dev", "v1"])?;
+    let daemons = || {
+        RecreatePolicy::AllowDestroying(BlockerFilter::new(|b| {
+            matches!(
+                b,
+                Blocker::Route {
+                    protocol: RouteProtocol::Zebra,
+                    ..
+                }
+            )
+        }))
+    };
+    let err = vlan(30)
+        .apply_with_options(
+            &conn,
+            ApplyOptions::default().with_recreate_policy(daemons()),
+        )
+        .await
+        .expect_err("the address still refuses");
+    assert!(err.to_string().contains("10.95.0.1/24"), "{err}");
+    ns.exec("ip", &["addr", "del", "10.95.0.1/24", "dev", "v1"])?;
+    let applied = vlan(30)
+        .apply_with_options(
+            &conn,
+            ApplyOptions::default().with_recreate_policy(daemons()),
+        )
+        .await?;
+    assert!(
+        applied
+            .destroyed
+            .iter()
+            .any(|b| matches!(b, Blocker::Route { .. })),
+        "{:?}",
+        applied.destroyed
+    );
+
+    // `Allow` lets anything through.
+    ns.exec("ip", &["addr", "add", "10.95.0.1/24", "dev", "v1"])?;
+    let applied = vlan(40)
+        .apply_with_options(
+            &conn,
+            ApplyOptions::default().with_recreate_policy(RecreatePolicy::Allow),
+        )
+        .await?;
+    assert!(applied.recreated.iter().any(|r| r.name == "v1"));
+    assert!(
+        applied
+            .destroyed
+            .iter()
+            .any(|b| matches!(b, Blocker::Address { .. }))
+    );
+    Ok(())
+}
+
 /// A parent or master a declared link names, which the config does not
 /// declare and which does not exist, is reported with the missing links.
 /// The apply used to create what came before it and then fail (#518).

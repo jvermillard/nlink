@@ -128,6 +128,132 @@ pub struct LinkRecreate {
     /// picks again (#513). Its sysctls (`net.ipv4.conf.<link>.*`,
     /// `net.ipv6.conf.<link>.*`) return to their defaults too.
     pub resets: Vec<String>,
+    /// What the recreate destroys that the caller owns
+    /// ([`Owned`]) or the [`RecreatePolicy`] lets go: for the caller to put
+    /// back (#513).
+    pub destroys: Vec<Blocker>,
+}
+
+/// What a diff does with a recreate (or a removal) that would destroy what
+/// the config does not declare (#513).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub enum RecreatePolicy {
+    /// Refuse it: the apply fails before anything changes, naming what
+    /// would be lost. The default.
+    #[default]
+    Refuse,
+    /// Let it through: what it destroys is reported in
+    /// [`ApplyResult::destroyed`](super::ApplyResult::destroyed), for the
+    /// caller to put back.
+    Allow,
+    /// Let it through when every blocker passes the filter: "the TC on
+    /// these devices", "routes a routing daemon re-learns". Otherwise
+    /// refuse it, as [`Refuse`](Self::Refuse) does.
+    AllowDestroying(BlockerFilter),
+}
+
+impl RecreatePolicy {
+    /// Whether a deletion that would destroy `blockers` goes ahead.
+    pub(crate) fn allows(&self, blockers: &[Blocker]) -> bool {
+        match self {
+            Self::Refuse => blockers.is_empty(),
+            Self::Allow => true,
+            Self::AllowDestroying(filter) => blockers.iter().all(|b| filter.allows(b)),
+        }
+    }
+}
+
+/// The blockers a [`RecreatePolicy::AllowDestroying`] lets go.
+///
+/// ```
+/// use nlink::netlink::config::{Blocker, BlockerFilter, RecreatePolicy};
+/// use nlink::netlink::types::route::RouteProtocol;
+///
+/// // FRR re-learns its routes; anything else still refuses the recreate.
+/// let policy = RecreatePolicy::AllowDestroying(BlockerFilter::new(|b| {
+///     matches!(b, Blocker::Route { protocol, .. }
+///         if matches!(protocol, RouteProtocol::Zebra | RouteProtocol::Bgp | RouteProtocol::Ospf))
+/// }));
+/// # let _ = policy;
+/// ```
+#[derive(Clone)]
+pub struct BlockerFilter(std::sync::Arc<dyn Fn(&Blocker) -> bool + Send + Sync>);
+
+impl BlockerFilter {
+    /// A filter that lets a blocker go when `f` says so.
+    pub fn new(f: impl Fn(&Blocker) -> bool + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    /// Whether this blocker may be destroyed.
+    pub fn allows(&self, blocker: &Blocker) -> bool {
+        (self.0)(blocker)
+    }
+}
+
+impl std::fmt::Debug for BlockerFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BlockerFilter(..)")
+    }
+}
+
+/// State the caller manages itself, next to a `NetworkConfig` (#513): never
+/// a reason to refuse a recreate or removal, never purged. A recreate that
+/// takes it with the link reports it in
+/// [`ApplyResult::destroyed`](super::ApplyResult::destroyed), for the caller
+/// to put back.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "kind",
+        rename_all = "kebab-case",
+        rename_all_fields = "kebab-case"
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Owned {
+    /// The root qdisc of `dev`, and the TC tree under it: classes, leaf
+    /// qdiscs, filters.
+    RootQdisc {
+        /// The device.
+        dev: String,
+    },
+    /// The ingress or clsact qdisc of `dev`, and its filters.
+    IngressQdisc {
+        /// The device.
+        dev: String,
+    },
+    /// Every route in this table.
+    RouteTable {
+        /// The table.
+        table: u32,
+    },
+}
+
+impl Owned {
+    /// Whether this covers `blocker`.
+    pub(crate) fn covers(&self, blocker: &Blocker) -> bool {
+        match (self, blocker) {
+            (
+                Self::RootQdisc { dev } | Self::IngressQdisc { dev },
+                Blocker::Qdisc { dev: d, .. },
+            )
+            | (
+                Self::RootQdisc { dev } | Self::IngressQdisc { dev },
+                Blocker::Class { dev: d, .. },
+            )
+            | (
+                Self::RootQdisc { dev } | Self::IngressQdisc { dev },
+                Blocker::Filter { dev: d, .. },
+            ) => dev == d,
+            (Self::RouteTable { table }, Blocker::Route { table: t, .. }) => table == t,
+            _ => false,
+        }
+    }
 }
 
 /// A link the previous config declared and this one does not, which the
@@ -155,6 +281,9 @@ pub struct LinkRemoval {
     /// means the apply refuses, with
     /// [`Error::NotSupported`](crate::Error::NotSupported).
     pub blocked_by: Vec<Blocker>,
+    /// What deleting it destroys that the caller owns or the
+    /// [`RecreatePolicy`] lets go (#513).
+    pub destroys: Vec<Blocker>,
 }
 
 impl LinkRemoval {
@@ -225,6 +354,11 @@ pub enum Blocker {
         /// How it goes through the device, when not as its output
         /// device (`"via a nexthop object on"`, …).
         through: Option<String>,
+        /// Who added it (`ip route`'s `proto`): a routing daemon re-learns
+        /// its own routes, so a [`RecreatePolicy`] may let those go.
+        #[cfg_attr(feature = "schemars", schemars(with = "u8"))]
+        #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_protocol"))]
+        protocol: RouteProtocol,
     },
     /// A qdisc the config does not declare, or one under a class, which
     /// it cannot declare.
@@ -340,6 +474,7 @@ impl std::fmt::Display for Blocker {
                 table,
                 nhid,
                 through,
+                ..
             } => {
                 let nhid = nhid.map(|id| format!(" nhid {id}")).unwrap_or_default();
                 match through {
@@ -1144,7 +1279,16 @@ fn route_label(r: &RouteMessage, name: &str, how: &str) -> Blocker {
         table: r.table_id(),
         nhid: r.nh_id(),
         through: (!how.is_empty()).then(|| how.to_string()),
+        protocol: r.protocol(),
     }
+}
+
+#[cfg(feature = "serde")]
+fn serialize_protocol<S: serde::Serializer>(
+    p: &RouteProtocol,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_u8(p.number())
 }
 
 fn mac_str(mac: &[u8]) -> String {
@@ -1624,6 +1768,18 @@ pub(crate) fn plan(
         // A bridge entry is dumped once per VLAN as well as once without.
         let mut seen_reasons = HashSet::new();
         blocked_by.retain(|b| seen_reasons.insert(b.clone()));
+        // What the caller owns is never a reason to refuse; it is reported
+        // as destroyed. So is what the policy lets go (#513). A kind that
+        // cannot be recreated at all stays a refusal under any policy.
+        let (mut destroys, mut blocked_by): (Vec<Blocker>, Vec<Blocker>) = blocked_by
+            .into_iter()
+            .partition(|b| opts.owned.iter().any(|o| o.covers(b)));
+        let unsupported = blocked_by
+            .iter()
+            .any(|b| matches!(b, Blocker::Unsupported { .. }));
+        if !unsupported && opts.recreate_policy.allows(&blocked_by) {
+            destroys.append(&mut blocked_by);
+        }
 
         if remove {
             let refused = !blocked_by.is_empty();
@@ -1632,6 +1788,7 @@ pub(crate) fn plan(
                 link_kind: seed.kind().unwrap_or("link").to_string(),
                 stacked_on: None,
                 blocked_by,
+                destroys: if refused { Vec::new() } else { destroys },
             });
             if refused {
                 continue;
@@ -1644,6 +1801,7 @@ pub(crate) fn plan(
                         link_kind: l.kind().unwrap_or("link").to_string(),
                         stacked_on: Some(name_of(*lower).to_string()),
                         blocked_by: Vec::new(),
+                        destroys: Vec::new(),
                     });
                 }
             }
@@ -1663,9 +1821,12 @@ pub(crate) fn plan(
                 reason,
                 blocked_by,
                 resets: Vec::new(),
+                destroys: Vec::new(),
             });
             continue;
         }
+        // The seed's entry, first in the closure, carries what it destroys.
+        let mut destroys = Some(destroys);
 
         for (l, lower) in &closure {
             let name = name_of(l.ifindex());
@@ -1696,6 +1857,7 @@ pub(crate) fn plan(
                 reason,
                 blocked_by: Vec::new(),
                 resets,
+                destroys: destroys.take().unwrap_or_default(),
             });
         }
         for (master, port) in &ports {
@@ -1996,6 +2158,49 @@ mod tests {
         assert_eq!(got, HashSet::from([2, 3, 4]));
     }
 
+    /// The policy and caller ownership decide which blockers go (#513).
+    #[test]
+    fn policy_and_ownership_decide_what_goes() {
+        let addr = Blocker::Address {
+            dev: "v1".into(),
+            address: "10.0.0.9".parse().unwrap(),
+            prefix_len: 24,
+        };
+        let zebra = Blocker::Route {
+            dev: "v1".into(),
+            destination: "10.1.0.0".parse().unwrap(),
+            prefix_len: 16,
+            table: 100,
+            nhid: None,
+            through: None,
+            protocol: RouteProtocol::Zebra,
+        };
+        let netem = Blocker::Qdisc {
+            dev: "v1".into(),
+            qdisc: "netem".into(),
+            under: None,
+        };
+        assert!(RecreatePolicy::Refuse.allows(&[]));
+        assert!(!RecreatePolicy::Refuse.allows(std::slice::from_ref(&addr)));
+        assert!(RecreatePolicy::Allow.allows(&[addr.clone(), zebra.clone()]));
+        let routes_only = RecreatePolicy::AllowDestroying(BlockerFilter::new(|b| {
+            matches!(
+                b,
+                Blocker::Route {
+                    protocol: RouteProtocol::Zebra,
+                    ..
+                }
+            )
+        }));
+        assert!(routes_only.allows(std::slice::from_ref(&zebra)));
+        assert!(!routes_only.allows(&[zebra.clone(), addr.clone()]));
+
+        assert!(Owned::RootQdisc { dev: "v1".into() }.covers(&netem));
+        assert!(!Owned::RootQdisc { dev: "v2".into() }.covers(&netem));
+        assert!(Owned::RouteTable { table: 100 }.covers(&zebra));
+        assert!(!Owned::RouteTable { table: 100 }.covers(&addr));
+    }
+
     /// Each blocker shows the text the untyped list held (#513).
     #[test]
     fn blockers_show_what_they_used_to_say() {
@@ -2009,6 +2214,7 @@ mod tests {
                     table: 254,
                     nhid: None,
                     through: None,
+                    protocol: RouteProtocol::Boot,
                 },
                 "route 10.1.0.0/16 dev v1 table 254",
             ),
@@ -2020,6 +2226,7 @@ mod tests {
                     table: 254,
                     nhid: Some(7),
                     through: Some("via a nexthop on".into()),
+                    protocol: RouteProtocol::Boot,
                 },
                 "route 10.1.0.0/16 nhid 7 table 254, via a nexthop on v1",
             ),
@@ -2111,6 +2318,7 @@ mod tests {
                 prefix_len: 24,
             }],
             resets: Vec::new(),
+            destroys: Vec::new(),
         };
         assert!(r.is_refused());
         let shown = r.to_string();

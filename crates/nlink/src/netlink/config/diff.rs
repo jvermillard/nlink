@@ -96,6 +96,15 @@ pub struct DiffOptions {
     /// It works with or without [`Self::purge`]; with both, the diff
     /// removes the union.
     pub previous: Option<std::sync::Arc<NetworkConfig>>,
+
+    /// What to do with a recreate or removal that would destroy what the
+    /// config does not declare (#513). Default
+    /// [`RecreatePolicy::Refuse`](super::RecreatePolicy::Refuse).
+    pub recreate_policy: super::RecreatePolicy,
+
+    /// State the caller manages itself: never a blocker, never purged, and
+    /// reported when a recreate destroys it (#513).
+    pub owned: Vec<super::Owned>,
 }
 
 impl DiffOptions {
@@ -121,6 +130,35 @@ impl DiffOptions {
         self.purge_address_devs
             .extend(devs.into_iter().map(Into::into));
         self
+    }
+
+    /// What to do with a recreate or removal that would destroy what the
+    /// config does not declare; see [`Self::recreate_policy`].
+    pub fn recreate_policy(mut self, policy: super::RecreatePolicy) -> Self {
+        self.recreate_policy = policy;
+        self
+    }
+
+    /// Add state the caller manages itself; see [`Self::owned`].
+    pub fn caller_owned(mut self, owned: impl IntoIterator<Item = super::Owned>) -> Self {
+        self.owned.extend(owned);
+        self
+    }
+
+    /// Whether the caller owns route table `table`.
+    pub(crate) fn owns_table(&self, table: u32) -> bool {
+        self.owned
+            .iter()
+            .any(|o| matches!(o, super::Owned::RouteTable { table: t } if *t == table))
+    }
+
+    /// Whether the caller owns the qdisc of `dev` at `parent`.
+    pub(crate) fn owns_qdisc(&self, dev: &str, parent: QdiscParent) -> bool {
+        self.owned.iter().any(|o| match (o, parent) {
+            (super::Owned::RootQdisc { dev: d }, QdiscParent::Root)
+            | (super::Owned::IngressQdisc { dev: d }, QdiscParent::Ingress) => d == dev,
+            _ => false,
+        })
     }
 
     /// Remove what `previous` declared and the config no longer does; see
@@ -1737,7 +1775,8 @@ fn diff_routes(
         let superseded = declared_here
             .iter()
             .any(|d| route_matches_but_metric(d, oif_of(d), r));
-        let purged = purge && purgeable_route(r, &tables, config);
+        // The caller's own tables are never purged (#513).
+        let purged = purge && purgeable_route(r, &tables, config) && !opts.owns_table(r.table_id());
         // Declared before, not now: it goes, wherever its table (#512).
         let dropped = previous_by_key
             .get(&(dst, r.dst_len(), r.table_id()))
@@ -1899,7 +1938,7 @@ fn diff_qdiscs(
             .qdiscs_to_remove
             .iter()
             .any(|q| q.dev == prev.dev && q.effective_parent() == parent);
-        if !still && live && !queued {
+        if !still && live && !queued && !opts.owns_qdisc(&prev.dev, parent) {
             diff.qdiscs_to_remove.push(prev.clone());
         }
     }

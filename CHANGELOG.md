@@ -181,6 +181,24 @@ All notable changes to this project will be documented in this file.
     nlink-lab asked for this (its #159): a VLAN removed from a running lab
     stayed in the kernel.
 
+- **A recreate policy, and state the caller owns (#513, part 2).**
+  - `DiffOptions::recreate_policy` / `ApplyOptions::with_recreate_policy`
+    take a `RecreatePolicy`. `Refuse` is the default and refuses as
+    before. `Allow` lets every recreate and removal through.
+    `AllowDestroying(BlockerFilter)` lets one through when every blocker
+    passes the filter: "routes a routing daemon re-learns", say, which is
+    why `Blocker::Route` now carries its `protocol`. A link kind that
+    cannot be recreated at all still refuses under any policy.
+  - `caller_owned([Owned::RootQdisc { dev }, Owned::IngressQdisc { dev },
+    Owned::RouteTable { table }])` names state the caller manages itself.
+    It never refuses a recreate or removal, and is never purged. Owning
+    a device's root or ingress qdisc means owning its TC tree.
+  - What a recreate or removal destroys under either rule is in its
+    `destroys`, and `ApplyResult::destroyed` collects it: what the caller
+    puts back. nlink-lab took its TC and VRF routes off before an apply
+    and put them back after, and declared fake qdiscs for `--check`, to
+    get the same effect.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
