@@ -152,6 +152,190 @@ impl std::fmt::Display for Ipv4Devconf {
     }
 }
 
+/// An IPv6 per-device setting (`DEVCONF_*`): the file of that name in
+/// `/proc/sys/net/ipv6/conf/<dev>/` (#516). The link dump reports each; the
+/// kernel takes them only through `/proc/sys`, so an apply writes them from
+/// inside the link's namespace.
+///
+/// Integer settings only: the ones that are intervals are left out, since
+/// the dump gives them in milliseconds and `/proc` in seconds, and so are
+/// `stable_secret` (an address), the read-only `mc_forwarding`, and
+/// `addr_gen_mode`, which [`AddrGenMode`] sets over netlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u16)]
+#[non_exhaustive]
+pub enum Ipv6Devconf {
+    Forwarding = 0,
+    Hoplimit = 1,
+    Mtu6 = 2,
+    AcceptRa = 3,
+    AcceptRedirects = 4,
+    Autoconf = 5,
+    DadTransmits = 6,
+    RtrSolicits = 7,
+    UseTempaddr = 10,
+    TempValidLft = 11,
+    TempPreferedLft = 12,
+    MaxAddresses = 15,
+    ForceMldVersion = 16,
+    AcceptRaDefrtr = 17,
+    AcceptRaPinfo = 18,
+    AcceptRaRtrPref = 19,
+    AcceptRaRtInfoMaxPlen = 21,
+    ProxyNdp = 22,
+    OptimisticDad = 23,
+    AcceptSourceRoute = 24,
+    DisableIpv6 = 26,
+    AcceptDad = 27,
+    ForceTllao = 28,
+    NdiscNotify = 29,
+    SuppressFragNdisc = 32,
+    AcceptRaFromLocal = 33,
+    UseOptimistic = 34,
+    AcceptRaMtu = 35,
+    UseOifAddrsOnly = 37,
+    AcceptRaMinHopLimit = 38,
+    IgnoreRoutesWithLinkdown = 39,
+    DropUnicastInL2Multicast = 40,
+    DropUnsolicitedNa = 41,
+    KeepAddrOnDown = 42,
+    Seg6Enabled = 44,
+    Seg6RequireHmac = 45,
+    EnhancedDad = 46,
+    DisablePolicy = 48,
+    AcceptRaRtInfoMinPlen = 49,
+    NdiscTclass = 50,
+    RplSegEnabled = 51,
+    RaDefrtrMetric = 52,
+    Ioam6Enabled = 53,
+    Ioam6Id = 54,
+    Ioam6IdWide = 55,
+    NdiscEvictNocarrier = 56,
+    AcceptUntrackedNa = 57,
+}
+
+impl Ipv6Devconf {
+    /// Every setting this type has, in id order.
+    pub const ALL: [Self; 47] = [
+        Self::Forwarding,
+        Self::Hoplimit,
+        Self::Mtu6,
+        Self::AcceptRa,
+        Self::AcceptRedirects,
+        Self::Autoconf,
+        Self::DadTransmits,
+        Self::RtrSolicits,
+        Self::UseTempaddr,
+        Self::TempValidLft,
+        Self::TempPreferedLft,
+        Self::MaxAddresses,
+        Self::ForceMldVersion,
+        Self::AcceptRaDefrtr,
+        Self::AcceptRaPinfo,
+        Self::AcceptRaRtrPref,
+        Self::AcceptRaRtInfoMaxPlen,
+        Self::ProxyNdp,
+        Self::OptimisticDad,
+        Self::AcceptSourceRoute,
+        Self::DisableIpv6,
+        Self::AcceptDad,
+        Self::ForceTllao,
+        Self::NdiscNotify,
+        Self::SuppressFragNdisc,
+        Self::AcceptRaFromLocal,
+        Self::UseOptimistic,
+        Self::AcceptRaMtu,
+        Self::UseOifAddrsOnly,
+        Self::AcceptRaMinHopLimit,
+        Self::IgnoreRoutesWithLinkdown,
+        Self::DropUnicastInL2Multicast,
+        Self::DropUnsolicitedNa,
+        Self::KeepAddrOnDown,
+        Self::Seg6Enabled,
+        Self::Seg6RequireHmac,
+        Self::EnhancedDad,
+        Self::DisablePolicy,
+        Self::AcceptRaRtInfoMinPlen,
+        Self::NdiscTclass,
+        Self::RplSegEnabled,
+        Self::RaDefrtrMetric,
+        Self::Ioam6Enabled,
+        Self::Ioam6Id,
+        Self::Ioam6IdWide,
+        Self::NdiscEvictNocarrier,
+        Self::AcceptUntrackedNa,
+    ];
+
+    /// The sysctl's name: `accept_dad` for [`Self::AcceptDad`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Forwarding => "forwarding",
+            Self::Hoplimit => "hop_limit",
+            Self::Mtu6 => "mtu",
+            Self::AcceptRa => "accept_ra",
+            Self::AcceptRedirects => "accept_redirects",
+            Self::Autoconf => "autoconf",
+            Self::DadTransmits => "dad_transmits",
+            Self::RtrSolicits => "router_solicitations",
+            Self::UseTempaddr => "use_tempaddr",
+            Self::TempValidLft => "temp_valid_lft",
+            Self::TempPreferedLft => "temp_prefered_lft",
+            Self::MaxAddresses => "max_addresses",
+            Self::ForceMldVersion => "force_mld_version",
+            Self::AcceptRaDefrtr => "accept_ra_defrtr",
+            Self::AcceptRaPinfo => "accept_ra_pinfo",
+            Self::AcceptRaRtrPref => "accept_ra_rtr_pref",
+            Self::AcceptRaRtInfoMaxPlen => "accept_ra_rt_info_max_plen",
+            Self::ProxyNdp => "proxy_ndp",
+            Self::OptimisticDad => "optimistic_dad",
+            Self::AcceptSourceRoute => "accept_source_route",
+            Self::DisableIpv6 => "disable_ipv6",
+            Self::AcceptDad => "accept_dad",
+            Self::ForceTllao => "force_tllao",
+            Self::NdiscNotify => "ndisc_notify",
+            Self::SuppressFragNdisc => "suppress_frag_ndisc",
+            Self::AcceptRaFromLocal => "accept_ra_from_local",
+            Self::UseOptimistic => "use_optimistic",
+            Self::AcceptRaMtu => "accept_ra_mtu",
+            Self::UseOifAddrsOnly => "use_oif_addrs_only",
+            Self::AcceptRaMinHopLimit => "accept_ra_min_hop_limit",
+            Self::IgnoreRoutesWithLinkdown => "ignore_routes_with_linkdown",
+            Self::DropUnicastInL2Multicast => "drop_unicast_in_l2_multicast",
+            Self::DropUnsolicitedNa => "drop_unsolicited_na",
+            Self::KeepAddrOnDown => "keep_addr_on_down",
+            Self::Seg6Enabled => "seg6_enabled",
+            Self::Seg6RequireHmac => "seg6_require_hmac",
+            Self::EnhancedDad => "enhanced_dad",
+            Self::DisablePolicy => "disable_policy",
+            Self::AcceptRaRtInfoMinPlen => "accept_ra_rt_info_min_plen",
+            Self::NdiscTclass => "ndisc_tclass",
+            Self::RplSegEnabled => "rpl_seg_enabled",
+            Self::RaDefrtrMetric => "ra_defrtr_metric",
+            Self::Ioam6Enabled => "ioam6_enabled",
+            Self::Ioam6Id => "ioam6_id",
+            Self::Ioam6IdWide => "ioam6_id_wide",
+            Self::NdiscEvictNocarrier => "ndisc_evict_nocarrier",
+            Self::AcceptUntrackedNa => "accept_untracked_na",
+        }
+    }
+
+    /// The setting with sysctl name `name`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|d| d.name() == name)
+    }
+
+    /// The kernel's id (`DEVCONF_*`): its index in `IFLA_INET6_CONF`.
+    pub fn id(self) -> u16 {
+        self as u16
+    }
+}
+
+impl std::fmt::Display for Ipv6Devconf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// How the kernel makes a link's IPv6 link-local address (`IN6_ADDR_GEN_MODE_*`,
 /// `ip link set … addrgenmode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -260,6 +444,11 @@ impl InetAfSpec {
         out
     }
 
+    /// An IPv6 setting's value.
+    pub(crate) fn ipv6(&self, d: Ipv6Devconf) -> Option<i32> {
+        self.ipv6_conf.as_ref()?.get(usize::from(d.id())).copied()
+    }
+
     /// An IPv4 setting's value.
     pub(crate) fn ipv4(&self, d: Ipv4Devconf) -> Option<u32> {
         self.ipv4_conf
@@ -305,6 +494,24 @@ impl serde::Serialize for Ipv4Devconf {
     }
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for Ipv6Devconf {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.name())
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Ipv6Devconf {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Ipv6Devconf".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let names: Vec<&str> = Self::ALL.iter().map(|d| d.name()).collect();
+        schemars::json_schema!({ "enum": names })
+    }
+}
+
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for Ipv4Devconf {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -326,6 +533,9 @@ mod tests {
         for (i, d) in Ipv4Devconf::ALL.into_iter().enumerate() {
             assert_eq!(usize::from(d.id()), i + 1);
             assert_eq!(Ipv4Devconf::from_name(d.name()), Some(d));
+        }
+        for d in Ipv6Devconf::ALL {
+            assert_eq!(Ipv6Devconf::from_name(d.name()), Some(d));
         }
         for m in [AddrGenMode::Eui64, AddrGenMode::None, AddrGenMode::StablePrivacy, AddrGenMode::Random] {
             assert_eq!(AddrGenMode::from_name(m.name()), Some(m));
