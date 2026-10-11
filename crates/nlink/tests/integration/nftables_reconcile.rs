@@ -1278,9 +1278,9 @@ async fn chain_changes_an_update_cannot_make_recreate_the_chain() -> nlink::Resu
         chain_c(None, false),
     ];
     let want = [
-        (Some(Hook::Input.to_u32()), Some(0)),
-        (Some(Hook::Input.to_u32()), Some(-10)),
-        (Some(Hook::Forward.to_u32()), Some(-10)),
+        (Some(Hook::Input.number(Family::Inet)), Some(0)),
+        (Some(Hook::Input.number(Family::Inet)), Some(-10)),
+        (Some(Hook::Forward.number(Family::Inet)), Some(-10)),
         (None, None),
     ];
     let ns = TestNamespace::new("nft-chain-recreate")?;
@@ -1361,6 +1361,82 @@ async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink:
             2,
             "the exclusive chain keeps only its own rules"
         );
+        Ok(())
+    })
+    .await
+}
+
+// ============================================================================
+// #484 — hooks per family, chains on several devices
+// ============================================================================
+
+/// An `arp` chain lands on the hook it declares. Hook numbers are per
+/// family, and ARP's are `NF_ARP_IN = 0`, `NF_ARP_OUT = 1`: sent as the
+/// inet numbers, an input chain filtered outgoing ARP and an output chain
+/// was refused (#484).
+#[tokio::test]
+async fn arp_chains_land_on_their_hooks() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let cfg = NftablesConfig::new().table("t", Family::Arp, |t| {
+        t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter))
+            .chain("out", |c| c.hook(Hook::Output).priority(Priority::Filter))
+    });
+    let ns = TestNamespace::new("nft-arp-hooks")?;
+    assert_transition(&ns, &[cfg], false, async |_, _| {
+        for (chain, hook) in [("in", "input"), ("out", "output")] {
+            let shown =
+                nft(&ns, &format!("list chain arp t {chain}")).map_err(|e| e.to_string())?;
+            if !shown.contains(&format!("hook {hook} ")) {
+                return Err(format!("chain {chain} is not on {hook}:\n{shown}"));
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A netdev chain moved to another device ends up on that device alone.
+/// The kernel adds devices on an update, and dumps a chain on several of
+/// them without `NFTA_HOOK_DEV`, so the chain was left on both and drifted
+/// on every apply (#484).
+#[tokio::test]
+async fn a_netdev_chain_moves_to_the_declared_device() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "dummy");
+
+    let on = |dev: &'static str| {
+        NftablesConfig::new().table("t", Family::Netdev, move |t| {
+            t.chain("c", move |c| {
+                c.hook(Hook::NetdevIngress)
+                    .priority(Priority::Filter)
+                    .device(dev)
+            })
+            .rule_keyed("c", "count", |r| r.counter())
+        })
+    };
+    let ns = TestNamespace::new("nft-netdev-dev")?;
+    for dev in ["d0", "d1"] {
+        ns.exec("ip", &["link", "add", dev, "type", "dummy"])?;
+    }
+    assert_transition(&ns, &[on("d0"), on("d1")], false, async |i, nft_conn| {
+        let want = ["d0", "d1"][i];
+        let chains = nft_conn
+            .list_chains_in("t", Family::Netdev)
+            .await
+            .map_err(|e| e.to_string())?;
+        let c = chains
+            .iter()
+            .find(|c| c.name == "c")
+            .ok_or("chain c is gone")?;
+        if c.devices != [want] {
+            return Err(format!("want the chain on {want} alone: {:?}", c.devices));
+        }
+        let shown = nft(&ns, "list chain netdev t c").map_err(|e| e.to_string())?;
+        if !shown.contains(&format!("device \"{want}\"")) {
+            return Err(format!("nft disagrees:\n{shown}"));
+        }
         Ok(())
     })
     .await

@@ -102,6 +102,19 @@ fn try_walk_tlvs(bytes: &[u8]) -> Option<Vec<(u16, Vec<u8>)>> {
         // they're set without the underlying attribute differing.
         let ty = raw_type & !0xc000;
         let payload = &bytes[pos + 4..pos + len];
+        // 4-byte alignment.
+        let aligned = (len + 3) & !3;
+        // An empty attribute carries nothing in a rule's expressions: it is
+        // a `*_PAD` that `nla_put_64bit` adds ahead of a 64-bit value on a
+        // kernel without efficient unaligned access (riscv64, sparc), or an
+        // empty nest (`masq`'s `NFTA_EXPR_DATA`, #362). Kept, a PAD made
+        // every counter, limit, quota and dynset rule differ from its
+        // declaration there, and be replaced, counters reset, on every
+        // apply (#484).
+        if payload.is_empty() {
+            pos += aligned;
+            continue;
+        }
         // Recursively normalize if the payload parses as TLVs.
         let normalized_payload = match try_walk_tlvs(payload) {
             Some(mut inner) => {
@@ -115,8 +128,6 @@ fn try_walk_tlvs(bytes: &[u8]) -> Option<Vec<(u16, Vec<u8>)>> {
             None => payload.to_vec(),
         };
         out.push((ty, normalized_payload));
-        // 4-byte alignment.
-        let aligned = (len + 3) & !3;
         pos += aligned;
         if pos > bytes.len() {
             return None;
@@ -772,8 +783,8 @@ fn chain_change(declared: &DeclaredChain, current: &ChainInfo) -> ChainChange {
     match (declared.hook(), current.hook) {
         (None, Some(_)) => why.push("base chain -> regular chain".to_string()),
         (Some(_), None) => why.push("regular chain -> base chain".to_string()),
-        (Some(hook), Some(have)) if hook.to_u32() != have => {
-            why.push(format!("hook {have} -> {}", hook.to_u32()));
+        (Some(hook), Some(have)) if hook.number(current.family) != have => {
+            why.push(format!("hook {have} -> {}", hook.number(current.family)));
         }
         _ => {}
     }
@@ -794,11 +805,23 @@ fn chain_change(declared: &DeclaredChain, current: &ChainInfo) -> ChainChange {
                 .map_or("none".to_string(), |p| p.to_string());
             why.push(format!("priority {have} -> {}", p.to_i32()));
         }
-        if let Some(dev) = declared.device()
-            && current.device.as_deref() != Some(dev)
-        {
-            let have = current.device.as_deref().unwrap_or("none");
-            why.push(format!("device {have} -> {dev}"));
+        // A chain bound to several devices dumps `NFTA_HOOK_DEVS` without
+        // `NFTA_HOOK_DEV`. An update only adds devices, so a different one
+        // is a recreate too (#484).
+        if let Some(dev) = declared.device() {
+            let have: Vec<&str> = if current.devices.is_empty() {
+                current.device.as_deref().into_iter().collect()
+            } else {
+                current.devices.iter().map(String::as_str).collect()
+            };
+            if have != [dev] {
+                let have = if have.is_empty() {
+                    "none".to_string()
+                } else {
+                    have.join(",")
+                };
+                why.push(format!("device {have} -> {dev}"));
+            }
         }
     }
     if !why.is_empty() {
@@ -1953,12 +1976,13 @@ mod tests {
             table: "t".into(),
             name: "c".into(),
             family: Family::Inet,
-            hook: Some(Hook::Input.to_u32()),
+            hook: Some(Hook::Input.number(Family::Inet)),
             priority: Some(0),
             chain_type: Some(ChainType::Filter),
             policy: Some(Policy::Accept.to_u32()),
             handle: 1,
             device: None,
+            devices: Vec::new(),
         };
         fn base(c: super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder {
             c.hook(Hook::Input)
@@ -2313,6 +2337,25 @@ mod tests {
             n_declared, n_kernel,
             "normalize_tlv must canonicalize writer-side and kernel-side bytes \
              for the same logical rule to equal bytes"
+        );
+    }
+
+    /// A zero-length attribute — the `*_PAD` some architectures put ahead
+    /// of a 64-bit value — does not make two rule bodies differ (#484).
+    #[test]
+    fn normalize_tlv_drops_zero_length_attributes() {
+        let attr = |ty: u16, payload: &[u8]| {
+            let mut out = Vec::new();
+            emit_tlv(&mut out, ty, payload);
+            out
+        };
+        // A counter's data: PACKETS and BYTES, with and without a PAD.
+        let counter = [attr(2, &7u64.to_be_bytes()), attr(1, &9u64.to_be_bytes())].concat();
+        let padded = [attr(3, &[]), counter.clone()].concat();
+        let elem = |data: &[u8]| attr(1, &[attr(1, b"counter\0"), attr(2, data)].concat());
+        assert_eq!(
+            normalize_tlv(&elem(&padded)),
+            normalize_tlv(&elem(&counter))
         );
     }
 

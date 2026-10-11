@@ -188,6 +188,56 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
 /// #480: every reject form, in `ip`, `ip6` and `inet` tables. In `ip` and
 /// `ip6` nlink sends `reject()` as the family's ICMP code, not ICMPX; the
 /// diff renders it the same way, or a declared reject would never converge.
+/// Interface-name matches — exact, `!=`, and nft's `"prefix*"` — install
+/// as nft writes them and reconcile. A name over 15 bytes was cut to 15,
+/// which no interface has, so the rule never matched; it is an error now
+/// (#484).
+#[tokio::test]
+async fn interface_name_matches_are_what_nft_writes() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-echo-ifname")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+            t.chain("ifn", |c| {
+                c.hook(Hook::Forward)
+                    .priority(Priority::Filter)
+                    .chain_type(ChainType::Filter)
+            })
+            .rule_keyed("ifn", "iif", |r| r.match_iif("d0").accept())
+            .rule_keyed("ifn", "iif-not", |r| r.match_iif_not("d0").drop())
+            .rule_keyed("ifn", "iif-prefix", |r| r.match_iif_prefix("veth").accept())
+            .rule_keyed("ifn", "oif-not", |r| r.match_oif_not("d1").accept())
+            .rule_keyed("ifn", "oif-prefix", |r| r.match_oif_prefix("br").accept())
+        });
+        assert_reconciles(&conn, &cfg).await?;
+        let shown = ns.exec("nft", &["list", "chain", "inet", "t", "ifn"])?;
+        for line in [
+            "iifname \"d0\" accept",
+            "iifname != \"d0\" drop",
+            "iifname \"veth*\" accept",
+            "oifname != \"d1\" accept",
+            "oifname \"br*\" accept",
+        ] {
+            assert!(shown.contains(line), "nft does not show `{line}`:\n{shown}");
+        }
+
+        let long = NftablesConfig::new().table("t", Family::Inet, |t| {
+            t.chain("ifn", |c| c)
+                .rule("ifn", |r| r.match_iif("a-sixteen-byte-n").accept())
+        });
+        let err = long
+            .diff(&conn)
+            .await
+            .expect_err("a 16-byte interface name");
+        assert!(err.to_string().contains("longer than 15 bytes"), "{err}");
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn reject_rules_reconcile_in_every_family() -> nlink::Result<()> {
     require_root!();

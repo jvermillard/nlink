@@ -46,6 +46,38 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables: hooks per family, multi-device chains, PAD attributes,
+  interface names, and `validate()` (#484).**
+  - **ARP hooks:** `Hook` encoded inet hook numbers for every family, but
+    ARP numbers its own (`NF_ARP_IN = 0`, `NF_ARP_OUT = 1`). An `arp`
+    input chain therefore filtered outgoing ARP, and an output chain was
+    refused. Chains now go out with `Hook::number(family)`.
+    `Hook::to_u32` is deprecated.
+  - **Hook validity:** `is_valid_for_family` no longer accepts forward,
+    prerouting or postrouting for `arp`, nor `NetdevIngress` for `bridge`,
+    which has no ingress hook and read it as prerouting.
+  - **Multi-device chains:** a netdev chain on several devices dumps
+    `NFTA_HOOK_DEVS` and no `NFTA_HOOK_DEV`. That list is now parsed into
+    the new `ChainInfo::devices`. A device change recreates the chain (as
+    in #478) rather than adding to the list.
+  - **PAD attributes:** the rule normalizer drops zero-length attributes.
+    These are the `*_PAD` that `nla_put_64bit` adds on architectures
+    without efficient unaligned access. They made every counter, limit,
+    quota and dynset rule there be replaced, counters reset, on every
+    apply.
+  - **Interface names:** `match_iif`/`match_oif` cut a name over 15 bytes
+    to 15, so the rule matched nothing. Adding such a rule is now an
+    error, and `validate()` reports it. New `match_iif_not`/`match_oif_not`
+    (`!=`) and `match_iif_prefix`/`match_oif_prefix` (nft's `"eth*"`).
+  - **`validate()`** now refuses:
+    - a rule in a chain the table does not declare (the diff deleted that
+      chain);
+    - a policy on a regular chain;
+    - a hook the family does not have;
+    - a netdev or inet-ingress chain without a device;
+    - a `route` chain off the output hook;
+    - a `nat` chain at priority -200 or below.
+
 - **A chain's hook, priority or type could not be changed, and a base
   chain declared as a regular one stayed a base chain (#478).** The diff
   sent these as an update. `nf_tables_updchain` refuses those on a live
@@ -997,6 +1029,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Hook::number(family)`, `ChainInfo::devices`, and
+  `Rule::{match_iif_not, match_oif_not, match_iif_prefix,
+  match_oif_prefix}`** (#484).
 
 - **`ConfigDiff::links_missing`** (#475): declared links that do not
   exist and that nothing in the apply creates.

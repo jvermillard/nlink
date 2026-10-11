@@ -478,6 +478,10 @@ pub mod nf_hook {
     pub const NETDEV_INGRESS: u32 = 0;
     /// `NF_NETDEV_EGRESS` (kernel 5.16+).
     pub const NETDEV_EGRESS: u32 = 1;
+    /// `NF_ARP_IN` (`netfilter_arp.h`).
+    pub const ARP_IN: u32 = 0;
+    /// `NF_ARP_OUT`.
+    pub const ARP_OUT: u32 = 1;
 }
 
 #[cfg(test)]
@@ -608,21 +612,26 @@ mod tests {
     /// `NF_INET_INGRESS = 5` hook.
     #[test]
     fn nft_hook_variants_match_kernel_uapi() {
-        use crate::netlink::nftables::Hook;
+        use crate::netlink::nftables::{Family, Hook};
 
-        assert_eq!(Hook::Prerouting.to_u32(), nf_hook::PRE_ROUTING);
-        assert_eq!(Hook::Input.to_u32(), nf_hook::LOCAL_IN);
-        assert_eq!(Hook::Forward.to_u32(), nf_hook::FORWARD);
-        assert_eq!(Hook::Output.to_u32(), nf_hook::LOCAL_OUT);
-        assert_eq!(Hook::Postrouting.to_u32(), nf_hook::POST_ROUTING);
+        let inet = |h: Hook| h.number(Family::Inet);
+        assert_eq!(inet(Hook::Prerouting), nf_hook::PRE_ROUTING);
+        assert_eq!(inet(Hook::Input), nf_hook::LOCAL_IN);
+        assert_eq!(inet(Hook::Forward), nf_hook::FORWARD);
+        assert_eq!(inet(Hook::Output), nf_hook::LOCAL_OUT);
+        assert_eq!(inet(Hook::Postrouting), nf_hook::POST_ROUTING);
         assert_eq!(
-            Hook::InetIngress.to_u32(),
+            inet(Hook::InetIngress),
             nf_hook::INET_INGRESS,
             "InetIngress was Hook::Ingress=0 pre-0.19 (Plan 211 M1); \
              kernel expects NF_INET_INGRESS=5"
         );
-        assert_eq!(Hook::NetdevIngress.to_u32(), nf_hook::NETDEV_INGRESS);
-        assert_eq!(Hook::NetdevEgress.to_u32(), nf_hook::NETDEV_EGRESS);
+        let netdev = |h: Hook| h.number(Family::Netdev);
+        assert_eq!(netdev(Hook::NetdevIngress), nf_hook::NETDEV_INGRESS);
+        assert_eq!(netdev(Hook::NetdevEgress), nf_hook::NETDEV_EGRESS);
+        // ARP numbers its two hooks on its own (#484).
+        assert_eq!(Hook::Input.number(Family::Arp), nf_hook::ARP_IN);
+        assert_eq!(Hook::Output.number(Family::Arp), nf_hook::ARP_OUT);
     }
 
     /// Plan 211 M1 — `is_valid_for_family` correctly disambiguates
@@ -647,9 +656,15 @@ mod tests {
         assert!(!Hook::Prerouting.is_valid_for_family(Family::Netdev));
         // NetdevEgress on Netdev: OK
         assert!(Hook::NetdevEgress.is_valid_for_family(Family::Netdev));
-        // NetdevEgress on Bridge: NOT OK (NetdevIngress allowed on
-        // Bridge, but NetdevEgress is Netdev-only).
+        // Neither netdev hook on Bridge: the bridge family has no ingress
+        // hook, and `NetdevIngress` there encoded as its prerouting (#484).
         assert!(!Hook::NetdevEgress.is_valid_for_family(Family::Bridge));
+        assert!(!Hook::NetdevIngress.is_valid_for_family(Family::Bridge));
+        // ARP: input and output only.
+        assert!(Hook::Input.is_valid_for_family(Family::Arp));
+        assert!(Hook::Output.is_valid_for_family(Family::Arp));
+        assert!(!Hook::Forward.is_valid_for_family(Family::Arp));
+        assert!(!Hook::Prerouting.is_valid_for_family(Family::Arp));
     }
 
     // ---------------------------------------------------------------

@@ -195,6 +195,10 @@ pub const NFTA_HOOK_PRIORITY: u16 = 2;
 /// (`type filter hook ingress device eth0 priority -150`).
 /// Required when `family == Netdev`; ignored on other families.
 pub const NFTA_HOOK_DEV: u16 = 3;
+/// Every device a netdev (or inet ingress) base chain is bound to, as
+/// nested `NFTA_DEVICE_NAME`s. The kernel always dumps it, and adds
+/// `NFTA_HOOK_DEV` only for exactly one device.
+pub const NFTA_HOOK_DEVS: u16 = 4;
 
 // =============================================================================
 // Rule Attributes
