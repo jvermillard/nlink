@@ -380,21 +380,29 @@ async fn netem_replace_clears_an_external_slot_and_ecn() -> Result<()> {
     Ok(())
 }
 
-/// `tc -d qdisc show dev <dev>` with the handle cut out, so two devices
-/// given the same netem print the same line.
+/// `tc -d qdisc show dev <dev>` with the handle and the netem seed cut
+/// out, so two devices given the same netem print the same line. A seed is
+/// random unless set, and only iproute2 6.3+ prints one.
 fn netem_line(ns: &TestNamespace, dev: &str) -> Result<String> {
     let shown = ns.exec("tc", &["-d", "qdisc", "show", "dev", dev])?;
     let line = shown
         .lines()
         .find(|l| l.starts_with("qdisc netem"))
         .unwrap_or_else(|| panic!("no netem on {dev}: {shown}"));
-    Ok(line
-        .split_whitespace()
-        .enumerate()
-        .filter(|(i, _)| *i != 2)
-        .map(|(_, w)| w)
-        .collect::<Vec<_>>()
-        .join(" "))
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        match words[i] {
+            "seed" => i += 2,
+            _ if i == 2 => i += 1,
+            w => {
+                out.push(w);
+                i += 1;
+            }
+        }
+    }
+    Ok(out.join(" "))
 }
 
 /// #515: the slot, ECN, the PRNG seed, the rate overheads and a delay
@@ -433,15 +441,18 @@ async fn netem_slot_ecn_seed_overhead_and_distribution_match_tc() -> Result<()> 
         "bytes",
         "3000",
         "ecn",
-        "seed",
-        "42",
         "limit",
         "500",
     ];
     let mut args = vec!["qdisc", "add", "dev", "dummy1", "root", "netem"];
     args.extend(tokens);
     ns.exec("tc", &args)?;
-    conn.add_qdisc("dummy0", NetemConfig::parse_params(&tokens)?)
+    // The seed through nlink only: iproute2 learnt `seed` in 6.3, after
+    // the CI image's 6.1. `netem_line` drops the one tc prints, which is
+    // random where none was set.
+    let mut seeded = tokens.to_vec();
+    seeded.extend(["seed", "42"]);
+    conn.add_qdisc("dummy0", NetemConfig::parse_params(&seeded)?)
         .await?;
 
     let ours = netem_line(&ns, "dummy0")?;
@@ -451,7 +462,6 @@ async fn netem_slot_ecn_seed_overhead_and_distribution_match_tc() -> Result<()> 
         "nlink and tc installed different netems"
     );
     for word in [
-        "seed 42",
         "ecn",
         "slot 1ms 2ms packets 5 bytes 3000",
         "packetoverhead 20",
@@ -506,11 +516,12 @@ async fn netem_slot_ecn_seed_overhead_and_distribution_match_tc() -> Result<()> 
 }
 
 /// #515: a seeded netem drops the same packets of the same traffic. Five
-/// batches of 40 datagrams through a 50 % loss, read as the cumulative drop
-/// counts after each batch: the same seed twice gives the same five counts,
-/// another seed gives others (two random seeds would match by chance about
-/// once in 10^5). IPv6 is off on the device, so nothing but the test's
-/// datagrams draws from netem's generator.
+/// batches of 40 datagrams through a 50 % loss on `lo`, counted as they
+/// arrive: the same seed twice gives the same five counts, another seed
+/// gives others (two random seeds would match by chance about once in
+/// 10^5). A fresh namespace's `lo` carries nothing but the test's
+/// datagrams — no neighbour discovery, no MLD — and the receiver is bound,
+/// so no ICMP draws from netem's generator either.
 #[tokio::test]
 async fn netem_seed_reproduces_the_same_losses() -> Result<()> {
     require_root!();
@@ -518,63 +529,45 @@ async fn netem_seed_reproduces_the_same_losses() -> Result<()> {
 
     let ns = TestNamespace::new("netem-seed")?;
     let conn = ns.connection()?;
-    for key in ["all", "default"] {
-        ns.exec(
-            "sysctl",
-            &["-qw", &format!("net.ipv6.conf.{key}.disable_ipv6=1")],
-        )?;
-    }
-    conn.add_link(DummyLink::new("seed0")).await?;
-    let idx = conn
-        .get_link_by_name("seed0")
-        .await?
-        .expect("seed0")
-        .ifindex();
-    conn.add_address_by_index(idx, "10.9.9.1".parse().unwrap(), 24)
-        .await?;
-    conn.set_link_up_by_index(idx).await?;
+    crate::common::traffic::lo_up(&ns).await?;
+    let lo = conn.get_link_by_name("lo").await?.expect("lo").ifindex();
 
-    let run = |seed: u64| {
-        let conn = &conn;
-        let ns = &ns;
-        async move {
-            let cfg = NetemConfig::new()
-                .loss(nlink::Percent::new(50.0))
-                .seed(seed);
-            conn.add_qdisc_by_index(idx, cfg).await?;
-            let mut drops = Vec::new();
+    let mut runs = Vec::new();
+    for seed in [7, 7, 8] {
+        let cfg = NetemConfig::new()
+            .loss(nlink::Percent::new(50.0))
+            .seed(seed);
+        conn.add_qdisc_by_index(lo, cfg).await?;
+        let arrived = crate::common::traffic::in_ns(&ns, || {
+            let rx = std::net::UdpSocket::bind("127.0.0.1:9999").expect("bind rx");
+            rx.set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let tx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind tx");
+            let mut buf = [0u8; 16];
+            let mut arrived = Vec::new();
             for _ in 0..5 {
-                assert_eq!(
-                    crate::common::traffic::send_udp(ns, &["10.9.9.2:9"], 40),
-                    40
-                );
-                let qdiscs = conn.get_qdiscs_by_index(idx).await?;
-                let netem = qdiscs
-                    .iter()
-                    .find(|q| q.kind() == Some("netem"))
-                    .expect("netem");
-                drops.push(netem.drops());
+                for _ in 0..40 {
+                    tx.send_to(b"nlink", "127.0.0.1:9999").expect("send");
+                }
+                let mut n = 0;
+                while rx.recv(&mut buf).is_ok() {
+                    n += 1;
+                }
+                arrived.push(n);
             }
-            conn.del_qdisc_by_index(idx, TcHandle::ROOT).await?;
-            Result::Ok(drops)
-        }
-    };
-    let first = run(7).await?;
+            arrived
+        });
+        conn.del_qdisc_by_index(lo, TcHandle::ROOT).await?;
+        runs.push(arrived);
+    }
+    let total: u32 = runs[0].iter().sum();
     assert!(
-        first[4] > 50 && first[4] < 150,
-        "50 % loss of 200 dropped {}: {first:?}",
-        first[4]
+        (50..150).contains(&total),
+        "50 % loss of 200 delivered {total}: {:?}",
+        runs[0]
     );
-    assert_eq!(
-        run(7).await?,
-        first,
-        "the same seed dropped different packets"
-    );
-    assert_ne!(
-        run(8).await?,
-        first,
-        "another seed dropped the same packets"
-    );
+    assert_eq!(runs[1], runs[0], "the same seed dropped different packets");
+    assert_ne!(runs[2], runs[0], "another seed dropped the same packets");
     Ok(())
 }
 
