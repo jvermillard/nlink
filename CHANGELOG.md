@@ -229,6 +229,17 @@ All notable changes to this project will be documented in this file.
   entries, neighbours. This is how a caller finds its links again with no
   record of the config it applied before, after a crash for instance.
 
+- **Qdisc handles, and the kernel's root on demand (#514, part 1).**
+  - `QdiscBuilder::handle(TcHandle)` installs a declared qdisc at that
+    handle. A classful kind (HTB, prio) defaults to `1:`, so its classes
+    and filters can name it; the others get the kernel's choice. The diff
+    replaces a qdisc whose live handle differs. In JSON it is `"handle":
+    "1:"`, tc(8)'s notation. A declared prio used to land at an automatic
+    handle (`8001:`); it is replaced once.
+  - `QdiscBuilder::kernel_default()` declares the kernel's own root qdisc:
+    the diff removes whatever root is installed (`qdiscs_to_remove`), and
+    the kernel puts its default back.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

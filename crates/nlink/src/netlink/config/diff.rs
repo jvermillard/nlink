@@ -1906,6 +1906,18 @@ fn diff_qdiscs(
             QdiscParent::Ingress => &current_ingress_qdisc,
         };
 
+        // The kernel's own root: whatever is installed goes (#514). The
+        // kernel's default root has handle 0:.
+        if declared.qdisc_type == DeclaredQdiscType::KernelDefault {
+            if current_map
+                .get(declared.dev.as_str())
+                .is_some_and(|q| q.handle().major() != 0)
+            {
+                diff.qdiscs_to_remove.push(declared.clone());
+            }
+            continue;
+        }
+
         if let Some(existing) = current_map.get(declared.dev.as_str()) {
             // Qdisc exists, check if it matches
             let existing_kind = existing.kind().unwrap_or("");
@@ -1916,6 +1928,13 @@ fn diff_qdiscs(
                 diff.qdiscs_to_replace.push(declared.clone());
             } else if !qdisc_params_match(&declared.qdisc_type, existing) {
                 // Same kind, different parameters — replace.
+                diff.qdiscs_to_replace.push(declared.clone());
+            } else if declared
+                .effective_handle()
+                .is_some_and(|h| h != existing.handle())
+            {
+                // At another handle than the one declared, or than `1:`
+                // for a classful kind, which its classes name (#514).
                 diff.qdiscs_to_replace.push(declared.clone());
             }
         } else {
@@ -2141,6 +2160,7 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             .write_options(&mut builder),
         DeclaredQdiscType::Ingress => IngressConfig::new().write_options(&mut builder),
         DeclaredQdiscType::Clsact => ClsactConfig::new().write_options(&mut builder),
+        DeclaredQdiscType::KernelDefault => Ok(()),
     };
     let end = builder.len();
     // If write_options failed, return empty bytes — the diff will then
