@@ -188,6 +188,12 @@ pub struct ConfigDiff {
     /// does not declare and that does not exist (#518).
     pub links_missing: Vec<String>,
 
+    /// Links the previous config declared and this one does not, still in
+    /// the kernel with the kind they were declared with, and the links the
+    /// kernel deletes along with them. The apply deletes them first, before
+    /// any recreate or create. Only with [`DiffOptions::previous`] (#512).
+    pub links_to_remove: Vec<super::LinkRemoval>,
+
     /// Addresses to add.
     pub addresses_to_add: Vec<DeclaredAddress>,
 
@@ -314,6 +320,7 @@ impl ConfigDiff {
             && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
             && self.links_missing.is_empty()
+            && self.links_to_remove.is_empty()
             && self.addresses_to_add.is_empty()
             && self.routes_to_add.is_empty()
             && self.routes_refused.is_empty()
@@ -330,6 +337,7 @@ impl ConfigDiff {
             + self.links_to_add.len()
             + self.links_to_modify.len()
             + self.links_missing.len()
+            + self.links_to_remove.len()
             + self.addresses_to_add.len()
             + self.routes_to_add.len()
             + self.routes_refused.len()
@@ -371,6 +379,9 @@ impl ConfigDiff {
             lines.push(format!(
                 "! link {name} (missing: it does not exist, and the config does not create it)"
             ));
+        }
+        for removal in &self.links_to_remove {
+            lines.push(removal.to_string());
         }
 
         // Addresses
@@ -610,7 +621,7 @@ pub async fn compute_diff_with_options(
     opts: &DiffOptions,
 ) -> Result<ConfigDiff> {
     config.validate()?;
-    let snapshot = Snapshot::read_for(conn, config).await?;
+    let snapshot = Snapshot::read_for(conn, config, opts).await?;
     diff_snapshot(config, &snapshot, opts)
 }
 
@@ -659,11 +670,15 @@ impl Snapshot {
         Ok(snapshot)
     }
 
-    /// What a diff of `config` needs: what a recreate destroys is read
-    /// only when the config recreates a link (#426).
-    pub(crate) async fn read_for(conn: &Connection<Route>, config: &NetworkConfig) -> Result<Self> {
+    /// What a diff of `config` needs: what a deletion destroys is read
+    /// only when the diff recreates or removes a link (#426, #512).
+    pub(crate) async fn read_for(
+        conn: &Connection<Route>,
+        config: &NetworkConfig,
+        opts: &DiffOptions,
+    ) -> Result<Self> {
         let mut snapshot = Self::read_base(conn).await?;
-        if kind::recreates_any(config, &snapshot.links) {
+        if kind::deletes_any(config, opts, &snapshot.links) {
             snapshot.extras = Some(kind::LinkExtras::read(conn, &snapshot.qdiscs).await?);
         }
         Ok(snapshot)
@@ -720,7 +735,7 @@ pub(crate) fn diff_snapshot(
     let no_extras = kind::LinkExtras::default();
     let extras = match &snapshot.extras {
         Some(extras) => extras,
-        None if kind::recreates_any(config, &current_links) => {
+        None if kind::deletes_any(config, opts, &current_links) => {
             return Err(crate::Error::InvalidMessage(
                 "this snapshot was read without what a recreate destroys, and the config \
                  recreates a link; read it with Snapshot::read"
@@ -739,6 +754,7 @@ pub(crate) fn diff_snapshot(
         extras,
     );
     diff.links_to_recreate = plan.recreate.clone();
+    diff.links_to_remove = plan.remove.clone();
     // The rest of the diff compares against the state the apply's
     // recreates leave behind: a recreated link, and everything the kernel
     // deletes with it, absent — so what the config declares on it is
@@ -2992,6 +3008,7 @@ mod tests {
                 "links-to-add",
                 "links-to-modify",
                 "links-to-recreate",
+                "links-to-remove",
                 "qdiscs-to-add",
                 "qdiscs-to-remove",
                 "qdiscs-to-replace",

@@ -889,3 +889,114 @@ async fn the_previous_config_says_what_to_remove() -> Result<()> {
     })
     .await
 }
+
+/// With the previous config, the links it created and this one does not
+/// are deleted, with what is stacked on them. A kindless link it only
+/// configured stays, and so does a link of the same name another actor
+/// made with another kind (#512).
+#[tokio::test]
+async fn the_previous_config_removes_the_links_it_created() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "8021q", "bridge");
+
+    with_timeout(async {
+        use std::sync::Arc;
+
+        let ns = TestNamespace::new("prev-links")?;
+        let conn = conn_in_ns(&ns)?;
+        ns.exec("ip", &["link", "add", "hand0", "type", "dummy"])?;
+        let a = Arc::new(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .link("d1", |l| l.dummy().up())
+                .link("v10", |l| l.vlan("d1", 10).up())
+                .link("x0", |l| l.dummy())
+                .link("hand0", |l| l.mtu(1400))
+                .address("v10", "10.91.0.1/24")?,
+        );
+        let b = NetworkConfig::new().link("d0", |l| l.dummy().up());
+        assert!(a.apply(&conn).await?.is_success());
+        // Another actor replaces x0 with a bridge of the same name.
+        ns.exec("ip", &["link", "del", "x0"])?;
+        ns.exec("ip", &["link", "add", "x0", "type", "bridge"])?;
+
+        let opts = || ApplyOptions::default().with_previous(a.clone());
+        let applied = b.apply_with_options(&conn, opts()).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        for gone in ["d1", "v10"] {
+            assert!(
+                conn.get_link_by_name(gone).await?.is_none(),
+                "{gone} stayed"
+            );
+        }
+        for kept in ["d0", "hand0", "x0"] {
+            assert!(
+                conn.get_link_by_name(kept).await?.is_some(),
+                "{kept} was deleted"
+            );
+        }
+        let again = b
+            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .await?;
+        assert!(again.is_empty(), "the second diff: {again}");
+        Ok(())
+    })
+    .await
+}
+
+/// A removal that would destroy what no config declares is refused before
+/// anything changes, as a recreate is (#512).
+#[tokio::test]
+async fn a_removal_over_undeclared_state_is_refused() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    with_timeout(async {
+        use std::sync::Arc;
+
+        use nlink::netlink::config::Blocker;
+
+        let ns = TestNamespace::new("prev-refused")?;
+        let conn = conn_in_ns(&ns)?;
+        let a = Arc::new(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .link("v10", |l| l.vlan("d0", 10).up())
+                .link("d2", |l| l.dummy()),
+        );
+        let b = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d2", |l| l.dummy().up());
+        assert!(a.apply(&conn).await?.is_success());
+        ns.exec("ip", &["route", "add", "10.92.0.0/24", "dev", "v10"])?;
+
+        let diff = b
+            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .await?;
+        let removal = diff
+            .links_to_remove
+            .iter()
+            .find(|r| r.name == "v10")
+            .expect("v10 is up for removal");
+        assert!(
+            removal
+                .blocked_by
+                .iter()
+                .any(|b| matches!(b, Blocker::Route { .. })),
+            "{removal}"
+        );
+        let err = b
+            .apply_with_options(&conn, ApplyOptions::default().with_previous(a.clone()))
+            .await
+            .expect_err("the removal is refused");
+        assert!(err.is_not_supported(), "{err}");
+        assert!(
+            conn.get_link_by_name("v10").await?.is_some(),
+            "v10 was deleted"
+        );
+        let d2 = conn.get_link_by_name("d2").await?.expect("d2");
+        assert!(!d2.is_up(), "the refused apply changed d2");
+        Ok(())
+    })
+    .await
+}

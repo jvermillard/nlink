@@ -149,6 +149,25 @@ All notable changes to this project will be documented in this file.
   It works with or without `purge`; with both, the diff removes the
   union. Deleting links the previous config declared is part 2.
 
+- **The previous config's links are deleted when this one drops them
+  (#512, part 2).** With `DiffOptions::previous` /
+  `ApplyOptions::with_previous`, a link the previous config created and
+  this one does not declare goes in the new `ConfigDiff::links_to_remove`
+  (`LinkRemoval`), with the links the kernel deletes along with it. It is
+  deleted before anything is created, since a replacement can conflict
+  with it (the same VLAN id on the same parent).
+  - **Only a link the config created.** It must have been declared with a
+    kind, and must still be in the kernel with that kind. A physical or
+    kindless device the previous config only configured is never
+    deleted, and neither is a link of the same name another actor made
+    with another kind.
+  - **Refusals.** Deleting a link also destroys what it carries. What no
+    config declared there refuses the removal, before anything changes,
+    as it refuses a recreate: an address, a route, a qdisc or class, an
+    FDB entry or neighbour, a port. This is the recreate's logic, shared.
+    nlink-lab asked for this (its #159): a VLAN removed from a running lab
+    stayed in the kernel.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
