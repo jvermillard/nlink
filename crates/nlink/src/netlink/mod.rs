@@ -143,6 +143,7 @@ mod stream;
 pub mod sys_sizeof;
 pub mod sysctl;
 pub mod tc;
+mod tc_display;
 pub mod tc_handle;
 pub mod tc_options;
 pub mod tc_recipe;

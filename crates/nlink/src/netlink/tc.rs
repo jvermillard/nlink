@@ -914,6 +914,59 @@ impl NetemConfig {
     }
 }
 
+impl From<&super::tc_options::NetemOptions> for NetemConfig {
+    /// The netem the kernel reports, as a config that installs it again
+    /// (#515): read a qdisc, change one thing, apply it.
+    ///
+    /// Two things the kernel holds cannot come back. A delay distribution
+    /// table is never reported, so the config has none — installing it
+    /// replaces the qdisc's jitter shape with the uniform one — and a slot
+    /// drawn from a table (`slot distribution …`, which nlink does not
+    /// write) becomes no slot. The seed is kept, so the config draws the
+    /// same random numbers; a kernel before 6.3 reports none.
+    fn from(o: &super::tc_options::NetemOptions) -> Self {
+        use crate::util::{Percent, Rate};
+        let nanos = |ns: i64| Duration::from_nanos(u64::try_from(ns).unwrap_or(0));
+        let limit = |n: i32| (n > 0 && n != i32::MAX).then(|| n.unsigned_abs());
+        let mut cfg = Self::new();
+        cfg.delay = (o.delay_ns > 0).then(|| Duration::from_nanos(o.delay_ns));
+        cfg.jitter = (o.jitter_ns > 0).then(|| Duration::from_nanos(o.jitter_ns));
+        cfg.delay_correlation = Percent::new(o.delay_corr);
+        // The kernel ignores random loss under a model, and `write_options`
+        // refuses the two together.
+        if o.loss_model.is_none() {
+            cfg.loss = Percent::new(o.loss_percent);
+            cfg.loss_correlation = Percent::new(o.loss_corr);
+        }
+        cfg.loss_model = o.loss_model;
+        cfg.duplicate = Percent::new(o.duplicate_percent);
+        cfg.duplicate_correlation = Percent::new(o.duplicate_corr);
+        cfg.corrupt = Percent::new(o.corrupt_percent);
+        cfg.corrupt_correlation = Percent::new(o.corrupt_corr);
+        cfg.reorder = Percent::new(o.reorder_percent);
+        cfg.reorder_correlation = Percent::new(o.reorder_corr);
+        cfg.gap = o.gap;
+        cfg.rate = (o.rate > 0).then(|| Rate::bytes_per_sec(o.rate));
+        cfg.rate_packet_overhead = o.packet_overhead;
+        cfg.rate_cell_size = o.cell_size;
+        cfg.rate_cell_overhead = o.cell_overhead;
+        cfg.limit = o.limit;
+        cfg.ecn = o.ecn;
+        cfg.slot = o
+            .slot
+            .as_ref()
+            .filter(|s| s.dist_delay_ns == 0 && s.dist_jitter_ns == 0)
+            .map(|s| NetemSlot {
+                min_delay: nanos(s.min_delay_ns),
+                max_delay: nanos(s.max_delay_ns),
+                max_packets: limit(s.max_packets),
+                max_bytes: limit(s.max_bytes),
+            });
+        cfg.seed = o.seed;
+        cfg
+    }
+}
+
 /// Tokens that begin a new netem option group — used by
 /// `NetemConfig::parse_params` to decide where greedy positional
 /// optionals (jitter / correlation) end.
@@ -2792,7 +2845,11 @@ impl QdiscConfig for PrioConfig {
 pub struct SfqConfig {
     /// Perturbation period in seconds.
     pub perturb: i32,
-    /// Queue limit.
+    /// Queue limit in packets; 0, the default, leaves the kernel's (127).
+    /// A limit also caps the number of flows (`sfq_change`), so `limit(100)`
+    /// has 100 flows where the default has 128. This was 127 and always
+    /// sent before 0.32, which gave the default sfq 127 flows where tc(8)'s
+    /// has 128 (#637).
     pub limit: u32,
     /// Quantum (bytes per round).
     pub quantum: u32,
@@ -2809,7 +2866,7 @@ impl SfqConfig {
     pub fn new() -> Self {
         Self {
             perturb: 0,
-            limit: 127,
+            limit: 0,
             quantum: 0,
         }
     }
@@ -10880,7 +10937,7 @@ mod tests {
     fn sfq_parse_params_empty_yields_default() {
         let cfg = SfqConfig::parse_params(&[]).unwrap();
         assert_eq!(cfg.perturb, 0);
-        assert_eq!(cfg.limit, 127);
+        assert_eq!(cfg.limit, 0, "the kernel's, as tc leaves it (#637)");
         assert_eq!(cfg.quantum, 0);
     }
 

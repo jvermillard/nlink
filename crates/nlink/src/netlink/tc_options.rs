@@ -33,6 +33,28 @@
 use super::{messages::TcMessage, psched};
 
 /// Parsed qdisc options, strongly typed by qdisc kind.
+///
+/// `Display` prints them in tc(8) syntax, as they follow the kind on a `tc
+/// qdisc add` line, and the text is an input: given to tc, or split on
+/// whitespace and given to the kind's `parse_params`, it installs a qdisc
+/// the kernel reports as this one (#515).
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::netlink::tc::NetemConfig;
+/// use nlink::netlink::tc_options::QdiscOptions;
+///
+/// let root = conn.get_root_qdisc_by_name("eth0").await?.expect("a root qdisc");
+/// if let Some(QdiscOptions::Netem(netem)) = root.options() {
+///     println!("{netem}"); // limit 1000 delay 100ms 10ms loss 1%
+///     // The same netem, one thing changed.
+///     let cfg = NetemConfig::from(&netem).limit(5000);
+///     conn.replace_qdisc("eth0", cfg).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum QdiscOptions {

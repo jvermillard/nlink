@@ -142,6 +142,11 @@ All notable changes to this project will be documented in this file.
   - `CakeOptions::raw` reads raw mode from the attribute's presence.
     `cake_dump` sends it with the value 0, so it always read false.
 
+- **A default sfq has 128 flows, as tc's does (#637).** `SfqConfig::new()`
+  always sent `limit 127`. A limit caps sfq's flows (`sfq_change`), so an
+  nlink sfq had 127 flows. The default limit is now 0, which leaves the
+  kernel's, as tc does.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -316,6 +321,29 @@ All notable changes to this project will be documented in this file.
   - `PerPeerImpairer`'s comparison covers the new fields.
   - The docs now say that jitter without a rate reorders packets
     (netem's queue is sorted by send time).
+
+- **Qdisc options print in tc(8) syntax, and a netem converts back into
+  a config (#515, part 3).**
+  - `QdiscOptions` and each kind's options implement `Display`. The text
+    is the parameters as they follow the kind on a `tc qdisc add` line,
+    for example `limit 1000 delay 10ms 2ms loss 1.2%`.
+  - The text also works as input. Given to tc, or to the kind's
+    `parse_params`, it installs a qdisc the kernel reports exactly as the
+    original. A root test checks this for netem, fq_codel, fq_pie, TBF,
+    HTB, prio, sfq and cake.
+  - Where the kernel quantises a value, the text holds the smallest
+    value it reports the same way. A 20 ms fq_codel target, which reads
+    back as 19999 µs, prints as `20ms`. A TBF bucket, which the kernel
+    keeps only as a transmission time, prints as the smallest size that
+    takes as long.
+  - Some values can't be set by the typed config: sfq's `depth`,
+    `divisor` and `flows`, and fq_codel's `drop_batch`. These print only
+    when they differ from the kernel's default, and `parse_params` then
+    refuses the text.
+  - `NetemConfig::from(&NetemOptions)` turns the netem the kernel reports
+    into a config that installs it again. It keeps the seed. It can't
+    keep a delay distribution, because the kernel never reports one.
+  - `nlink-tc qdisc show` now prints the options.
 
 ## [0.31.0] - 2026-10-11
 

@@ -30,6 +30,14 @@ impl Printable for TcMessage {
 
         write!(w, "refcnt 2")?; // placeholder
 
+        // The options in tc(8) syntax, as `tc qdisc show` prints them (#515).
+        if let Some(options) = self.options() {
+            let text = options.to_string();
+            if !text.is_empty() {
+                write!(w, " {text}")?;
+            }
+        }
+
         writeln!(w)?;
 
         if opts.stats {

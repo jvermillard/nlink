@@ -269,6 +269,10 @@ mod declared_input;
 // declaring a clsact must not delete the root qdisc.
 #[path = "integration/tc_shaping.rs"]
 mod tc_shaping;
+// #515 — qdisc options print in tc(8) syntax, and the text reinstalls the
+// qdisc through tc, `parse_params` and `NetemConfig::from`.
+#[path = "integration/tc_display.rs"]
+mod tc_display;
 // #267 — NLMSG_DONE's result code. Unprivileged: sock_diag dumps your
 // own sockets without any capability, and a protocol with no diag
 // handler answers DONE-with-ENOENT, which used to read as an empty list.
