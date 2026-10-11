@@ -1058,3 +1058,85 @@ async fn a_route_protocol_of_its_own_makes_the_config_own_exactly_its_routes() -
     })
     .await
 }
+
+/// Links a config with an owner creates carry the owner as their alias,
+/// and a purge removes a tagged link the config no longer declares, with
+/// what is on it; an untagged link stays, and an untagged link stacked on a
+/// tagged one refuses its removal (#512).
+#[tokio::test]
+async fn an_owner_tag_lets_a_purge_find_the_configs_links() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    with_timeout(async {
+        use nlink::netlink::config::Blocker;
+
+        let ns = TestNamespace::new("owner-tag")?;
+        let conn = conn_in_ns(&ns)?;
+        ns.exec("ip", &["link", "add", "other", "type", "dummy"])?;
+        let a = NetworkConfig::new()
+            .owner("lab1")
+            .link("d0", |l| l.dummy().up())
+            .link("v1", |l| l.vlan("d0", 10).up())
+            .link("d1", |l| l.dummy().up())
+            .address("v1", "10.97.0.1/24")?;
+        assert!(a.apply(&conn).await?.is_success());
+        let v1 = conn.get_link_by_name("v1").await?.expect("v1");
+        assert_eq!(v1.alias(), Some("lab1"));
+
+        // Someone stacks a VLAN of their own on d1.
+        ns.exec(
+            "ip",
+            &[
+                "link", "add", "link", "d1", "name", "d1.5", "type", "vlan", "id", "5",
+            ],
+        )?;
+
+        let b = NetworkConfig::new()
+            .owner("lab1")
+            .link("d0", |l| l.dummy().up());
+        let purge = || ApplyOptions::default().with_purge(true);
+        let diff = b
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        let refused = diff
+            .links_to_remove
+            .iter()
+            .find(|r| r.name == "d1")
+            .expect("d1 is tagged and undeclared");
+        assert!(
+            refused
+                .blocked_by
+                .iter()
+                .any(|b| matches!(b, Blocker::StackedLink { name, .. } if name == "d1.5")),
+            "{refused}"
+        );
+        let err = b
+            .apply_with_options(&conn, purge())
+            .await
+            .expect_err("d1's removal is refused");
+        assert!(err.is_not_supported(), "{err}");
+
+        ns.exec("ip", &["link", "del", "d1.5"])?;
+        let applied = b.apply_with_options(&conn, purge()).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        for gone in ["v1", "d1"] {
+            assert!(
+                conn.get_link_by_name(gone).await?.is_none(),
+                "{gone} stayed"
+            );
+        }
+        for kept in ["d0", "other"] {
+            assert!(
+                conn.get_link_by_name(kept).await?.is_some(),
+                "{kept} was deleted"
+            );
+        }
+        let again = b
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        assert!(again.is_empty(), "the second diff: {again}");
+        Ok(())
+    })
+    .await
+}

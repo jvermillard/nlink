@@ -31,6 +31,11 @@ pub struct NetworkConfig {
     /// [`route_protocol`](Self::route_protocol).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) route_protocol: Option<u8>,
+    /// The tag written as the alias of every link the apply creates, and
+    /// the one a purge removes undeclared links by (#512). See
+    /// [`owner`](Self::owner).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) owner: Option<String>,
     /// Mistakes a builder made that it could not return, reported by
     /// [`validate`](Self::validate) — which `diff` and `apply` run — rather
     /// than turned into a silently different config (#476).
@@ -385,6 +390,25 @@ impl NetworkConfig {
     /// ```
     pub fn route_protocol(mut self, protocol: crate::netlink::types::route::RouteProtocol) -> Self {
         self.route_protocol = Some(protocol.number());
+        self
+    }
+
+    /// Tag the links this config creates as `owner`'s: the apply writes
+    /// `owner` as each one's alias (`IFLA_IFALIAS`, what `ip link` shows as
+    /// `alias`), and a purge then also removes a link that carries the tag
+    /// and that the config no longer declares (#512).
+    ///
+    /// It is how a caller finds its own links again with no record of
+    /// what it applied before: after a crash, say, where
+    /// [`DiffOptions::previous`](super::DiffOptions::previous) needs the
+    /// previous config. Everything on a tagged link (addresses, routes,
+    /// qdiscs) goes with it; what the kernel would destroy with it that
+    /// cannot be declared (FDB entries, neighbours, an untagged link
+    /// stacked on it) refuses the removal, as for a recreate. The alias is
+    /// the tag's alone: a config with an owner should not set aliases of
+    /// its own.
+    pub fn owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
         self
     }
 

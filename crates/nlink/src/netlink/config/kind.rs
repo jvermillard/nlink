@@ -1388,21 +1388,41 @@ pub(crate) fn removed_links<'a>(
     opts: &DiffOptions,
     links: &'a [LinkMessage],
 ) -> Vec<&'a LinkMessage> {
-    let Some(previous) = opts.previous.as_deref() else {
-        return Vec::new();
-    };
-    previous
-        .links
-        .iter()
-        .filter(|l| !config.links.iter().any(|d| d.name == l.name))
-        .filter_map(|l| {
-            let kind = l.link_type.kind()?;
-            links
+    let declared = |name: &str| config.links.iter().any(|d| d.name == name);
+    let mut removed: Vec<&LinkMessage> = Vec::new();
+    if let Some(previous) = opts.previous.as_deref() {
+        removed.extend(
+            previous
+                .links
                 .iter()
-                .find(|live| live.name.as_deref() == Some(l.name.as_str()))
-                .filter(|live| live.kind() == Some(kind))
-        })
-        .collect()
+                .filter(|l| !declared(&l.name))
+                .filter_map(|l| {
+                    let kind = l.link_type.kind()?;
+                    links
+                        .iter()
+                        .find(|live| live.name.as_deref() == Some(l.name.as_str()))
+                        .filter(|live| live.kind() == Some(kind))
+                }),
+        );
+    }
+    // With purge, an undeclared link carrying the config's owner tag.
+    if opts.purge {
+        for live in links.iter().filter(|l| tagged(config, l)) {
+            let name = live.name.as_deref().unwrap_or_default();
+            if !declared(name) && !removed.iter().any(|r| r.ifindex() == live.ifindex()) {
+                removed.push(live);
+            }
+        }
+    }
+    removed
+}
+
+/// Whether `link` carries `config`'s owner tag (#512).
+pub(crate) fn tagged(config: &NetworkConfig, link: &LinkMessage) -> bool {
+    config
+        .owner
+        .as_deref()
+        .is_some_and(|owner| link.alias() == Some(owner))
 }
 
 /// Whether a diff of `config` deletes a link, by recreating it or by
@@ -1714,14 +1734,18 @@ pub(crate) fn plan(
     // What the previous config declared is the config's own: deleting it
     // with a removed link is the point, not a loss.
     let previous = opts.previous.as_deref();
-    let previously_declared_link =
-        |name: &str| previous.is_some_and(|p| p.links.iter().any(|l| l.name == name));
+    // A tagged link is the config's, and so is what is on it (#512).
+    let tagged_name = |name: &str| by_name.get(name).is_some_and(|l| tagged(config, l));
+    let previously_declared_link = |name: &str| {
+        previous.is_some_and(|p| p.links.iter().any(|l| l.name == name)) || tagged_name(name)
+    };
     let previously_declared_address = |name: &str, addr: IpAddr, len: u8| {
-        previous.is_some_and(|p| {
-            p.addresses
-                .iter()
-                .any(|d| d.dev == name && d.address == addr && d.prefix_len == len)
-        })
+        tagged_name(name)
+            || previous.is_some_and(|p| {
+                p.addresses
+                    .iter()
+                    .any(|d| d.dev == name && d.address == addr && d.prefix_len == len)
+            })
     };
     let previous_routes: HashSet<(IpAddr, u8, u32)> = previous
         .iter()
@@ -1735,11 +1759,12 @@ pub(crate) fn plan(
         })
         .collect();
     let previously_declared_qdisc = |name: &str, parent: QdiscParent| {
-        previous.is_some_and(|p| {
-            p.qdiscs
-                .iter()
-                .any(|d| d.dev == name && d.effective_parent() == parent)
-        })
+        tagged_name(name)
+            || previous.is_some_and(|p| {
+                p.qdiscs
+                    .iter()
+                    .any(|d| d.dev == name && d.effective_parent() == parent)
+            })
     };
 
     for (seed, reason, refuse, remove) in seeds {
@@ -1814,7 +1839,7 @@ pub(crate) fn plan(
             for r in routes {
                 if r.protocol() == RouteProtocol::Kernel
                     || declared_routes.contains(&route_key(r))
-                    || (remove && previous_routes.contains(&route_key(r)))
+                    || (remove && (previous_routes.contains(&route_key(r)) || tagged_name(name)))
                     || purged_route(r)
                 {
                     continue;
@@ -1972,7 +1997,7 @@ pub(crate) fn plan(
             for r in routes {
                 if r.protocol() == RouteProtocol::Kernel
                     || declared_routes.contains(&route_key(r))
-                    || (remove && previous_routes.contains(&route_key(r)))
+                    || (remove && (previous_routes.contains(&route_key(r)) || tagged_name(name)))
                     || old_tables.contains(&r.table_id())
                     || purged_route(r)
                 {

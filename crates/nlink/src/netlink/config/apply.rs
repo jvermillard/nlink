@@ -479,7 +479,7 @@ pub async fn apply_diff(
             result.summary.push(format!("Would {}", op));
             result.changes_made += 1;
         } else {
-            match create_link(conn, link).await {
+            match create_link(conn, link, diff.owner.as_deref()).await {
                 Ok(()) => {
                     result.summary.push(format!("Created link {}", link.name));
                     result.changes_made += 1;
@@ -1098,9 +1098,18 @@ pub(crate) fn link_config(
     Some(config)
 }
 
-async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()> {
+async fn create_link(
+    conn: &Connection<Route>,
+    link: &DeclaredLink,
+    owner: Option<&str>,
+) -> Result<()> {
     if let Some(config) = link_config(link) {
         conn.add_link(config).await?;
+        // The owner tag: the kernel ignores IFLA_IFALIAS on create, so it
+        // is set right after (#512, #517).
+        if let Some(owner) = owner {
+            conn.set_link_alias(link.name.as_str(), owner).await?;
+        }
     }
 
     // Enslave before bringing up: a bond refuses a port that is already
