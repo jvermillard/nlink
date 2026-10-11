@@ -1958,6 +1958,64 @@ async fn an_ipv6_prefix_change_reprefixes_the_address() -> nlink::Result<()> {
     assert_converges("nce-v6-prefix", cases).await
 }
 
+/// A declared route whose replace would overwrite the kernel's connected
+/// route is refused. The replace used to take `10.69.0.0/24 dev d0 proto
+/// kernel`'s place, leaving every gateway on that segment unreachable, and
+/// the diff called it converged (#469). At another metric it goes in next
+/// to the connected route.
+#[tokio::test]
+async fn a_route_over_the_connected_route_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("nce-conn-route")?;
+    let base = dummy_up("d0")
+        .address("d0", "10.69.0.1/24")?
+        .address("d0", "fd00:69::1/64")?;
+    assert_transition(&ns, std::slice::from_ref(&base), false, async |_, _| Ok(())).await?;
+    let conn = ns.connection()?;
+    let protos = |family: &str, dst: &str| -> nlink::Result<Vec<String>> {
+        let routes = ip_json(&ns, &[family, "route", "show", dst]).expect("ip route");
+        Ok(routes
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            // `ip` leaves out the default, `proto boot`.
+            .map(|r| r["protocol"].as_str().unwrap_or("boot").to_string())
+            .collect())
+    };
+
+    // IPv6 gives an address's prefix route metric 256, a declared one 1024.
+    for (family, dst, via, metric) in [
+        ("-4", "10.69.0.0/24", "10.69.0.254", 0),
+        ("-6", "fd00:69::/64", "fd00:69::fe", 256),
+    ] {
+        let cfg = base.clone().route(dst, |r| r.via(via).metric(metric))?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.routes_refused.len(), 1, "{dst}: {diff}");
+        assert!(diff.routes_to_add.is_empty(), "{dst}: {diff}");
+        let err = cfg.apply(&conn).await.expect_err("the apply is refused");
+        assert!(err.is_not_supported(), "{dst}: {err}");
+        assert_eq!(protos(family, dst)?, ["kernel"], "{dst}");
+    }
+
+    let alongside = base
+        .clone()
+        .route("10.69.0.0/24", |r| r.via("10.69.0.254").metric(100))?;
+    assert_transition(&ns, &[alongside], false, async |_, _| {
+        let mut held = protos("-4", "10.69.0.0/24").map_err(|e| e.to_string())?;
+        held.sort();
+        if held != ["boot", "kernel"] {
+            return Err(format!(
+                "want the declared route next to the connected one: {held:?}"
+            ));
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// The routes a route listing shows for `dst`, as `(type, metric)`.
 fn routes_at(ns: &TestNamespace, family: &str, dst: &str) -> Result<Vec<(String, u64)>, String> {
     let routes = ip_json(ns, &[family, "route", "show", "table", "all", dst])?;

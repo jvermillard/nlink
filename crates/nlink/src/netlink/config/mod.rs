@@ -57,7 +57,7 @@ mod types;
 // `ApplyResult` is `Serialize` under the `serde` feature, so `ApplyError`
 // was in the JSON ABI while being unnameable in Rust.
 pub use apply::{ApplyError, ApplyOptions, ApplyResult};
-pub use diff::{ConfigDiff, DiffOptions, LinkChanges};
+pub use diff::{ConfigDiff, DiffOptions, LinkChanges, RouteConflict};
 pub use kind::LinkRecreate;
 pub use types::*;
 
