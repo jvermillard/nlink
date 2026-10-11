@@ -160,6 +160,7 @@ pub use attr::{AttrIter, NlAttr};
 pub use batch::{Batch, BatchResults};
 pub use builder::{MessageBuilder, NestToken};
 pub use connection::{Connection, RtnetlinkGroup};
+pub use messages::LinkCond;
 pub use dispatcher::{Dispatcher, DispatcherEvent};
 // `ValidationErrorInfo` appears in `Error::Validation` and is the
 // argument type of the public `Error::validation` constructor, which

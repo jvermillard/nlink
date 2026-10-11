@@ -303,6 +303,16 @@ pub enum Error {
     #[error("operation timed out")]
     Timeout,
 
+    /// IPv6 duplicate address detection found these addresses in use
+    /// elsewhere on their links (`IFA_F_DADFAILED`): they never become
+    /// usable. From [`Connection::wait_addresses_settled`](crate::Connection::wait_addresses_settled)
+    /// (#524).
+    #[error("duplicate address detection failed for {addresses:?}")]
+    DadFailed {
+        /// The addresses DAD found in use.
+        addresses: Vec<std::net::IpAddr>,
+    },
+
     /// Kernel signaled that a dump was interrupted — the snapshot
     /// iterator's underlying data structure was mutated between
     /// frames, so the returned data set is inconsistent.
@@ -837,6 +847,11 @@ impl Error {
     /// Convenience over [`Self::chain_walk`].
     pub fn contexts(&self) -> Vec<&Error> {
         Self::chain_walk(self).collect()
+    }
+
+    /// Check if this is [`Error::DadFailed`].
+    pub fn is_dad_failed(&self) -> bool {
+        matches!(self, Self::DadFailed { .. })
     }
 
     /// Check if this is a timeout error.

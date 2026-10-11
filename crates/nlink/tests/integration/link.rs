@@ -823,3 +823,102 @@ async fn a_link_is_found_by_its_alternative_names() -> Result<()> {
     assert!(up.is_up(), "set_link_up by a long altname");
     Ok(())
 }
+
+// ============================================================================
+// #524 — waiting for a link and for duplicate address detection
+// ============================================================================
+
+/// `wait_link` waits for the condition asked for. A veth whose peer is
+/// down is up (`IFF_UP`) at once but has no carrier, so the carrier wait
+/// times out; once the peer comes up it has a carrier and runs.
+#[tokio::test]
+async fn wait_link_waits_for_a_carrier() -> Result<()> {
+    use nlink::LinkCond;
+    use std::time::Duration;
+    require_root!();
+    nlink::require_modules!("veth");
+
+    let ns = TestNamespace::new("wait-carrier")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("va", "vb")).await?;
+    conn.set_link_up("va").await?;
+    conn.wait_link("va", LinkCond::AdminUp, Duration::from_secs(1))
+        .await?;
+    let err = conn
+        .wait_link("va", LinkCond::Carrier, Duration::from_millis(300))
+        .await
+        .expect_err("no carrier while the peer is down");
+    assert!(err.is_timeout(), "{err}");
+
+    conn.set_link_up("vb").await?;
+    let link = conn
+        .wait_link("va", LinkCond::Carrier, Duration::from_secs(5))
+        .await?;
+    assert_eq!(link.carrier(), Some(true));
+    conn.wait_link("va", LinkCond::Running, Duration::from_secs(5))
+        .await?;
+    Ok(())
+}
+
+/// An IPv6 address is tentative until duplicate address detection is
+/// done; `wait_addresses_settled` waits it out. Tests that pinged right
+/// after configuring an address shelled out to `ip -6 addr` to grep for
+/// "tentative" (#524).
+#[tokio::test]
+async fn ipv6_addresses_settle() -> Result<()> {
+    use nlink::netlink::addr::Ipv6Address;
+    use std::time::Duration;
+    require_root!();
+    nlink::require_modules!("veth");
+
+    let pair = crate::common::topo::NsPair::new("wait-dad", 92).await?;
+    let conn = pair.a.connection()?;
+    let addr: std::net::Ipv6Addr = "fd00:92::10".parse().unwrap();
+    conn.add_address(Ipv6Address::with_index(pair.a_ifindex, addr, 64))
+        .await?;
+    let tentative = |addresses: &[nlink::netlink::messages::AddressMessage]| {
+        addresses
+            .iter()
+            .any(|a| a.address() == Some(&std::net::IpAddr::from(addr)) && a.is_tentative())
+    };
+    assert!(tentative(
+        &conn.get_addresses_by_index(pair.a_ifindex).await?
+    ));
+    conn.wait_addresses_settled(Some(pair.a_ifindex.into()), Duration::from_secs(10))
+        .await?;
+    assert!(!tentative(
+        &conn.get_addresses_by_index(pair.a_ifindex).await?
+    ));
+    Ok(())
+}
+
+/// An address the other end of the link already has fails DAD, and the
+/// wait says so instead of timing out.
+#[tokio::test]
+async fn a_duplicate_ipv6_address_fails_the_wait() -> Result<()> {
+    use nlink::netlink::addr::Ipv6Address;
+    use std::time::Duration;
+    require_root!();
+    nlink::require_modules!("veth");
+
+    let pair = crate::common::topo::NsPair::new("wait-dupe", 93).await?;
+    // b's address is configured without DAD (`nodad`) and is in use.
+    pair.a
+        .connection()?
+        .add_address(Ipv6Address::with_index(pair.a_ifindex, pair.b_addr6, 64))
+        .await?;
+    let err = pair
+        .a
+        .connection()?
+        .wait_addresses_settled(Some(pair.a_ifindex.into()), Duration::from_secs(10))
+        .await
+        .expect_err("DAD finds b's address");
+    assert!(err.is_dad_failed(), "{err}");
+    match err {
+        nlink::Error::DadFailed { addresses } => {
+            assert_eq!(addresses, [std::net::IpAddr::from(pair.b_addr6)]);
+        }
+        other => panic!("{other}"),
+    }
+    Ok(())
+}
