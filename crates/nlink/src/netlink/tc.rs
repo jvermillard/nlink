@@ -254,7 +254,7 @@ pub trait QdiscConfig: Send + Sync {
 /// each at its own delayed time from a time-sorted queue (tfifo), so a
 /// packet given less jitter overtakes one given more. tc(8) behaves the
 /// same; set a rate, or no jitter, to keep the order.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct NetemConfig {
     /// Added delay.
@@ -1257,7 +1257,7 @@ impl QdiscConfig for NetemConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FqCodelConfig {
     /// Target delay.
     pub target: Option<Duration>,
@@ -2214,7 +2214,7 @@ impl QdiscConfig for EtsConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TbfConfig {
     /// Rate.
     pub rate: crate::util::Rate,
@@ -2513,7 +2513,7 @@ impl QdiscConfig for TbfConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HtbQdiscConfig {
     /// Default class ID for unclassified traffic.
     pub default_class: u32,
@@ -2702,7 +2702,7 @@ impl QdiscConfig for HtbQdiscConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrioConfig {
     /// Number of priority bands.
     pub bands: i32,
@@ -2878,7 +2878,7 @@ impl QdiscConfig for PrioConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SfqConfig {
     /// Perturbation period in seconds.
     pub perturb: i32,

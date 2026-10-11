@@ -7,6 +7,7 @@ pub use crate::netlink::link::{
     AdSelect as BondAdSelect, LacpRate as BondLacpRate, NetkitMode, NetkitPolicy, NetkitScrub,
     VlanProtocol, XmitHashPolicy as BondXmitHashPolicy,
 };
+pub use crate::netlink::tc_spec::QdiscSpec;
 
 /// Declarative network configuration.
 ///
@@ -231,28 +232,13 @@ impl NetworkConfig {
                     format!("declared more than once at {:?}", q.effective_parent()),
                 ));
             }
-            for (what, value) in q.qdisc_type.netem_percents() {
-                if !(0.0..=100.0).contains(&value) {
-                    errors.push(ValidationErrorInfo::new(
-                        format!("qdiscs.{}", q.dev),
-                        format!("netem {what} of {value} is not a percentage in 0..=100"),
-                    ));
-                }
-            }
-            // `perturb` refuses this, but a JSON document can carry it, and
-            // the lowering would saturate it silently (#597).
-            if let DeclaredQdiscType::Sfq {
-                perturb_secs: Some(p),
-                ..
-            } = q.qdisc_type
-                && i32::try_from(p).is_err()
-            {
+            // What installing the qdisc would refuse before sending anything
+            // (#515): percentages and sfq's perturb are checked as a document
+            // is read, the rest here.
+            if let Err(e) = q.qdisc_type.validate() {
                 errors.push(ValidationErrorInfo::new(
                     format!("qdiscs.{}", q.dev),
-                    format!(
-                        "sfq perturb of {p} seconds is past the kernel's limit of {}",
-                        i32::MAX
-                    ),
+                    e.to_string(),
                 ));
             }
         }
@@ -1977,7 +1963,7 @@ pub struct DeclaredQdisc {
     pub(crate) dev: String,
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) parent: QdiscParent,
-    pub(crate) qdisc_type: DeclaredQdiscType,
+    pub(crate) qdisc_type: QdiscSpec,
     /// The qdisc's handle, in tc(8) notation in JSON (`"1:"`). `None`: `1:`
     /// for a classful kind, so its classes and filters can name it, and
     /// the kernel's choice for the others (#514).
@@ -2052,7 +2038,7 @@ impl DeclaredQdisc {
     }
 
     /// Get the qdisc type.
-    pub fn qdisc_type(&self) -> &DeclaredQdiscType {
+    pub fn qdisc_type(&self) -> &QdiscSpec {
         &self.qdisc_type
     }
 }
@@ -2071,285 +2057,7 @@ pub enum QdiscParent {
     Ingress,
 }
 
-impl DeclaredQdiscType {
-    /// Lower a `Netem` declaration to the imperative [`NetemConfig`].
-    /// `None` for every other variant.
-    ///
-    /// The one place the declarative → imperative netem mapping lives.
-    /// It used to be three hand-copied `match` arms (`add_qdisc`,
-    /// `replace_qdisc`, the diff's options renderer) that a new field
-    /// had to reach all of; `rate` and the correlations arrived here
-    /// once (#332).
-    pub(crate) fn netem_config(&self) -> Option<crate::netlink::tc::NetemConfig> {
-        use crate::netlink::tc::NetemConfig;
-        use crate::util::{Percent, Rate};
-
-        let DeclaredQdiscType::Netem {
-            delay_us,
-            jitter_us,
-            loss_percent,
-            limit,
-            duplicate_percent,
-            corrupt_percent,
-            reorder_percent,
-            loss_correlation,
-            delay_correlation,
-            rate_bps,
-            duplicate_correlation,
-            corrupt_correlation,
-            reorder_correlation,
-            gap,
-            loss_model,
-        } = self
-        else {
-            return None;
-        };
-        let mut cfg = NetemConfig::new();
-        if let Some(d) = delay_us {
-            cfg = cfg.delay(Duration::from_micros(u64::from(*d)));
-        }
-        if let Some(j) = jitter_us {
-            cfg = cfg.jitter(Duration::from_micros(u64::from(*j)));
-        }
-        if let Some(l) = loss_percent {
-            cfg = cfg.loss(Percent::new(*l));
-        }
-        if let Some(lim) = limit {
-            cfg = cfg.limit(*lim);
-        }
-        if let Some(d) = duplicate_percent {
-            cfg = cfg.duplicate(Percent::new(*d));
-        }
-        if let Some(c) = corrupt_percent {
-            cfg = cfg.corrupt(Percent::new(*c));
-        }
-        if let Some(r) = reorder_percent {
-            cfg = cfg.reorder(Percent::new(*r));
-        }
-        if let Some(corr) = loss_correlation {
-            cfg = cfg.loss_correlation(Percent::new(*corr));
-        }
-        if let Some(corr) = delay_correlation {
-            cfg = cfg.delay_correlation(Percent::new(*corr));
-        }
-        if let Some(bps) = rate_bps {
-            cfg = cfg.rate(Rate::bytes_per_sec(*bps));
-        }
-        if let Some(corr) = duplicate_correlation {
-            cfg = cfg.duplicate_correlation(Percent::new(*corr));
-        }
-        if let Some(corr) = corrupt_correlation {
-            cfg = cfg.corrupt_correlation(Percent::new(*corr));
-        }
-        if let Some(corr) = reorder_correlation {
-            cfg = cfg.reorder_correlation(Percent::new(*corr));
-        }
-        if let Some(g) = gap {
-            cfg = cfg.gap(*g);
-        }
-        if let Some(m) = loss_model {
-            cfg = cfg.loss_model(*m);
-        }
-        Some(cfg.build())
-    }
-
-    /// Lower a `Tbf` declaration to the imperative [`TbfConfig`]; `None`
-    /// for every other variant. The one place the mapping lives, like
-    /// [`netem_config`](Self::netem_config) (#349).
-    ///
-    /// [`TbfConfig`]: crate::netlink::tc::TbfConfig
-    pub(crate) fn tbf_config(&self) -> Option<crate::netlink::tc::TbfConfig> {
-        use crate::netlink::tc::TbfConfig;
-        use crate::util::{Bytes, Rate};
-
-        let Self::Tbf {
-            rate_bps,
-            burst_bytes,
-            limit_bytes,
-            peakrate_bps,
-            mtu,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let mut cfg = TbfConfig::new()
-            .rate(Rate::bytes_per_sec(*rate_bps))
-            .burst(Bytes::new(u64::from(*burst_bytes)));
-        if let Some(limit) = limit_bytes {
-            cfg = cfg.limit(Bytes::new(u64::from(*limit)));
-        }
-        if let Some(peak) = peakrate_bps {
-            cfg = cfg.peakrate(Rate::bytes_per_sec(*peak));
-        }
-        if let Some(m) = mtu {
-            cfg = cfg.mtu(*m);
-        }
-        Some(cfg.build())
-    }
-
-    /// Lower an `Htb` declaration to [`HtbQdiscConfig`]; `None` otherwise
-    /// (#346).
-    ///
-    /// [`HtbQdiscConfig`]: crate::netlink::tc::HtbQdiscConfig
-    pub(crate) fn htb_config(&self) -> Option<crate::netlink::tc::HtbQdiscConfig> {
-        let Self::Htb { default_class } = self else {
-            return None;
-        };
-        Some(crate::netlink::tc::HtbQdiscConfig::new().default_class(*default_class))
-    }
-
-    /// The percentages a `Netem` declaration carries, by name, for
-    /// [`NetworkConfig::validate`]. The builder clamps them through
-    /// [`Percent`](crate::util::Percent), but a JSON or YAML document sets
-    /// them directly and can carry `.nan` or 150 (#598).
-    fn netem_percents(&self) -> Vec<(&'static str, f64)> {
-        use crate::netlink::tc_options::NetemLossModel;
-        let Self::Netem {
-            loss_percent,
-            duplicate_percent,
-            corrupt_percent,
-            reorder_percent,
-            loss_correlation,
-            delay_correlation,
-            duplicate_correlation,
-            corrupt_correlation,
-            reorder_correlation,
-            loss_model,
-            ..
-        } = self
-        else {
-            return Vec::new();
-        };
-        let mut out: Vec<(&'static str, f64)> = [
-            ("loss", loss_percent),
-            ("duplicate", duplicate_percent),
-            ("corrupt", corrupt_percent),
-            ("reorder", reorder_percent),
-            ("loss correlation", loss_correlation),
-            ("delay correlation", delay_correlation),
-            ("duplicate correlation", duplicate_correlation),
-            ("corrupt correlation", corrupt_correlation),
-            ("reorder correlation", reorder_correlation),
-        ]
-        .into_iter()
-        .filter_map(|(what, v)| v.map(|v| (what, v)))
-        .collect();
-        match loss_model {
-            Some(NetemLossModel::GilbertIntuitive {
-                p13,
-                p31,
-                p32,
-                p14,
-                p23,
-            }) => out.extend([
-                ("loss state p13", *p13),
-                ("loss state p31", *p31),
-                ("loss state p32", *p32),
-                ("loss state p14", *p14),
-                ("loss state p23", *p23),
-            ]),
-            Some(NetemLossModel::GilbertElliot { p, r, h, k1 }) => out.extend([
-                ("loss gemodel p", *p),
-                ("loss gemodel r", *r),
-                ("loss gemodel h", *h),
-                ("loss gemodel 1-k", *k1),
-            ]),
-            _ => {}
-        }
-        out
-    }
-
-    /// Lower an `FqCodel` declaration to [`FqCodelConfig`]; `None`
-    /// otherwise (#346). Only the fields the declaration sets are written;
-    /// the kernel fills in the rest.
-    ///
-    /// `flows` is carried whenever it is declared. `fq_codel_change`
-    /// refuses it on a live qdisc even unchanged (#361), so
-    /// [`FqCodelConfig`] leaves it out of a change, and recreates the
-    /// qdisc when the live table has a different size (#486, #596).
-    ///
-    /// [`FqCodelConfig`]: crate::netlink::tc::FqCodelConfig
-    pub(crate) fn fq_codel_config(&self) -> Option<crate::netlink::tc::FqCodelConfig> {
-        let Self::FqCodel {
-            limit,
-            target_us,
-            interval_us,
-            flows,
-            quantum,
-            ecn,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let mut cfg = crate::netlink::tc::FqCodelConfig::new();
-        if let Some(lim) = limit {
-            cfg = cfg.limit(*lim);
-        }
-        if let Some(t) = target_us {
-            cfg = cfg.target(Duration::from_micros(u64::from(*t)));
-        }
-        if let Some(i) = interval_us {
-            cfg = cfg.interval(Duration::from_micros(u64::from(*i)));
-        }
-        if let Some(f) = flows {
-            cfg = cfg.flows(*f);
-        }
-        if let Some(q) = quantum {
-            cfg = cfg.quantum(*q);
-        }
-        if let Some(e) = ecn {
-            cfg = cfg.ecn(*e);
-        }
-        Some(cfg)
-    }
-
-    /// Lower an `Sfq` declaration to [`SfqConfig`]; `None` otherwise (#346).
-    ///
-    /// [`SfqConfig`]: crate::netlink::tc::SfqConfig
-    pub(crate) fn sfq_config(&self) -> Option<crate::netlink::tc::SfqConfig> {
-        let Self::Sfq {
-            perturb_secs,
-            limit,
-            quantum,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let mut cfg = crate::netlink::tc::SfqConfig::new();
-        if let Some(p) = perturb_secs {
-            cfg = cfg.perturb(i32::try_from(*p).unwrap_or(i32::MAX));
-        }
-        if let Some(l) = limit {
-            cfg = cfg.limit(*l);
-        }
-        if let Some(q) = quantum {
-            cfg = cfg.quantum(*q);
-        }
-        Some(cfg)
-    }
-
-    /// Lower a `Prio` declaration to [`PrioConfig`]; `None` otherwise (#346).
-    ///
-    /// [`PrioConfig`]: crate::netlink::tc::PrioConfig
-    pub(crate) fn prio_config(&self) -> Option<crate::netlink::tc::PrioConfig> {
-        let Self::Prio { bands, priomap } = self else {
-            return None;
-        };
-        let mut cfg = crate::netlink::tc::PrioConfig::new();
-        if let Some(b) = bands {
-            cfg = cfg.bands(i32::from(*b));
-        }
-        if let Some(map) = priomap {
-            cfg = cfg.priomap(*map);
-        }
-        Some(cfg)
-    }
-}
-
-impl DeclaredQdiscType {
+impl QdiscSpec {
     /// The parent slot this kind must occupy, overriding whatever the
     /// declaration says.
     ///
@@ -2361,196 +2069,50 @@ impl DeclaredQdiscType {
     /// field, which a deserialized document can set freely.
     pub(crate) fn required_parent(&self) -> Option<QdiscParent> {
         match self {
-            DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => Some(QdiscParent::Ingress),
-            DeclaredQdiscType::KernelDefault => Some(QdiscParent::Root),
+            QdiscSpec::Ingress | QdiscSpec::Clsact => Some(QdiscParent::Ingress),
+            QdiscSpec::KernelDefault => Some(QdiscParent::Root),
             _ => None,
         }
     }
-
-    /// Whether the kind has classes, and so a fixed handle by default.
-    pub(crate) fn is_classful(&self) -> bool {
-        matches!(self, Self::Htb { .. } | Self::Prio { .. })
-    }
 }
 
-/// Qdisc type for declared configuration.
-///
-/// Note: the percentage fields on [`DeclaredQdiscType::Netem`] are
-/// stored as raw `f64`. When built through [`QdiscBuilder`] they pass
-/// through [`crate::util::Percent`] (clamped to `0..=100`). A value a
-/// JSON or YAML document sets directly is checked by
-/// [`NetworkConfig::validate`], which refuses NaN and anything outside
-/// `0..=100` (#598).
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum DeclaredQdiscType {
-    /// Network emulator.
-    ///
-    /// `#[non_exhaustive]` since 0.27: the variant grew five fields for
-    /// #332 and that was a compile break for anyone destructuring it
-    /// field-by-field. With the marker, the next knob is not.
-    /// Construct through [`QdiscBuilder::netem`]; match with `..`.
-    #[non_exhaustive]
-    Netem {
-        delay_us: Option<u32>,
-        jitter_us: Option<u32>,
-        loss_percent: Option<f64>,
-        limit: Option<u32>,
-        /// Packet-duplication probability (netem `duplicate`).
-        duplicate_percent: Option<f64>,
-        /// Packet-corruption probability (netem `corrupt`).
-        corrupt_percent: Option<f64>,
-        /// Packet-reorder probability (netem `reorder`).
-        reorder_percent: Option<f64>,
-        /// Loss-correlation (netem `loss <p>% <corr>%`). Lowers the loss
-        /// rate rather than making it bursty — see
-        /// [`NetemConfig::loss_correlation`](crate::netlink::tc::NetemConfig::loss_correlation);
-        /// for bursts, [`loss_model`](QdiscBuilder::loss_model).
-        loss_correlation: Option<f64>,
-        /// Delay-correlation between adjacent packets
-        /// (netem `delay <t> <jitter> <corr>%`).
-        delay_correlation: Option<f64>,
-        /// Rate limit in **bytes** per second (netem `rate`; tc(8)'s
-        /// `bps` unit, as [`Tbf::rate_bps`](Self::Tbf)). Set through
-        /// [`QdiscBuilder::rate`], which takes a typed
-        /// [`Rate`](crate::util::Rate). Added in 0.27 (#332).
-        rate_bps: Option<u64>,
-        /// Duplicate-correlation (netem `duplicate <p>% <corr>%`).
-        duplicate_correlation: Option<f64>,
-        /// Corrupt-correlation (netem `corrupt <p>% <corr>%`).
-        corrupt_correlation: Option<f64>,
-        /// Reorder-correlation (netem `reorder <p>% <corr>%`).
-        reorder_correlation: Option<f64>,
-        /// Reorder gap in packets (netem `gap`).
-        gap: Option<u32>,
-        /// A Markov loss model (netem `loss state …` / `loss gemodel …`)
-        /// in place of random loss. Set through
-        /// [`QdiscBuilder::loss_model`]. Added in 0.29 (#368).
-        loss_model: Option<crate::netlink::tc_options::NetemLossModel>,
-    },
-    /// Hierarchical Token Bucket.
-    Htb { default_class: u32 },
-    /// Fair Queueing Controlled Delay.
-    ///
-    /// `#[non_exhaustive]` since 0.28 for the same reason [`Netem`] is:
-    /// the variant grew the three knobs `FqCodelConfig` had and it
-    /// should not cost a major bump again. Construct through
-    /// [`QdiscBuilder::fq_codel`]; match with `..`.
-    ///
-    /// [`Netem`]: Self::Netem
-    #[non_exhaustive]
-    FqCodel {
-        /// Queue limit in packets.
-        limit: Option<u32>,
-        /// CoDel target delay.
-        target_us: Option<u32>,
-        /// CoDel interval.
-        interval_us: Option<u32>,
-        /// Number of flow buckets. **Honoured only when the qdisc is
-        /// created**: the kernel allocates the flow table in
-        /// `fq_codel_init` and `fq_codel_change` rejects the attribute
-        /// outright on an existing qdisc, so it is omitted from change
-        /// messages and excluded from the diff. To change it, delete the
-        /// qdisc and let it be re-added. Added in 0.28 (#361).
-        flows: Option<u32>,
-        /// Bytes dequeued per round. Added in 0.28 (#361).
-        quantum: Option<u32>,
-        /// Mark rather than drop, where the peer negotiated ECN.
-        /// `None` leaves the kernel default, which is **on**, and is not
-        /// compared; `Some(false)` turns it off (#488). Added in 0.28 (#361).
-        ecn: Option<bool>,
-    },
-    /// Token Bucket Filter.
-    ///
-    /// Built with [`QdiscBuilder::tbf`], which takes typed units
-    /// ([`Rate`](crate::util::Rate) / [`Bytes`](crate::util::Bytes)); the
-    /// fields are the kernel's units so the serde shape is plain integers.
-    #[non_exhaustive]
-    Tbf {
-        /// Rate in **bytes** per second — tc(8)'s `bps`, not bits.
-        rate_bps: u64,
-        /// Bucket size in bytes (`TbfConfig::burst`).
-        burst_bytes: u32,
-        /// Queue limit in bytes (`TbfConfig::limit`). **Required** — there
-        /// is no kernel default: a TBF without one has no queue and drops
-        /// every packet, so applying a declaration that leaves this `None`
-        /// is an error. Set it with [`QdiscBuilder::limit_bytes`].
-        limit_bytes: Option<u32>,
-        /// Peak rate in **bytes** per second (`TbfConfig::peakrate`),
-        /// the ceiling a burst may drain at. Requires `mtu` to be
-        /// meaningful — the kernel sizes the peak bucket from it.
-        /// Added in 0.28 (#361).
-        peakrate_bps: Option<u64>,
-        /// Peak-burst / maximum packet size in bytes
-        /// (`TbfConfig::mtu`). `None` leaves the kernel default.
-        /// Added in 0.28 (#361).
-        mtu: Option<u32>,
-    },
-    /// Stochastic Fair Queueing.
-    ///
-    /// `#[non_exhaustive]` since 0.28 — see [`FqCodel`](Self::FqCodel).
-    #[non_exhaustive]
-    Sfq {
-        /// Hash-perturbation period in whole seconds.
-        perturb_secs: Option<u32>,
-        /// Queue limit in packets. Added in 0.28 (#361).
-        limit: Option<u32>,
-        /// Bytes dequeued per round. Added in 0.28 (#361).
-        quantum: Option<u32>,
-    },
-    /// Priority qdisc.
-    ///
-    /// `#[non_exhaustive]` since 0.31: construct through
-    /// [`QdiscBuilder::prio`]; match with `..`.
-    #[non_exhaustive]
-    Prio {
-        /// Number of bands, 2..=16. `None` is the kernel's 3.
-        bands: Option<u8>,
-        /// Which band each of the 16 priorities goes to. `None` is the
-        /// default map, fitted to `bands` when there are fewer than three
-        /// (#487).
-        priomap: Option<[u8; 16]>,
-    },
-    /// Ingress qdisc.
-    Ingress,
-    /// Clsact qdisc (for BPF).
-    Clsact,
-    /// The kernel's own root qdisc: whatever root is installed goes, and
-    /// the kernel puts its default back (`pfifo_fast`, `mq`, `noqueue`,
-    /// …). Built by [`QdiscBuilder::kernel_default`] (#514).
-    KernelDefault,
-}
-
-impl DeclaredQdiscType {
-    /// Get the kind string.
-    pub fn kind(&self) -> &str {
-        match self {
-            Self::Netem { .. } => "netem",
-            Self::Htb { .. } => "htb",
-            Self::FqCodel { .. } => "fq_codel",
-            Self::Tbf { .. } => "tbf",
-            Self::Sfq { .. } => "sfq",
-            Self::Prio { .. } => "prio",
-            Self::Ingress => "ingress",
-            Self::Clsact => "clsact",
-            Self::KernelDefault => "default",
-        }
-    }
-}
+/// The declarative qdisc type: [`QdiscSpec`], which the imperative path
+/// takes too, since 0.32 (#515).
+#[deprecated(
+    since = "0.32.0",
+    note = "renamed `QdiscSpec`, which holds the imperative configs (#515)"
+)]
+pub type DeclaredQdiscType = QdiscSpec;
 
 /// Builder for qdisc configuration.
+///
+/// Its setters write into the [`QdiscSpec`] the qdisc is declared as —
+/// the imperative config itself since 0.32 (#515) — and [`spec`](Self::spec)
+/// takes a whole one, for what has no setter here (netem's slot, seed and
+/// rate overheads, a TBF's peak rate, …).
 #[derive(Debug)]
 #[must_use = "builders do nothing unless used"]
 pub struct QdiscBuilder {
     dev: String,
     parent: QdiscParent,
-    qdisc_type: Option<DeclaredQdiscType>,
+    qdisc_type: Option<QdiscSpec>,
     handle: Option<crate::TcHandle>,
     /// Setters called for a kind the qdisc is not (#476).
     errors: Vec<String>,
+}
+
+/// The config of `$variant` in `$self.qdisc_type`, or a wrong-kind error
+/// for `$setter` naming `$kinds`.
+macro_rules! with_kind {
+    ($self:ident, $setter:literal, $kinds:literal, $($variant:ident)|+, |$c:ident| $body:expr) => {{
+        match &mut $self.qdisc_type {
+            $(Some(QdiscSpec::$variant($c)) => {
+                $body;
+            })+
+            _ => $self.wrong_kind($setter, $kinds),
+        }
+        $self
+    }};
 }
 
 impl QdiscBuilder {
@@ -2579,11 +2141,34 @@ impl QdiscBuilder {
         self
     }
 
+    /// Declare the qdisc as `spec`, whole: any config a `Connection`
+    /// installs (#515). The hook kinds take their slot.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use nlink::netlink::{config::NetworkConfig, tc::{NetemConfig, NetemSlot}};
+    ///
+    /// let netem = NetemConfig::new()
+    ///     .delay(Duration::from_millis(10))
+    ///     .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)))
+    ///     .seed(7);
+    /// let cfg = NetworkConfig::new().qdisc("eth0", |q| q.spec(netem));
+    /// # let _ = cfg;
+    /// ```
+    pub fn spec(mut self, spec: impl Into<QdiscSpec>) -> Self {
+        let spec = spec.into();
+        if let Some(parent) = spec.required_parent() {
+            self.parent = parent;
+        }
+        self.qdisc_type = Some(spec);
+        self
+    }
+
     /// Declare the kernel's own root qdisc: whatever root is installed is
     /// deleted, and the kernel puts its default back (#514).
     pub fn kernel_default(mut self) -> Self {
         self.parent = QdiscParent::Root;
-        self.qdisc_type = Some(DeclaredQdiscType::KernelDefault);
+        self.qdisc_type = Some(QdiscSpec::KernelDefault);
         self
     }
 
@@ -2602,174 +2187,78 @@ impl QdiscBuilder {
 
     /// Configure as netem qdisc.
     pub fn netem(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Netem {
-            delay_us: None,
-            jitter_us: None,
-            loss_percent: None,
-            limit: None,
-            duplicate_percent: None,
-            corrupt_percent: None,
-            reorder_percent: None,
-            loss_correlation: None,
-            delay_correlation: None,
-            rate_bps: None,
-            duplicate_correlation: None,
-            corrupt_correlation: None,
-            reorder_correlation: None,
-            gap: None,
-            loss_model: None,
-        });
+        self.qdisc_type = Some(QdiscSpec::Netem(crate::netlink::tc::NetemConfig::new()));
         self
     }
 
-    /// Set netem delay in milliseconds. Saturates at `u32::MAX` µs.
+    /// Set netem delay in milliseconds.
     pub fn delay_ms(mut self, ms: u32) -> Self {
-        if let Some(DeclaredQdiscType::Netem { delay_us, .. }) = &mut self.qdisc_type {
-            *delay_us = Some(ms.saturating_mul(1000));
-        } else {
-            self.wrong_kind("delay_ms", "netem");
-        }
-        self
+        let d = Duration::from_millis(u64::from(ms));
+        with_kind!(self, "delay_ms", "netem", Netem, |c| c.delay = Some(d))
     }
 
     /// Set netem delay in microseconds.
     pub fn delay_us(mut self, us: u32) -> Self {
-        if let Some(DeclaredQdiscType::Netem { delay_us, .. }) = &mut self.qdisc_type {
-            *delay_us = Some(us);
-        } else {
-            self.wrong_kind("delay_us", "netem");
-        }
-        self
+        let d = Duration::from_micros(u64::from(us));
+        with_kind!(self, "delay_us", "netem", Netem, |c| c.delay = Some(d))
     }
 
     /// Set netem delay as a [`Duration`] — the same type
-    /// `NetemConfig::delay` takes, so sub-millisecond values need no
-    /// unit arithmetic (#332). Saturates at `u32::MAX` µs.
-    pub fn delay(self, delay: Duration) -> Self {
-        self.delay_us(delay.as_micros().min(u32::MAX as u128) as u32)
+    /// `NetemConfig::delay` takes (#332).
+    pub fn delay(mut self, delay: Duration) -> Self {
+        with_kind!(self, "delay", "netem", Netem, |c| c.delay = Some(delay))
     }
 
-    /// Set netem jitter in milliseconds. Saturates at `u32::MAX` µs.
+    /// Set netem jitter in milliseconds.
     pub fn jitter_ms(mut self, ms: u32) -> Self {
-        if let Some(DeclaredQdiscType::Netem { jitter_us, .. }) = &mut self.qdisc_type {
-            *jitter_us = Some(ms.saturating_mul(1000));
-        } else {
-            self.wrong_kind("jitter_ms", "netem");
-        }
-        self
+        let d = Duration::from_millis(u64::from(ms));
+        with_kind!(self, "jitter_ms", "netem", Netem, |c| c.jitter = Some(d))
     }
 
     /// Set netem jitter in microseconds (#332).
     pub fn jitter_us(mut self, us: u32) -> Self {
-        if let Some(DeclaredQdiscType::Netem { jitter_us, .. }) = &mut self.qdisc_type {
-            *jitter_us = Some(us);
-        } else {
-            self.wrong_kind("jitter_us", "netem");
-        }
-        self
+        let d = Duration::from_micros(u64::from(us));
+        with_kind!(self, "jitter_us", "netem", Netem, |c| c.jitter = Some(d))
     }
 
-    /// Set netem jitter as a [`Duration`] (#332). Saturates at
-    /// `u32::MAX` µs.
-    pub fn jitter(self, jitter: Duration) -> Self {
-        self.jitter_us(jitter.as_micros().min(u32::MAX as u128) as u32)
+    /// Set netem jitter as a [`Duration`] (#332).
+    pub fn jitter(mut self, jitter: Duration) -> Self {
+        with_kind!(self, "jitter", "netem", Netem, |c| c.jitter = Some(jitter))
     }
 
     /// Set the netem rate limit (netem `rate`), typed (#332).
-    ///
-    /// Stored as bytes per second, the kernel's unit and the one
-    /// `NetemConfig::rate` writes — so `Rate::mbit(100)` here and
-    /// there install the same shaper.
     pub fn rate(mut self, rate: crate::util::Rate) -> Self {
-        if let Some(DeclaredQdiscType::Netem { rate_bps, .. }) = &mut self.qdisc_type {
-            *rate_bps = Some(rate.as_bytes_per_sec());
-        } else {
-            self.wrong_kind("rate", "netem");
-        }
-        self
+        with_kind!(self, "rate", "netem", Netem, |c| c.rate = Some(rate))
     }
 
     /// Set the netem reorder gap in packets (netem `gap`). Only
     /// meaningful with [`Self::reorder_pct`]; `NetemConfig` forces a
     /// gap of 1 when reorder is set and no gap is given.
     pub fn gap(mut self, packets: u32) -> Self {
-        if let Some(DeclaredQdiscType::Netem { gap, .. }) = &mut self.qdisc_type {
-            *gap = Some(packets);
-        } else {
-            self.wrong_kind("gap", "netem");
-        }
-        self
+        with_kind!(self, "gap", "netem", Netem, |c| c.gap = packets)
     }
 
-    /// Set netem packet loss as a typed [`crate::util::Percent`].
-    ///
-    /// Internally stores the clamped `f64` so the wire-format diff
-    /// machinery (which compares with `PartialEq` on `Option<f64>`)
-    /// stays stable. The typed boundary at the setter is what kills
-    /// the wrong-units footgun.
-    ///
-    /// (The 0.20.1 deprecated `loss(f64)` form was removed in 0.21
-    /// per the typed-units rollout. Construct the argument with
-    /// `Percent::new(1.5)` for percent values or
-    /// `Percent::from_fraction(0.015)` for fractional values — both
-    /// produce identical wire bytes.)
+    /// Set netem packet loss.
     pub fn loss_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { loss_percent, .. }) = &mut self.qdisc_type {
-            *loss_percent = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("loss_pct", "netem");
-        }
-        self
+        with_kind!(self, "loss_pct", "netem", Netem, |c| c.loss = percent)
     }
 
-    /// Set netem packet-duplication probability.
-    ///
-    /// Mirror of `NetemConfig::duplicate(Percent)` for the
-    /// declarative path (Plan 228 extension, 0.21).
+    /// Set netem packet-duplication probability
+    /// (`NetemConfig::duplicate`).
     pub fn duplicate_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { duplicate_percent, .. }) =
-            &mut self.qdisc_type
-        {
-            *duplicate_percent = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("duplicate_pct", "netem");
-        }
-        self
+        with_kind!(self, "duplicate_pct", "netem", Netem, |c| c.duplicate =
+            percent)
     }
 
-    /// Set netem packet-corruption probability.
-    ///
-    /// Mirror of `NetemConfig::corrupt(Percent)` for the
-    /// declarative path (Plan 228 extension, 0.21).
+    /// Set netem packet-corruption probability (`NetemConfig::corrupt`).
     pub fn corrupt_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { corrupt_percent, .. }) =
-            &mut self.qdisc_type
-        {
-            *corrupt_percent = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("corrupt_pct", "netem");
-        }
-        self
+        with_kind!(self, "corrupt_pct", "netem", Netem, |c| c.corrupt = percent)
     }
 
-    /// Set netem packet-reorder probability.
-    ///
-    /// Mirror of `NetemConfig::reorder(Percent, …)` for the
-    /// declarative path (Plan 228 extension, 0.21). The
-    /// declarative form takes only the primary reorder
-    /// probability; reorder correlation is a separate setter
-    /// (`reorder_correlation_pct`) for symmetry with the other
-    /// correlation knobs — call both to mirror the imperative
-    /// 2-arg form.
+    /// Set netem packet-reorder probability (`NetemConfig::reorder`); its
+    /// correlation is [`reorder_correlation_pct`](Self::reorder_correlation_pct).
     pub fn reorder_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { reorder_percent, .. }) =
-            &mut self.qdisc_type
-        {
-            *reorder_percent = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("reorder_pct", "netem");
-        }
-        self
+        with_kind!(self, "reorder_pct", "netem", Netem, |c| c.reorder = percent)
     }
 
     /// Set netem loss correlation (`loss <p>% <corr>%`).
@@ -2779,29 +2268,19 @@ impl QdiscBuilder {
     /// probability almost never triggers (`loss 0.5% 25%` drops ~0 %; #369,
     /// table on [`NetemConfig::loss_correlation`](crate::netlink::tc::NetemConfig::loss_correlation)).
     /// For loss in bursts use [`loss_model`](Self::loss_model).
-    ///
-    /// Mirror of `NetemConfig::loss_correlation(Percent)` for the
-    /// declarative path (Plan 228 extension, 0.21).
     pub fn loss_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { loss_correlation, .. }) =
-            &mut self.qdisc_type
-        {
-            *loss_correlation = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("loss_correlation_pct", "netem");
-        }
-        self
+        with_kind!(self, "loss_correlation_pct", "netem", Netem, |c| c
+            .loss_correlation =
+            percent)
     }
 
     /// Set a netem Markov loss model — Gilbert-Elliot (`loss gemodel …`)
     /// or the 4-state Gilbert-Intuitive model (`loss state …`), netem's
     /// generators for **bursty** loss.
     ///
-    /// Mirror of `NetemConfig::loss_model` for the declarative path, and
-    /// exclusive with [`loss_pct`](Self::loss_pct) and
-    /// [`loss_correlation_pct`](Self::loss_correlation_pct) in the same
-    /// way: applying a declaration that sets both is an error. No-op on a
-    /// kind other than netem (#368).
+    /// Exclusive with [`loss_pct`](Self::loss_pct) and
+    /// [`loss_correlation_pct`](Self::loss_correlation_pct): a declaration
+    /// that sets both fails validation (#368).
     ///
     /// ```no_run
     /// # async fn example() -> nlink::Result<()> {
@@ -2818,250 +2297,142 @@ impl QdiscBuilder {
     /// # }
     /// ```
     pub fn loss_model(mut self, model: crate::netlink::tc_options::NetemLossModel) -> Self {
-        if let Some(DeclaredQdiscType::Netem { loss_model, .. }) = &mut self.qdisc_type {
-            *loss_model = Some(model);
-        } else {
-            self.wrong_kind("loss_model", "netem");
-        }
-        self
+        with_kind!(self, "loss_model", "netem", Netem, |c| c.loss_model =
+            Some(model))
     }
 
-    /// Set netem delay correlation (correlation between adjacent
-    /// packets' delay outcomes).
-    ///
-    /// Mirror of `NetemConfig::delay_correlation(Percent)` for the
-    /// declarative path (Plan 228 extension, 0.21).
+    /// Set netem delay correlation (`NetemConfig::delay_correlation`).
     pub fn delay_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { delay_correlation, .. }) =
-            &mut self.qdisc_type
-        {
-            *delay_correlation = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("delay_correlation_pct", "netem");
-        }
-        self
+        with_kind!(self, "delay_correlation_pct", "netem", Netem, |c| c
+            .delay_correlation =
+            percent)
     }
 
-    /// Set netem reorder correlation — the second argument of
-    /// `NetemConfig::reorder`. The doc on [`Self::reorder_pct`] has
-    /// named this setter since 0.21; it exists as of 0.27 (#332).
+    /// Set netem reorder correlation, the second argument of
+    /// `NetemConfig::reorder` (#332).
     pub fn reorder_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { reorder_correlation, .. }) =
-            &mut self.qdisc_type
-        {
-            *reorder_correlation = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("reorder_correlation_pct", "netem");
-        }
-        self
+        with_kind!(self, "reorder_correlation_pct", "netem", Netem, |c| c
+            .reorder_correlation =
+            percent)
     }
 
     /// Set netem duplicate correlation (`NetemConfig::duplicate_correlation`).
     pub fn duplicate_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { duplicate_correlation, .. }) =
-            &mut self.qdisc_type
-        {
-            *duplicate_correlation = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("duplicate_correlation_pct", "netem");
-        }
-        self
+        with_kind!(self, "duplicate_correlation_pct", "netem", Netem, |c| c
+            .duplicate_correlation =
+            percent)
     }
 
     /// Set netem corrupt correlation (`NetemConfig::corrupt_correlation`).
     pub fn corrupt_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
-        if let Some(DeclaredQdiscType::Netem { corrupt_correlation, .. }) =
-            &mut self.qdisc_type
-        {
-            *corrupt_correlation = Some(percent.as_percent());
-        } else {
-            self.wrong_kind("corrupt_correlation_pct", "netem");
-        }
-        self
+        with_kind!(self, "corrupt_correlation_pct", "netem", Netem, |c| c
+            .corrupt_correlation =
+            percent)
     }
 
-    /// Set the queue limit in **packets**.
-    ///
-    /// Applies to netem, fq_codel and sfq — all three take a packet
-    /// limit and all three call it `limit`. TBF's limit is a byte count
-    /// and has its own setter, [`limit_bytes`](Self::limit_bytes); the
-    /// units are why they are not one method.
-    ///
-    /// Before 0.28 this reached netem only, which left fq_codel and sfq
-    /// unconfigurable through the builder entirely (#361).
+    /// Set the queue limit in **packets**: netem's, fq_codel's and sfq's.
+    /// TBF's limit is a byte count, [`limit_bytes`](Self::limit_bytes).
     ///
     /// sfq caps its limit at 127 × 128 = 16256 packets (`sfq_change()`,
     /// default depth times default flows); the diff compares against the
     /// capped value, so declaring more installs 16256.
     pub fn limit(mut self, packets: u32) -> Self {
-        let mut fits = true;
         match &mut self.qdisc_type {
-            Some(DeclaredQdiscType::Netem { limit, .. })
-            | Some(DeclaredQdiscType::FqCodel { limit, .. })
-            | Some(DeclaredQdiscType::Sfq { limit, .. }) => *limit = Some(packets),
-            _ => fits = false,
-        }
-        if !fits {
-            self.wrong_kind("limit", "fq_codel or netem or sfq");
+            Some(QdiscSpec::Netem(c)) => c.limit = packets,
+            Some(QdiscSpec::FqCodel(c)) => c.limit = Some(packets),
+            Some(QdiscSpec::Sfq(c)) => c.limit = packets,
+            _ => self.wrong_kind("limit", "fq_codel or netem or sfq"),
         }
         self
     }
 
-    /// Set the fq_codel target delay (`FqCodelConfig::target`).
-    ///
-    /// The kernel stores CoDel times as psched ticks, so the value that
-    /// comes back is the tick round-trip of this one rather than the
-    /// exact `Duration`; the diff accounts for that.
+    /// Set the fq_codel target delay (`FqCodelConfig::target`). The kernel
+    /// keeps CoDel times in 1.024 µs units; the diff compares in them.
     pub fn target(mut self, target: Duration) -> Self {
-        if let Some(DeclaredQdiscType::FqCodel { target_us, .. }) = &mut self.qdisc_type {
-            *target_us = Some(target.as_micros().min(u128::from(u32::MAX)) as u32);
-        } else {
-            self.wrong_kind("target", "fq_codel");
-        }
-        self
+        with_kind!(self, "target", "fq_codel", FqCodel, |c| c.target =
+            Some(target))
     }
 
-    /// Set the fq_codel interval (`FqCodelConfig::interval`). See
-    /// [`target`](Self::target) on tick rounding.
+    /// Set the fq_codel interval (`FqCodelConfig::interval`).
     pub fn interval(mut self, interval: Duration) -> Self {
-        if let Some(DeclaredQdiscType::FqCodel { interval_us, .. }) = &mut self.qdisc_type {
-            *interval_us = Some(interval.as_micros().min(u128::from(u32::MAX)) as u32);
-        } else {
-            self.wrong_kind("interval", "fq_codel");
-        }
-        self
+        with_kind!(self, "interval", "fq_codel", FqCodel, |c| c.interval =
+            Some(interval))
     }
 
     /// Set the number of fq_codel flow buckets (`FqCodelConfig::flows`).
     ///
     /// The kernel sizes the flow table in `fq_codel_init` and will not
-    /// resize it: `fq_codel_change` returns `EINVAL` if the attribute is
-    /// present at all, *even when the value is unchanged*. So the value is
-    /// left out of any change to a live fq_codel. When it differs from the
-    /// live table, the diff reports it, and the apply replaces the qdisc
-    /// with a new one. As with `tc qdisc replace`, that drops its queue and
-    /// resets its statistics. Added in 0.28 (#361); compared since 0.31
-    /// (#596).
+    /// resize it, so a different one replaces the qdisc, which drops its
+    /// queue and resets its statistics (#361, #596).
     pub fn flows(mut self, flows: u32) -> Self {
-        if let Some(DeclaredQdiscType::FqCodel { flows: f, .. }) = &mut self.qdisc_type {
-            *f = Some(flows);
-        } else {
-            self.wrong_kind("flows", "fq_codel");
-        }
-        self
+        with_kind!(self, "flows", "fq_codel", FqCodel, |c| c.flows =
+            Some(flows))
     }
 
     /// Set the bytes dequeued per round — fq_codel's and sfq's
-    /// `quantum`, which mean the same thing. Added in 0.28 (#361).
-    ///
-    /// fq_codel raises anything below 256 to 256 (`fq_codel_change()`), and
-    /// the diff compares against that, so declaring less installs 256.
+    /// `quantum`. fq_codel raises anything below 256 to 256, and the diff
+    /// compares against that (#361).
     pub fn quantum(mut self, bytes: u32) -> Self {
-        let mut fits = true;
         match &mut self.qdisc_type {
-            Some(DeclaredQdiscType::FqCodel { quantum, .. })
-            | Some(DeclaredQdiscType::Sfq { quantum, .. }) => *quantum = Some(bytes),
-            _ => fits = false,
-        }
-        if !fits {
-            self.wrong_kind("quantum", "fq_codel or sfq");
+            Some(QdiscSpec::FqCodel(c)) => c.quantum = Some(bytes),
+            Some(QdiscSpec::Sfq(c)) => c.quantum = bytes,
+            _ => self.wrong_kind("quantum", "fq_codel or sfq"),
         }
         self
     }
 
     /// Enable fq_codel ECN marking instead of dropping, where the flow
-    /// negotiated it (`FqCodelConfig::ecn`). Added in 0.28 (#361).
+    /// negotiated it (`FqCodelConfig::ecn`) (#361).
     pub fn ecn(mut self, enabled: bool) -> Self {
-        if let Some(DeclaredQdiscType::FqCodel { ecn, .. }) = &mut self.qdisc_type {
-            *ecn = Some(enabled);
-        } else {
-            self.wrong_kind("ecn", "fq_codel");
-        }
-        self
+        with_kind!(self, "ecn", "fq_codel", FqCodel, |c| c.ecn = Some(enabled))
     }
 
     /// Set the sfq hash-perturbation period (`SfqConfig::perturb`).
     ///
     /// The kernel's field is whole seconds, and 0 turns perturbation off,
-    /// so a fraction rounds up: `perturb(Duration::from_millis(500))`
-    /// installs 1 s, and 1500 ms installs 2 s. `Duration::ZERO` is off. A
-    /// period past `i32::MAX` seconds, the field's range, makes
-    /// [`build`](Self::build) fail. Kernels with the 2025 sfq fix (6.13,
-    /// and the stable updates) also refuse anything past `INT_MAX / HZ`
-    /// seconds with `EINVAL`. Added in 0.28 (#361); rounds up since 0.31
-    /// (#597).
+    /// so a fraction rounds up: 500 ms installs 1 s. A period past
+    /// `i32::MAX` seconds makes [`build`](Self::build) fail (#597).
     pub fn perturb(mut self, period: Duration) -> Self {
-        if let Some(DeclaredQdiscType::Sfq { perturb_secs, .. }) = &mut self.qdisc_type {
-            let secs = period.as_secs() + u64::from(period.subsec_nanos() > 0);
-            match i32::try_from(secs) {
-                Ok(secs) => *perturb_secs = Some(secs.unsigned_abs()),
-                Err(_) => self.errors.push(format!(
-                    "`.perturb({period:?})` is past the kernel's limit of {} seconds",
-                    i32::MAX
-                )),
-            }
-        } else {
-            self.wrong_kind("perturb", "sfq");
+        let secs = period.as_secs() + u64::from(period.subsec_nanos() > 0);
+        match (&mut self.qdisc_type, i32::try_from(secs)) {
+            (Some(QdiscSpec::Sfq(c)), Ok(secs)) => c.perturb = secs,
+            (Some(QdiscSpec::Sfq(_)), Err(_)) => self.errors.push(format!(
+                "`.perturb({period:?})` is past the kernel's limit of {} seconds",
+                i32::MAX
+            )),
+            _ => self.wrong_kind("perturb", "sfq"),
         }
         self
     }
 
-    /// Set the number of prio bands (`PrioConfig::bands`).
-    ///
-    /// The `Prio` variant has had this field since it was added, but
-    /// [`prio`](Self::prio) hardcoded `None` and no setter existed — so
-    /// the declarative path could only ever install the kernel default
-    /// of 3 (#361).
+    /// Set the number of prio bands (`PrioConfig::bands`) (#361).
     pub fn bands(mut self, bands: u8) -> Self {
-        if let Some(DeclaredQdiscType::Prio { bands: b, .. }) = &mut self.qdisc_type {
-            *b = Some(bands);
-        } else {
-            self.wrong_kind("bands", "prio");
-        }
-        self
+        with_kind!(self, "bands", "prio", Prio, |c| c.bands = i32::from(bands))
     }
 
     /// Set the prio priomap: the band each of the 16 priorities goes to
     /// (`PrioConfig::priomap`). Without one, the default map is used,
     /// fitted to [`bands`](Self::bands) below three (#487).
     pub fn priomap(mut self, map: [u8; 16]) -> Self {
-        if let Some(DeclaredQdiscType::Prio { priomap, .. }) = &mut self.qdisc_type {
-            *priomap = Some(map);
-        } else {
-            self.wrong_kind("priomap", "prio");
-        }
-        self
+        with_kind!(self, "priomap", "prio", Prio, |c| c.priomap = map)
     }
 
-    /// Set the TBF peak rate (`TbfConfig::peakrate`) — the ceiling a
-    /// burst may drain at, above the sustained [`tbf`](Self::tbf) rate.
-    ///
-    /// The kernel sizes the peak bucket from the MTU, so set
-    /// [`mtu`](Self::mtu) with it. Added in 0.28 (#361).
+    /// Set the TBF peak rate (`TbfConfig::peakrate`): the ceiling a burst
+    /// may drain at. The kernel sizes the peak bucket from the
+    /// [`mtu`](Self::mtu), so set it too (#361).
     pub fn peakrate(mut self, rate: crate::util::Rate) -> Self {
-        if let Some(DeclaredQdiscType::Tbf { peakrate_bps, .. }) = &mut self.qdisc_type {
-            *peakrate_bps = Some(rate.as_bytes_per_sec());
-        } else {
-            self.wrong_kind("peakrate", "tbf");
-        }
-        self
+        with_kind!(self, "peakrate", "tbf", Tbf, |c| c.peakrate = Some(rate))
     }
 
     /// Set the TBF peak-burst / maximum packet size in bytes
-    /// (`TbfConfig::mtu`). Defaults to 1514 when unset. Added in 0.28
-    /// (#361).
+    /// (`TbfConfig::mtu`), 1514 unless set (#361).
     pub fn mtu(mut self, bytes: u32) -> Self {
-        if let Some(DeclaredQdiscType::Tbf { mtu, .. }) = &mut self.qdisc_type {
-            *mtu = Some(bytes);
-        } else {
-            self.wrong_kind("mtu", "tbf");
-        }
-        self
+        with_kind!(self, "mtu", "tbf", Tbf, |c| c.mtu = bytes)
     }
 
     /// Configure as HTB qdisc.
     pub fn htb(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Htb { default_class: 0 });
+        self.qdisc_type = Some(QdiscSpec::Htb(crate::netlink::tc::HtbQdiscConfig::new()));
         self
     }
 
@@ -3072,39 +2443,19 @@ impl QdiscBuilder {
     /// (`Error::NotSupported`) rather than delete the root and every class
     /// and filter under it. Delete the qdisc yourself to change it.
     pub fn default_class(mut self, class: u32) -> Self {
-        if let Some(DeclaredQdiscType::Htb { default_class }) = &mut self.qdisc_type {
-            *default_class = class;
-        } else {
-            self.wrong_kind("default_class", "htb");
-        }
-        self
+        with_kind!(self, "default_class", "htb", Htb, |c| c.default_class =
+            class)
     }
 
     /// Configure as fq_codel qdisc.
     pub fn fq_codel(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::FqCodel {
-            limit: None,
-            target_us: None,
-            interval_us: None,
-            flows: None,
-            quantum: None,
-            ecn: None,
-        });
+        self.qdisc_type = Some(QdiscSpec::FqCodel(crate::netlink::tc::FqCodelConfig::new()));
         self
     }
 
     /// Configure as TBF qdisc with a typed rate and bucket size (#349).
-    ///
-    /// Takes [`Rate`](crate::util::Rate) and [`Bytes`](crate::util::Bytes)
-    /// like every imperative TC builder, so `Rate::mbit(100)` here and in
-    /// [`TbfConfig`](crate::netlink::tc::TbfConfig) install the same
-    /// shaper. This used to be `tbf(rate_bps: u64, burst_bytes: u32)`,
-    /// where the number was bytes per second — a caller writing
-    /// `100_000_000` for 100 Mbit/s got 800 Mbit/s, silently, the exact
-    /// bug the `Rate` newtype exists to make a compile error.
-    ///
     /// Follow it with [`limit_bytes`](Self::limit_bytes): a TBF needs a
-    /// queue limit, and applying one without is an error.
+    /// queue limit, and one without fails validation.
     ///
     /// ```
     /// use nlink::netlink::config::NetworkConfig;
@@ -3116,65 +2467,42 @@ impl QdiscBuilder {
     /// # let _ = cfg;
     /// ```
     pub fn tbf(mut self, rate: crate::util::Rate, burst: crate::util::Bytes) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Tbf {
-            rate_bps: rate.as_bytes_per_sec(),
-            burst_bytes: burst.as_u32_saturating(),
-            limit_bytes: None,
-            peakrate_bps: None,
-            mtu: None,
-        });
+        let tbf = crate::netlink::tc::TbfConfig::new().rate(rate).burst(burst);
+        self.qdisc_type = Some(QdiscSpec::Tbf(tbf));
         self
     }
 
-    /// Set the TBF queue limit in bytes (`TbfConfig::limit`). Required for
-    /// a TBF: the kernel gives one without a limit no queue, so it drops
-    /// every packet, and `apply` refuses it as tc(8) does. No-op for other
-    /// kinds; netem's packet limit is [`QdiscBuilder::limit`].
+    /// Set the TBF queue limit (`TbfConfig::limit`). Required for a TBF:
+    /// the kernel gives one without a limit no queue, so it drops every
+    /// packet. netem's packet limit is [`limit`](Self::limit).
     pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
-        if let Some(DeclaredQdiscType::Tbf { limit_bytes, .. }) = &mut self.qdisc_type {
-            *limit_bytes = Some(limit.as_u32_saturating());
-        } else {
-            self.wrong_kind("limit_bytes", "tbf");
-        }
-        self
+        with_kind!(self, "limit_bytes", "tbf", Tbf, |c| c.limit = limit)
     }
 
     /// Configure as SFQ qdisc.
     pub fn sfq(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Sfq {
-            perturb_secs: None,
-            limit: None,
-            quantum: None,
-        });
+        self.qdisc_type = Some(QdiscSpec::Sfq(crate::netlink::tc::SfqConfig::new()));
         self
     }
 
     /// Configure as prio qdisc.
     pub fn prio(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Prio {
-            bands: None,
-            priomap: None,
-        });
+        self.qdisc_type = Some(QdiscSpec::Prio(crate::netlink::tc::PrioConfig::new()));
         self
     }
 
     /// Configure as ingress qdisc.
     pub fn ingress(mut self) -> Self {
         self.parent = QdiscParent::Ingress;
-        self.qdisc_type = Some(DeclaredQdiscType::Ingress);
+        self.qdisc_type = Some(QdiscSpec::Ingress);
         self
     }
 
-    /// Configure as clsact qdisc.
-    ///
-    /// Sets the parent to [`QdiscParent::Ingress`] — clsact shares the
-    /// ingress slot (`TC_H_CLSACT` is an alias of `TC_H_INGRESS`).
-    /// Leaving it at the `Root` default meant `apply` deleted the
-    /// interface's *root* qdisc before trying to install the clsact,
-    /// which the kernel then refused.
+    /// Configure as clsact qdisc. Sets the parent to
+    /// [`QdiscParent::Ingress`]: clsact shares the ingress slot.
     pub fn clsact(mut self) -> Self {
         self.parent = QdiscParent::Ingress;
-        self.qdisc_type = Some(DeclaredQdiscType::Clsact);
+        self.qdisc_type = Some(QdiscSpec::Clsact);
         self
     }
 
@@ -3518,256 +2846,101 @@ mod plan_228_tests {
     use super::*;
     use crate::util::Percent;
 
-    fn netem_loss(q: &DeclaredQdisc) -> Option<f64> {
+    /// The netem config a declaration holds.
+    fn netem_of(q: &DeclaredQdisc) -> &crate::netlink::tc::NetemConfig {
         match &q.qdisc_type {
-            DeclaredQdiscType::Netem { loss_percent, .. } => *loss_percent,
-            _ => None,
+            QdiscSpec::Netem(c) => c,
+            other => panic!("expected netem, got {other:?}"),
         }
     }
 
-    #[test]
-    fn loss_pct_stores_clamped_f64_internally() {
-        // The typed boundary kills the bug at construction; the f64
-        // that lands in DeclaredQdiscType is what wire-format diff
-        // compares.
-        let q = QdiscBuilder::new("eth0").netem().loss_pct(Percent::new(1.5));
-        let built = q.build().unwrap();
-        assert_eq!(netem_loss(&built), Some(1.5));
+    fn netem_loss(q: &DeclaredQdisc) -> f64 {
+        netem_of(q).loss.as_percent()
     }
 
     #[test]
-    fn loss_pct_clamps_supra_100() {
+    fn loss_pct_lands_in_the_netem_config() {
         let q = QdiscBuilder::new("eth0")
             .netem()
-            .loss_pct(Percent::new(150.0))
-            .build()
-            .unwrap();
-        assert_eq!(netem_loss(&q), Some(100.0));
-    }
-
-    #[test]
-    fn loss_pct_clamps_negative() {
-        let q = QdiscBuilder::new("eth0")
-            .netem()
-            .loss_pct(Percent::new(-1.5))
-            .build()
-            .unwrap();
-        assert_eq!(netem_loss(&q), Some(0.0));
-    }
-
-    #[test]
-    fn loss_pct_handles_nan() {
-        // `Percent::new(NaN)` is 0 % (#598). It used to stay NaN through
-        // `clamp`, which wrote as 0 % but made the declaration unequal to
-        // itself.
-        let q = QdiscBuilder::new("eth0")
-            .netem()
-            .loss_pct(Percent::new(f64::NAN))
-            .build()
-            .unwrap();
-        let v = netem_loss(&q).expect("loss_percent set");
-        assert_eq!(v, 0.0, "Percent::new(NaN) is 0 %");
-    }
-
-    #[test]
-    fn loss_pct_handles_infinity() {
-        let q = QdiscBuilder::new("eth0")
-            .netem()
-            .loss_pct(Percent::new(f64::INFINITY))
-            .build()
-            .unwrap();
-        // Infinity clamps to 100.
-        assert_eq!(netem_loss(&q), Some(100.0));
-    }
-
-    #[test]
-    fn loss_pct_from_fraction_distinguishes_units() {
-        // The headline footgun the typed boundary kills: f64 mixed
-        // fraction-vs-percent. Percent::from_fraction(0.015) = 1.5%.
+            .loss_pct(Percent::new(1.5));
+        assert_eq!(netem_loss(&q.build().unwrap()), 1.5);
+        // `Percent` clamps at the setter: 150 is 100, -1.5 is 0, NaN is 0
+        // (#598), infinity is 100.
+        for (input, stored) in [
+            (150.0, 100.0),
+            (-1.5, 0.0),
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 100.0),
+        ] {
+            let q = QdiscBuilder::new("eth0")
+                .netem()
+                .loss_pct(Percent::new(input))
+                .build()
+                .unwrap();
+            assert_eq!(netem_loss(&q), stored, "{input}");
+        }
+        // The headline footgun the typed boundary kills: fraction vs percent.
         let q = QdiscBuilder::new("eth0")
             .netem()
             .loss_pct(Percent::from_fraction(0.015))
             .build()
             .unwrap();
-        assert_eq!(netem_loss(&q), Some(1.5));
-    }
-
-    // Plan 228 extension (0.21) — netem parity setters.
-    // Each takes Percent; the stored f64 must equal the percent value.
-
-    fn netem_field<F>(q: &DeclaredQdisc, project: F) -> Option<f64>
-    where
-        F: Fn(&DeclaredQdiscType) -> Option<f64>,
-    {
-        project(&q.qdisc_type)
+        assert_eq!(netem_loss(&q), 1.5);
     }
 
     #[test]
-    fn duplicate_pct_stores_percent() {
+    fn the_netem_percent_setters_land_in_their_fields() {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .duplicate_pct(Percent::new(2.5))
-            .build()
-            .unwrap();
-        let v = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { duplicate_percent, .. } => *duplicate_percent,
-            _ => None,
-        });
-        assert_eq!(v, Some(2.5));
-    }
-
-    #[test]
-    fn corrupt_pct_stores_percent() {
-        let q = QdiscBuilder::new("eth0")
-            .netem()
             .corrupt_pct(Percent::new(0.75))
-            .build()
-            .unwrap();
-        let v = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { corrupt_percent, .. } => *corrupt_percent,
-            _ => None,
-        });
-        assert_eq!(v, Some(0.75));
-    }
-
-    #[test]
-    fn reorder_pct_stores_percent() {
-        let q = QdiscBuilder::new("eth0")
-            .netem()
             .reorder_pct(Percent::new(5.0))
-            .build()
-            .unwrap();
-        let v = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { reorder_percent, .. } => *reorder_percent,
-            _ => None,
-        });
-        assert_eq!(v, Some(5.0));
-    }
-
-    #[test]
-    fn loss_correlation_pct_stores_percent() {
-        let q = QdiscBuilder::new("eth0")
-            .netem()
             .loss_correlation_pct(Percent::new(25.0))
-            .build()
-            .unwrap();
-        let v = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { loss_correlation, .. } => *loss_correlation,
-            _ => None,
-        });
-        assert_eq!(v, Some(25.0));
-    }
-
-    #[test]
-    fn delay_correlation_pct_stores_percent() {
-        let q = QdiscBuilder::new("eth0")
-            .netem()
             .delay_correlation_pct(Percent::new(50.0))
             .build()
             .unwrap();
-        let v = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { delay_correlation, .. } => *delay_correlation,
-            _ => None,
-        });
-        assert_eq!(v, Some(50.0));
+        let c = netem_of(&q);
+        assert_eq!(c.duplicate, Percent::new(2.5));
+        assert_eq!(c.corrupt, Percent::new(0.75));
+        assert_eq!(c.reorder, Percent::new(5.0));
+        assert_eq!(c.loss_correlation, Percent::new(25.0));
+        assert_eq!(c.delay_correlation, Percent::new(50.0));
     }
 
     #[test]
-    fn all_netem_setters_clamp_via_percent() {
-        // Out-of-range values clamp at the Percent boundary, not at
-        // the storage f64.
-        let q = QdiscBuilder::new("eth0")
-            .netem()
-            .duplicate_pct(Percent::new(200.0))   // → 100.0
-            .corrupt_pct(Percent::new(-10.0))     // → 0.0
-            .reorder_pct(Percent::new(50.0))
-            .build()
-            .unwrap();
-        let dup = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { duplicate_percent, .. } => *duplicate_percent,
-            _ => None,
-        });
-        let cor = netem_field(&q, |t| match t {
-            DeclaredQdiscType::Netem { corrupt_percent, .. } => *corrupt_percent,
-            _ => None,
-        });
-        assert_eq!(dup, Some(100.0));
-        assert_eq!(cor, Some(0.0));
-    }
-
-    // ---- #332 — rate, Duration-typed delay/jitter, the missing correlations ----
-
-    fn netem_of(q: &DeclaredQdisc) -> &DeclaredQdiscType {
-        assert!(matches!(q.qdisc_type, DeclaredQdiscType::Netem { .. }));
-        &q.qdisc_type
-    }
-
-    #[test]
-    fn rate_is_stored_in_bytes_per_second_like_netem_config() {
+    fn rate_is_the_netem_configs_rate() {
         use crate::util::Rate;
         let q = QdiscBuilder::new("eth0")
             .netem()
             .rate(Rate::mbit(100))
             .build()
             .unwrap();
-        let DeclaredQdiscType::Netem { rate_bps, .. } = netem_of(&q) else {
-            unreachable!()
-        };
-        assert_eq!(*rate_bps, Some(12_500_000), "100 Mbit/s is 12.5 MB/s");
-        // …and the lowering hands NetemConfig the same Rate back.
-        let cfg = q.qdisc_type.netem_config().unwrap();
-        assert_eq!(cfg.rate, Some(Rate::mbit(100)));
+        assert_eq!(netem_of(&q).rate, Some(Rate::mbit(100)));
     }
 
-    // ---- #349 — tbf takes Rate + Bytes, and lowers through one place ----
+    // ---- #349 / #361 / #515 — every kind's knobs land in its config ----
 
     #[test]
-    fn tbf_takes_typed_units_and_lowers_to_tbf_config() {
+    fn tbf_takes_typed_units_into_its_config() {
         use crate::netlink::tc::TbfConfig;
         use crate::util::{Bytes, Rate};
         let q = QdiscBuilder::new("eth0")
             .tbf(Rate::mbit(100), Bytes::kib(32))
             .limit_bytes(Bytes::kib(64))
+            .peakrate(Rate::mbit(200))
+            .mtu(1600)
             .build()
             .unwrap();
-        let DeclaredQdiscType::Tbf {
-            rate_bps,
-            burst_bytes,
-            limit_bytes,
-            ..
-        } = &q.qdisc_type
-        else {
-            panic!("tbf");
-        };
-        assert_eq!(*rate_bps, 12_500_000, "100 Mbit/s is 12.5 MB/s — bytes, not bits");
-        assert_eq!(*burst_bytes, 32_768);
-        assert_eq!(*limit_bytes, Some(65_536));
-
-        let lowered = q.qdisc_type.tbf_config().unwrap();
         let by_hand = TbfConfig::new()
             .rate(Rate::mbit(100))
             .burst(Bytes::kib(32))
             .limit(Bytes::kib(64))
-            .build();
-        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
-        assert_eq!(lowered.rate, Rate::mbit(100));
-
-        // No limit declared → TbfConfig's default (zero) is left alone.
-        let q = QdiscBuilder::new("eth0")
-            .tbf(Rate::kbit(512), Bytes::kb(10))
-            .build()
-            .unwrap();
-        let lowered = q.qdisc_type.tbf_config().unwrap();
-        assert_eq!(lowered.limit, Bytes::ZERO);
-        assert!(
-            QdiscBuilder::new("eth0")
-                .netem()
-                .build()
-                .unwrap()
-                .qdisc_type
-                .tbf_config()
-                .is_none()
-        );
+            .peakrate(Rate::mbit(200))
+            .mtu(1600);
+        assert_eq!(q.qdisc_type, QdiscSpec::Tbf(by_hand));
+        // No limit declared: TbfConfig's zero, which validation refuses.
+        let q = NetworkConfig::new().qdisc("eth0", |q| q.tbf(Rate::kbit(512), Bytes::kb(10)));
+        assert!(q.validate().unwrap_err().to_string().contains("limit"));
         // limit_bytes on a non-tbf kind is an error, like every setter
         // for another kind (#476).
         let errors = QdiscBuilder::new("eth0")
@@ -3778,17 +2951,9 @@ mod plan_228_tests {
         assert!(errors[0].contains("tbf"), "{errors:?}");
     }
 
-    // ---- #361 — fq_codel / sfq / prio / tbf are configurable at all ----
-
-    /// Before 0.28, `fq_codel()`, `sfq()` and `prio()` hardcoded every
-    /// field to `None` and no setter reached them, so the declarative
-    /// path could only ever install kernel defaults for those kinds —
-    /// even for the fields `DeclaredQdiscType` already had. Every knob
-    /// the imperative config exposes must now survive the builder and
-    /// the lowering.
     #[test]
-    fn fq_codel_knobs_reach_the_lowered_config() {
-        use crate::netlink::tc::FqCodelConfig;
+    fn fq_codel_sfq_and_prio_knobs_land_in_their_configs() {
+        use crate::netlink::tc::{FqCodelConfig, PrioConfig, SfqConfig};
         let q = QdiscBuilder::new("eth0")
             .fq_codel()
             .limit(1200)
@@ -3799,7 +2964,6 @@ mod plan_228_tests {
             .ecn(true)
             .build()
             .unwrap();
-        let lowered = q.qdisc_type.fq_codel_config().unwrap();
         let by_hand = FqCodelConfig::new()
             .limit(1200)
             .target(Duration::from_millis(5))
@@ -3807,15 +2971,8 @@ mod plan_228_tests {
             .flows(1024)
             .quantum(300)
             .ecn(true);
-        // `flows` is carried for a replace as well: `FqCodelConfig` drops
-        // it from a change itself (`fq_codel_change_mode_leaves_flows_out`
-        // in tc.rs) and recreates when the live table differs (#596).
-        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
-    }
+        assert_eq!(q.qdisc_type, QdiscSpec::FqCodel(by_hand));
 
-    #[test]
-    fn sfq_knobs_reach_the_lowered_config() {
-        use crate::netlink::tc::SfqConfig;
         let q = QdiscBuilder::new("eth0")
             .sfq()
             .perturb(Duration::from_secs(10))
@@ -3823,9 +2980,17 @@ mod plan_228_tests {
             .quantum(1514)
             .build()
             .unwrap();
-        let lowered = q.qdisc_type.sfq_config().unwrap();
         let by_hand = SfqConfig::new().perturb(10).limit(200).quantum(1514);
-        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+        assert_eq!(q.qdisc_type, QdiscSpec::Sfq(by_hand));
+
+        let q = QdiscBuilder::new("eth0").prio().bands(4).build().unwrap();
+        assert_eq!(q.qdisc_type, QdiscSpec::Prio(PrioConfig::new().bands(4)));
+        let bare = QdiscBuilder::new("eth0").prio().build().unwrap();
+        assert_eq!(
+            bare.qdisc_type,
+            QdiscSpec::Prio(PrioConfig::new()),
+            "the kernel's 3 bands"
+        );
     }
 
     /// `perturb` takes a `Duration`, but the kernel field is whole
@@ -3835,15 +3000,15 @@ mod plan_228_tests {
     fn sfq_perturb_rounds_up_to_whole_seconds() {
         let secs = |d| {
             let q = QdiscBuilder::new("eth0").sfq().perturb(d).build().unwrap();
-            let DeclaredQdiscType::Sfq { perturb_secs, .. } = q.qdisc_type else {
+            let QdiscSpec::Sfq(c) = q.qdisc_type else {
                 panic!("sfq");
             };
-            perturb_secs
+            c.perturb
         };
-        assert_eq!(secs(Duration::from_millis(1_500)), Some(2));
-        assert_eq!(secs(Duration::from_millis(500)), Some(1));
-        assert_eq!(secs(Duration::from_secs(1)), Some(1));
-        assert_eq!(secs(Duration::ZERO), Some(0), "zero is still off");
+        assert_eq!(secs(Duration::from_millis(1_500)), 2);
+        assert_eq!(secs(Duration::from_millis(500)), 1);
+        assert_eq!(secs(Duration::from_secs(1)), 1);
+        assert_eq!(secs(Duration::ZERO), 0, "zero is still off");
 
         // The kernel field is an int: past it is a builder error, not a
         // silent saturation.
@@ -3855,34 +3020,27 @@ mod plan_228_tests {
         assert!(err.iter().any(|e| e.contains("perturb")), "{err:?}");
     }
 
+    /// The whole of any config, through `spec`: what has no setter here.
     #[test]
-    fn prio_bands_reach_the_lowered_config() {
-        let q = QdiscBuilder::new("eth0").prio().bands(4).build().unwrap();
-        let lowered = q.qdisc_type.prio_config().unwrap();
-        assert_eq!(lowered.bands, 4);
-        // Unset still means the kernel default, as before.
-        let bare = QdiscBuilder::new("eth0").prio().build().unwrap();
-        assert_eq!(bare.qdisc_type.prio_config().unwrap().bands, 3);
-    }
-
-    #[test]
-    fn tbf_peakrate_and_mtu_reach_the_lowered_config() {
-        use crate::netlink::tc::TbfConfig;
-        use crate::util::{Bytes, Rate};
+    fn spec_takes_a_whole_config() {
+        use crate::netlink::tc::{NetemConfig, NetemSlot};
+        let netem = NetemConfig::new()
+            .delay(Duration::from_millis(10))
+            .slot(NetemSlot::new(
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+            ))
+            .seed(7);
         let q = QdiscBuilder::new("eth0")
-            .tbf(Rate::mbit(100), Bytes::kib(32))
-            .peakrate(Rate::mbit(200))
-            .mtu(1600)
+            .spec(netem.clone())
             .build()
             .unwrap();
-        let lowered = q.qdisc_type.tbf_config().unwrap();
-        let by_hand = TbfConfig::new()
-            .rate(Rate::mbit(100))
-            .burst(Bytes::kib(32))
-            .peakrate(Rate::mbit(200))
-            .mtu(1600)
-            .build();
-        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+        assert_eq!(q.qdisc_type, QdiscSpec::Netem(netem));
+        let q = QdiscBuilder::new("eth0")
+            .spec(QdiscSpec::Clsact)
+            .build()
+            .unwrap();
+        assert_eq!(q.effective_parent(), QdiscParent::Ingress);
     }
 
     /// #476: a gateway that does not parse was dropped, so
@@ -3954,10 +3112,7 @@ mod plan_228_tests {
         // `limit` and `quantum` are shared across kinds by design; each
         // must land on the kind in hand and nowhere else.
         let netem = QdiscBuilder::new("eth0").netem().limit(50).build().unwrap();
-        let DeclaredQdiscType::Netem { limit, .. } = &netem.qdisc_type else {
-            panic!("netem");
-        };
-        assert_eq!(*limit, Some(50));
+        assert_eq!(netem_of(&netem).limit, 50);
         // tbf's limit is a byte count with its own setter; the packet
         // `limit` must not land on it — and is an error rather than lost.
         let errors = QdiscBuilder::new("eth0")
@@ -3969,66 +3124,34 @@ mod plan_228_tests {
     }
 
     #[test]
-    fn duration_setters_keep_sub_millisecond_precision() {
+    fn duration_setters_keep_their_precision() {
         let q = QdiscBuilder::new("eth0")
             .netem()
             .delay(Duration::from_micros(1_500))
-            .jitter(Duration::from_micros(250))
-            .build()
-            .unwrap();
-        let DeclaredQdiscType::Netem {
-            delay_us,
-            jitter_us,
-            ..
-        } = netem_of(&q)
-        else {
-            unreachable!()
-        };
-        assert_eq!((*delay_us, *jitter_us), (Some(1_500), Some(250)));
-        let cfg = q.qdisc_type.netem_config().unwrap();
-        assert_eq!(cfg.delay, Some(Duration::from_micros(1_500)));
-        assert_eq!(cfg.jitter, Some(Duration::from_micros(250)));
-
-        // jitter_us is the µs sibling delay_us always had.
-        let q = QdiscBuilder::new("eth0")
-            .netem()
             .jitter_us(250)
             .build()
             .unwrap();
-        let DeclaredQdiscType::Netem { jitter_us, .. } = netem_of(&q) else {
-            unreachable!()
-        };
-        assert_eq!(*jitter_us, Some(250));
-    }
-
-    #[test]
-    fn millisecond_setters_saturate_instead_of_wrapping() {
-        // 4_294_968 ms × 1000 wrapped to 1000 µs before; now u32::MAX.
+        assert_eq!(netem_of(&q).delay, Some(Duration::from_micros(1_500)));
+        assert_eq!(netem_of(&q).jitter, Some(Duration::from_micros(250)));
+        // The millisecond setters do not wrap: 4_294_968 ms × 1000 wrapped
+        // to 1000 µs once.
         let q = QdiscBuilder::new("eth0")
             .netem()
             .delay_ms(u32::MAX)
             .jitter_ms(u32::MAX)
-            .delay(Duration::from_secs(1 << 40))
             .build()
             .unwrap();
-        let DeclaredQdiscType::Netem {
-            delay_us,
-            jitter_us,
-            ..
-        } = netem_of(&q)
-        else {
-            unreachable!()
-        };
-        assert_eq!((*delay_us, *jitter_us), (Some(u32::MAX), Some(u32::MAX)));
+        let max = Duration::from_millis(u64::from(u32::MAX));
+        assert_eq!(
+            (netem_of(&q).delay, netem_of(&q).jitter),
+            (Some(max), Some(max))
+        );
     }
 
     #[test]
-    fn every_netem_config_knob_has_a_declarative_setter() {
+    fn every_netem_setter_lands_in_the_netem_config() {
         use crate::netlink::tc::NetemConfig;
         use crate::util::Rate;
-        // The declarative form now expresses everything NetemConfig
-        // does; the lowering of a fully-specified declaration equals
-        // the imperative config built by hand.
         let q = QdiscBuilder::new("eth0")
             .netem()
             .delay(Duration::from_millis(20))
@@ -4047,7 +3170,6 @@ mod plan_228_tests {
             .limit(2000)
             .build()
             .unwrap();
-        let lowered = q.qdisc_type.netem_config().unwrap();
         let by_hand = NetemConfig::new()
             .delay(Duration::from_millis(20))
             .jitter(Duration::from_micros(250))
@@ -4062,18 +3184,8 @@ mod plan_228_tests {
             .reorder_correlation(Percent::new(50.0))
             .gap(5)
             .rate(Rate::mbit(100))
-            .limit(2000)
-            .build();
-        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
-        assert!(
-            QdiscBuilder::new("eth0")
-                .htb()
-                .build()
-                .unwrap()
-                .qdisc_type
-                .netem_config()
-                .is_none()
-        );
+            .limit(2000);
+        assert_eq!(q.qdisc_type, QdiscSpec::Netem(by_hand));
     }
 }
 
@@ -4115,11 +3227,10 @@ mod serde_roundtrip_tests {
         assert_roundtrips(&cfg);
     }
 
-    /// #332 — the new netem fields survive the trip, and a document
-    /// written before they existed (no `rate_bps`, no correlations)
-    /// still reads.
+    /// #515 — a qdisc is written in the units tc(8) writes, and reads
+    /// back as the same spec.
     #[test]
-    fn netem_rate_and_correlations_roundtrip_and_are_optional() {
+    fn netem_is_written_in_human_units_and_reads_back() {
         use crate::util::{Percent, Rate};
         let cfg = NetworkConfig::new().qdisc("eth0", |q| {
             q.netem()
@@ -4132,45 +3243,73 @@ mod serde_roundtrip_tests {
         });
         assert_roundtrips(&cfg);
         let json = cfg.to_json_string().unwrap();
-        assert!(json.contains(r#""rate_bps":12500000"#), "{json}");
-
-        let old = r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"netem":{"delay_us":100000}}}]}"#;
-        let back = NetworkConfig::from_json_str(old).unwrap();
-        let DeclaredQdiscType::Netem { rate_bps, gap, delay_us, .. } = &back.qdiscs()[0].qdisc_type
-        else {
-            panic!("netem");
-        };
-        assert_eq!((*rate_bps, *gap, *delay_us), (None, None, Some(100_000)));
-    }
-
-    /// #349 — the builder took typed units; the wire shape did not move.
-    #[test]
-    fn tbf_serde_shape_is_still_bytes_per_second_integers() {
-        use crate::util::{Bytes, Rate};
-        let cfg = NetworkConfig::new()
-            .qdisc("eth0", |q| q.tbf(Rate::mbit(100), Bytes::kib(32)).limit_bytes(Bytes::kib(64)));
-        assert_roundtrips(&cfg);
-        let json = cfg.to_json_string().unwrap();
-        // 0.28 added `peakrate_bps`/`mtu` (#361). Unset optional fields
-        // serialize as null here, as netem's have always done — the
-        // point of this test is that the *units* stayed bytes-per-second
-        // integers, not that the field list is frozen. Deserialization
-        // is unaffected: serde reads a missing `Option` as `None`, so a
-        // document written before 0.28 still loads.
         assert!(
             json.contains(
-                r#""tbf":{"rate_bps":12500000,"burst_bytes":32768,"limit_bytes":65536,"peakrate_bps":null,"mtu":null}"#
+                r#""netem":{"delay":"1500us","jitter":"250us","reorder":"3%","reorder_correlation":"50%","gap":5,"rate":"100mbit"}"#
             ),
             "{json}"
         );
+        let back = NetworkConfig::from_json_str(&json).unwrap();
+        assert_eq!(back.qdiscs()[0].qdisc_type, cfg.qdiscs()[0].qdisc_type);
+    }
 
-        let pre_0_28 =
-            r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"tbf":{"rate_bps":1,"burst_bytes":2}}}]}"#;
+    /// A document written by 0.31 or before still reads: its raw-unit
+    /// fields are taken beside the new ones, in their old units.
+    #[test]
+    fn a_0_31_qdisc_document_still_reads() {
+        use crate::netlink::tc::{NetemConfig, TbfConfig};
+        use crate::util::{Bytes, Percent, Rate};
+        let old = r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"netem":{
+            "delay_us":100000,"jitter_us":null,"loss_percent":1.5,"rate_bps":12500000,
+            "loss_correlation":null,"gap":null,"limit":500}}}]}"#;
+        let back = NetworkConfig::from_json_str(old).unwrap();
+        let want = NetemConfig::new()
+            .delay(Duration::from_millis(100))
+            .loss(Percent::new(1.5))
+            .rate(Rate::mbit(100))
+            .limit(500);
+        assert_eq!(back.qdiscs()[0].qdisc_type, QdiscSpec::Netem(want));
+
+        let pre_0_28 = r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"tbf":
+            {"rate_bps":1,"burst_bytes":2,"limit_bytes":3}}}]}"#;
         let back = NetworkConfig::from_json_str(pre_0_28).unwrap();
-        let DeclaredQdiscType::Tbf { peakrate_bps, mtu, .. } = &back.qdiscs()[0].qdisc_type else {
-            panic!("tbf");
-        };
-        assert_eq!((*peakrate_bps, *mtu), (None, None));
+        let want = TbfConfig::new()
+            .rate(Rate::bytes_per_sec(1))
+            .burst(Bytes::new(2))
+            .limit(Bytes::new(3));
+        assert_eq!(back.qdiscs()[0].qdisc_type, QdiscSpec::Tbf(want));
+
+        let tbf = NetworkConfig::new().qdisc("eth0", |q| {
+            q.tbf(Rate::mbit(100), Bytes::kib(32))
+                .limit_bytes(Bytes::kib(64))
+        });
+        let json = tbf.to_json_string().unwrap();
+        assert!(
+            json.contains(r#""tbf":{"rate":"100mbit","burst":"32kib","limit":"64kib"}"#),
+            "{json}"
+        );
+    }
+
+    /// What a document cannot mean is refused as it is read: a value set
+    /// both ways, a percentage outside 0..=100, an sfq period past the
+    /// kernel's int, a misspelt field, a rate without its unit.
+    #[test]
+    fn a_qdisc_document_that_cannot_mean_anything_is_refused() {
+        for (doc, says) in [
+            (r#"{"netem":{"delay":"10ms","delay_us":10000}}"#, "twice"),
+            (r#"{"netem":{"loss":"150%"}}"#, "0 to 100"),
+            (r#"{"netem":{"loss_percent":1e9}}"#, "0 to 100"),
+            (r#"{"netem":{"deley":"10ms"}}"#, "unknown field"),
+            (r#"{"netem":{"rate":1000}}"#, "rate"),
+            (r#"{"sfq":{"perturb_secs":4294967295}}"#, "perturb"),
+            (r#"{"tbf":{"burst":"32kib"}}"#, "rate"),
+        ] {
+            let full = format!(r#"{{"qdiscs":[{{"dev":"eth0","qdisc-type":{doc}}}]}}"#);
+            let err = NetworkConfig::from_json_str(&full)
+                .expect_err(doc)
+                .to_string();
+            assert!(err.contains(says), "{doc}: {err}");
+        }
     }
 
     #[test]
@@ -4436,7 +3575,7 @@ mod schemars_tests {
             "root schema title should be the type name"
         );
         let d = defs(&s);
-        for t in ["DeclaredLink", "DeclaredLinkType", "DeclaredQdiscType"] {
+        for t in ["DeclaredLink", "DeclaredLinkType", "QdiscSpec"] {
             assert!(
                 d.contains_key(t),
                 "schema missing definition for {t}; has {:?}",
@@ -4579,14 +3718,9 @@ mod master_and_validate_tests {
             .to_string();
         assert!(err.contains("4095"), "{err}");
 
-        for bad in [f64::NAN, f64::INFINITY, -1.0, 100.5] {
-            let mut cfg = NetworkConfig::new().qdisc("d0", |q| q.netem());
-            if let DeclaredQdiscType::Netem { loss_percent, .. } = &mut cfg.qdiscs[0].qdisc_type {
-                *loss_percent = Some(bad);
-            }
-            let err = cfg.validate().expect_err(&format!("{bad}")).to_string();
-            assert!(err.contains("loss"), "{bad}: {err}");
-        }
+        // A netem percentage is a `Percent`, clamped where it is set and
+        // refused outside 0..=100 where a document is read (#515), so no
+        // declared qdisc carries one out of range any more.
     }
 
     /// What the apply would fail on, or never converge on, is refused by
@@ -4641,18 +3775,6 @@ mod master_and_validate_tests {
             .link("vx0", |l| l.vxlan((1 << 24) - 1))
             .validate()
             .unwrap();
-    }
-
-    /// A JSON document can carry an sfq period the kernel's int cannot
-    /// hold; the lowering would saturate it, so validate refuses it (#597).
-    #[test]
-    fn validate_refuses_an_sfq_period_past_the_kernel_int() {
-        let mut cfg = NetworkConfig::new().qdisc("eth0", |q| q.sfq());
-        if let DeclaredQdiscType::Sfq { perturb_secs, .. } = &mut cfg.qdiscs[0].qdisc_type {
-            *perturb_secs = Some(u32::MAX);
-        }
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("sfq perturb"), "{err}");
     }
 
     #[cfg(feature = "serde")]

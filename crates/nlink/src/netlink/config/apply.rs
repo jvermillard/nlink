@@ -8,8 +8,8 @@ use super::{
     diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
     kind::{KindAttr, KindUpdate, kernel_bond_mode, kernel_macvlan_mode},
     types::{
-        DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
-        DeclaredRoute, NetworkConfig, QdiscParent,
+        DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredRoute,
+        NetworkConfig, QdiscParent,
     },
 };
 use crate::netlink::{
@@ -19,9 +19,7 @@ use crate::netlink::{
     link::{BondLink, BridgeLink, DummyLink, IfbLink, MacvlanLink, VethLink, VlanLink, VxlanLink},
     protocol::Route,
     route::{Ipv4Route, Ipv6Route},
-    tc::{
-        ClsactConfig, IngressConfig,
-    },
+    tc_spec::QdiscSpec,
     types::route::RouteProtocol,
 };
 
@@ -1400,41 +1398,16 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bo
 
 async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()> {
     // At its declared handle, or `1:` for a classful kind, so its classes
-    // and filters can name it (#514).
+    // and filters can name it (#514). The spec is the config itself (#515).
     let handle = qdisc.effective_handle();
     let root = crate::TcHandle::ROOT;
     let dev = qdisc.dev.as_str();
-    let t = &qdisc.qdisc_type;
-    match t {
-        DeclaredQdiscType::Netem { .. } => {
-            let cfg = t.netem_config().expect("matched the Netem arm");
-            conn.add_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Htb { .. } => {
-            let cfg = t.htb_config().expect("matched the Htb arm");
-            conn.add_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::FqCodel { .. } => {
-            let cfg = t.fq_codel_config().expect("matched the FqCodel arm");
-            conn.add_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Tbf { .. } => {
-            let cfg = t.tbf_config().expect("matched the Tbf arm");
-            conn.add_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Sfq { .. } => {
-            let cfg = t.sfq_config().expect("matched the Sfq arm");
-            conn.add_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Prio { .. } => {
-            let cfg = t.prio_config().expect("matched the Prio arm");
-            conn.add_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Ingress => conn.add_qdisc(dev, IngressConfig::new()).await,
-        DeclaredQdiscType::Clsact => conn.add_qdisc(dev, ClsactConfig::new()).await,
+    match &qdisc.qdisc_type {
+        spec @ (QdiscSpec::Ingress | QdiscSpec::Clsact) => conn.add_qdisc(dev, spec).await,
         // The diff puts it in `qdiscs_to_remove`, never here; deleting the
         // root is what it asks for all the same.
-        DeclaredQdiscType::KernelDefault => conn.del_qdisc_if_exists(dev, root).await.map(drop),
+        QdiscSpec::KernelDefault => conn.del_qdisc_if_exists(dev, root).await.map(drop),
+        spec => conn.add_qdisc_full(dev, root, handle, spec).await,
     }
 }
 
@@ -1457,7 +1430,7 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
     // `Connection::replace_qdisc`'s to handle now: it grafts a new qdisc
     // over the live one instead of answering EINVAL (#361, #486).
     match &qdisc.qdisc_type {
-        DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => {
+        QdiscSpec::Ingress | QdiscSpec::Clsact => {
             // Kernel does not accept NLM_F_REPLACE on these
             // pseudo-qdiscs (the kind IS the slot). Use del+add.
             // `effective_parent`, not `parent`: a clsact/ingress
@@ -1476,9 +1449,8 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             }
             return add_qdisc(conn, qdisc).await;
         }
-        DeclaredQdiscType::Htb { .. } => {
-            let cfg = qdisc.qdisc_type.htb_config().expect("matched the Htb arm");
-            refuse_htb_change_in_place(conn, &qdisc.dev, &cfg).await?;
+        QdiscSpec::Htb(cfg) => {
+            refuse_htb_change_in_place(conn, &qdisc.dev, cfg).await?;
         }
         _ => {}
     }
@@ -1534,41 +1506,16 @@ async fn refuse_htb_change_in_place(
 
 /// Atomic replace via NLM_F_REPLACE on RTM_NEWQDISC.
 async fn atomic_replace(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()> {
-    // At its declared handle, or `1:` for a classful kind (#514).
+    // At its declared handle, or `1:` for a classful kind (#514). An
+    // fq_codel goes with `flows`: `replace_qdisc` leaves it out of a change
+    // and recreates the qdisc when the live table differs (#596).
     let handle = qdisc.effective_handle();
     let root = crate::TcHandle::ROOT;
     let dev = qdisc.dev.as_str();
-    let t = &qdisc.qdisc_type;
-    match t {
-        DeclaredQdiscType::Netem { .. } => {
-            let cfg = t.netem_config().expect("matched the Netem arm");
-            conn.replace_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Htb { .. } => {
-            let cfg = t.htb_config().expect("matched the Htb arm");
-            conn.replace_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::FqCodel { .. } => {
-            // With `flows`: `replace_qdisc` leaves it out of a change and
-            // recreates the qdisc when the live table differs (#596).
-            let cfg = t.fq_codel_config().expect("matched the FqCodel arm");
-            conn.replace_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Tbf { .. } => {
-            let cfg = t.tbf_config().expect("matched the Tbf arm");
-            conn.replace_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Sfq { .. } => {
-            let cfg = t.sfq_config().expect("matched the Sfq arm");
-            conn.replace_qdisc_full(dev, root, handle, cfg).await
-        }
-        DeclaredQdiscType::Prio { .. } => {
-            let cfg = t.prio_config().expect("matched the Prio arm");
-            conn.replace_qdisc_full(dev, root, handle, cfg).await
-        }
-        // Ingress/Clsact already handled above.
-        DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => unreachable!(),
-        DeclaredQdiscType::KernelDefault => conn.del_qdisc_if_exists(dev, root).await.map(drop),
+    match &qdisc.qdisc_type {
+        QdiscSpec::Ingress | QdiscSpec::Clsact => unreachable!("handled by replace_qdisc"),
+        QdiscSpec::KernelDefault => conn.del_qdisc_if_exists(dev, root).await.map(drop),
+        spec => conn.replace_qdisc_full(dev, root, handle, spec).await,
     }
 }
 
