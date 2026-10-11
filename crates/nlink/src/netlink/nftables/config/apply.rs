@@ -94,7 +94,7 @@ fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<
 }
 
 impl NftablesDiff {
-    /// Apply the diff to the kernel atomically.
+    /// Apply the diff to the kernel atomically — with one exception.
     ///
     /// Builds a single `Transaction` covering every change in the
     /// diff and commits it in one `NFNL_MSG_BATCH_BEGIN ...
@@ -102,6 +102,12 @@ impl NftablesDiff {
     /// batch (full diff visible to other readers in one step) or
     /// rejects the whole batch (kernel rolls back; no
     /// intermediate state observable).
+    ///
+    /// The exception is [`sets_to_update`](Self::sets_to_update): a
+    /// resized set has to take its new size before elements are added to
+    /// it, so those updates commit first, in a batch of their own. If the
+    /// main batch is then refused, the sets keep their new size and
+    /// timers.
     ///
     /// Returns the diff's `change_count` on success — a
     /// caller-visible "we did N things" signal useful for

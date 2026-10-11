@@ -39,11 +39,12 @@ pub struct DiffOptions {
     /// **Purge is destructive** — it populates
     /// [`ConfigDiff::addresses_to_remove`] /
     /// [`ConfigDiff::routes_to_remove`], which [`ConfigDiff::apply`]
-    /// then deletes. It is deliberately reachable *only* through the
-    /// explicit `diff_with_options` → inspect → `apply` flow (the
-    /// one-shot [`NetworkConfig::apply`](crate::netlink::config::NetworkConfig::apply)
-    /// never purges), so you always see the `-` lines in the diff
-    /// before anything is deleted.
+    /// then deletes. The plain
+    /// [`NetworkConfig::apply`](crate::netlink::config::NetworkConfig::apply)
+    /// never purges; it takes this flag, or
+    /// [`ApplyOptions::with_purge`](super::ApplyOptions::with_purge) (which
+    /// `Stack` passes through), to opt in. Diff with it first to see the
+    /// `-` lines before anything is deleted.
     ///
     /// Scope + safety rails:
     /// - **Addresses**: only `global`-scope, permanent addresses, on the

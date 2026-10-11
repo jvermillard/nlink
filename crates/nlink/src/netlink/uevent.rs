@@ -13,7 +13,14 @@
 //! let conn = Connection::<KobjectUevent>::new()?;
 //!
 //! loop {
-//!     let event = conn.recv().await?;
+//!     let event = match conn.recv().await {
+//!         Ok(event) => event,
+//!         // The kernel dropped uevents under load (ENOBUFS): what was
+//!         // missed is gone — re-read the state you track (for devices,
+//!         // `util::uevent_trigger` re-announces them) and carry on.
+//!         Err(e) if e.is_no_buffer_space() => continue,
+//!         Err(e) => return Err(e.into()),
+//!     };
 //!     println!("[{}] {} ({})", event.action, event.devpath, event.subsystem);
 //! }
 //! # Ok(())
@@ -233,11 +240,12 @@ impl Connection<KobjectUevent> {
     ///
     /// Net-device uevents are delivered to the network namespace of
     /// the listening socket, so this sees the devices in `name` and
-    /// not the host's. Uevents for every *other* subsystem go only to
-    /// the initial namespace, so a connection built this way is a
-    /// net-device monitor and nothing else — see
-    /// [`crate::netlink::netdev`] for what that means for a lifecycle
-    /// join.
+    /// not the host's. Uevents for every *other* subsystem go to every
+    /// network namespace owned by the initial user namespace
+    /// (`uevent_sock_list`) — so a namespace `ip netns add` made sees
+    /// them too, and one made inside a user namespace (a rootless
+    /// container) does not. See [`crate::netlink::netdev`] for what
+    /// that means for a lifecycle join.
     pub fn in_namespace(name: &str) -> Result<Self> {
         Self::in_namespace_path(Path::new(super::namespace::NETNS_RUN_DIR).join(name))
     }
@@ -310,7 +318,12 @@ impl Connection<KobjectUevent> {
     /// conn.attach_filter(&filter)?;
     ///
     /// loop {
-    ///     let event = conn.recv_matching(&filter).await?;
+    ///     let event = match conn.recv_matching(&filter).await {
+    ///         Ok(event) => event,
+    ///         // Uevents dropped under load: carry on (see the module docs).
+    ///         Err(e) if e.is_no_buffer_space() => continue,
+    ///         Err(e) => return Err(e.into()),
+    ///     };
     ///     println!("{} {}", event.action, event.devpath);
     /// }
     /// # Ok(())
@@ -353,7 +366,12 @@ impl Connection<KobjectUevent> {
     /// let conn = Connection::<KobjectUevent>::new()?;
     ///
     /// loop {
-    ///     let event = conn.recv().await?;
+    ///     let event = match conn.recv().await {
+    ///         Ok(event) => event,
+    ///         // Uevents dropped under load: carry on (see the module docs).
+    ///         Err(e) if e.is_no_buffer_space() => continue,
+    ///         Err(e) => return Err(e.into()),
+    ///     };
     ///     if event.is_add() && event.subsystem == "usb" {
     ///         println!("USB device added: {:?}", event.devname());
     ///     }

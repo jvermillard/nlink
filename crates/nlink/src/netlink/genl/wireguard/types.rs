@@ -265,7 +265,10 @@ pub enum WgPeerFlags {
     RemoveMe = 1 << 0,
     /// Replace all allowed IPs (instead of adding).
     ReplaceAllowedIps = 1 << 1,
-    /// Update the endpoint only if it was previously empty.
+    /// Change the peer only if it already exists: a `SET_DEVICE` that
+    /// names a peer the device does not have skips it, silently, instead
+    /// of creating it (`WGPEER_F_UPDATE_ONLY`). nlink's builders do not
+    /// set it.
     UpdateOnly = 1 << 2,
 }
 

@@ -41,15 +41,17 @@
 //! # Implementation Details
 //!
 //! Under the hood, the rate limiter uses:
-//! - **Egress**: HTB qdisc with a single class + fq_codel leaf for AQM
-//! - **Ingress**: IFB device + ingress qdisc + mirred redirect + HTB on IFB
+//! - **Egress**: HTB qdisc with two classes + fq_codel leaf for AQM
+//! - **Ingress**: IFB device + ingress hook (an `ingress` qdisc, or an
+//!   existing `clsact`) + mirred egress redirect + HTB on the IFB
 //!
 //! ```text
 //! Egress:
-//!   eth0 -> HTB root (1:) -> HTB class (1:1, rate limited) -> fq_codel
+//!   eth0 -> HTB root (1:) -> class 1:1 (rate = ceil = the ceiling)
+//!                         -> class 1:10 (the rate, borrowing up to the ceiling) -> fq_codel
 //!
 //! Ingress:
-//!   eth0 ingress -> matchall filter -> mirred redirect -> ifb_eth0 -> HTB -> fq_codel
+//!   eth0 ingress -> matchall filter -> mirred egress redirect -> ifb_eth0 -> HTB -> fq_codel
 //! ```
 
 use std::{

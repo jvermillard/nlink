@@ -21,13 +21,11 @@
 //!
 //! # Key writes and readback
 //!
-//! [`WireguardConfig::apply`] writes a declared `private_key` on
-//! every apply, without diffing it against the kernel's current
-//! value. This is idempotent at the WireGuard protocol layer —
-//! re-applying the same key triggers no handshake storm — but it
-//! costs one extra `SET_DEVICE` call per re-apply. To make a
-//! re-apply a no-op, omit `private_key` from the config after the
-//! first apply. Peer `preshared_key` is written the same way.
+//! [`WireguardConfig::diff`] compares a declared `private_key` with the
+//! kernel's, X25519-clamped as the kernel stores it (#410), and a
+//! peer's `preshared_key` with the one `GET_DEVICE` returns (#411), so a
+//! re-apply with nothing changed writes nothing. Both reads need
+//! `CAP_NET_ADMIN`, as below.
 //!
 //! For callers that read device state directly: `WG_CMD_GET_DEVICE`
 //! is gated behind `CAP_NET_ADMIN` in the device's netns at the
@@ -38,8 +36,8 @@
 //! no partial-reply path where `WgDevice::private_key` comes back as
 //! `None` due to insufficient privilege. [`WgDevice::private_key`]
 //! is `None` only when the device has no key configured (i.e. before
-//! any `set_device(... .private_key(...))`). Peer `preshared_key` is
-//! never returned to any caller — write-only.
+//! any `set_device(... .private_key(...))`). A peer's `preshared_key`
+//! comes back the same way, `None` when the peer has none.
 //!
 //! [`WgDevice::private_key`]: super::types::WgDevice::private_key
 
@@ -903,7 +901,7 @@ impl DeclaredWgDevice {
         // Compared clamped: the kernel stores (and dumps) the key after
         // X25519 clamping, so an unclamped declared key — any 32 bytes
         // that did not come from `wg genkey` — never matched and was
-        // rewritten on every apply (#TBD).
+        // rewritten on every apply (#410).
         if let Some(declared) = self.private_key
             && current.private_key != Some(clamp_private_key(declared))
         {
@@ -913,7 +911,7 @@ impl DeclaredWgDevice {
         // it picked is then what `GET_DEVICE` reports — never 0. Compared
         // literally it never matched, and every apply wrote 0 again, which
         // `set_port()` takes as "bind a new random port": the device moved
-        // port on every apply and its peers lost it (#TBD). Any port
+        // port on every apply and its peers lost it (#414). Any port
         // satisfies a declared 0.
         if let Some(p) = self.listen_port
             && p != 0
@@ -1095,7 +1093,7 @@ impl DeclaredWgPeer {
         // WGPEER_A_PRESHARED_KEY in every peer of a GET_DEVICE, which needs
         // CAP_NET_ADMIN anyway, and the parser maps the all-zero "no key"
         // to `None`. Marking it dirty whenever declared rewrote every
-        // peer with a PSK on every apply (#TBD). A declared all-zero key
+        // peer with a PSK on every apply (#411). A declared all-zero key
         // is the kernel's "none", so it compares as `None`.
         if let Some(psk) = self.preshared_key {
             let want = (psk != [0u8; WG_KEY_LEN]).then_some(psk);
@@ -1354,12 +1352,9 @@ impl fmt::Display for WireguardConfigDiff {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct DeviceChanges {
-    /// `private_key` declared in the config. As of PR #9 (0.20)
-    /// the kernel does return the private key over `WG_CMD_GET_DEVICE`
-    /// to privileged callers (CAP_NET_ADMIN), so the diff field is
-    /// always "dirty when declared" — the config write encodes the
-    /// declared key whether or not it matches the kernel's; a future
-    /// release may add a real comparison.
+    /// The declared `private_key` differs from the kernel's, compared
+    /// X25519-clamped as the kernel stores it (#410). `WG_CMD_GET_DEVICE`
+    /// returns the key to privileged callers (`CAP_NET_ADMIN`).
     pub private_key_set: bool,
     /// `listen_port` differs from the kernel's current.
     pub listen_port_set: bool,

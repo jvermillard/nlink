@@ -84,11 +84,13 @@ use crate::util::AddressFamily;
 /// backstop against stale multicast/cross-process frames, but
 /// no longer load-bears against multi-task races.
 ///
-/// What the lock does **not** fix — multicast `events()` streams
-/// running concurrently with requests still race the recv side
-/// (event streams tap the socket directly and don't acquire the
-/// request lock). The proper fix is a per-seq response router
-/// (NlRouter-style dispatch task) — queued for 0.20.
+/// A multicast `events()` stream on a plain connection holds the
+/// request lock for as long as it lives, so requests wait for it (or
+/// fail with [`Error::EventStreamActive`]
+/// where they cannot wait). For events and requests on one connection at
+/// once, opt into the per-seq response router with
+/// [`with_dispatcher`](Self::with_dispatcher) (#134), or use a second
+/// connection.
 pub struct Connection<P: ProtocolState> {
     /// `Arc` so the #134 dispatcher driver task can hold the recv side
     /// while `Connection` methods keep using the send side. The
@@ -1841,8 +1843,8 @@ impl Connection<Route> {
     /// use nlink::{Connection, Route};
     /// # async fn f() -> nlink::Result<()> {
     /// let conn = Connection::<Route>::new()?;
-    /// // Bring up the interface, then wait for the operstate to
-    /// // reflect it (kernel may take milliseconds).
+    /// // Bring up the interface, then wait for the kernel to report it
+    /// // up (`IFF_UP`; carrier and operstate are separate, and may lag).
     /// conn.set_link_up("eth0").await?;
     /// conn.wait_link_up("eth0", Duration::from_secs(5)).await?;
     /// # Ok(())

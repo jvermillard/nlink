@@ -18,8 +18,8 @@
 //! that has a driver bound, and a net-class device never does — the
 //! driver binds to the *bus* device (PCI, virtio, USB) underneath it.
 //! That device's uevents are `SUBSYSTEM=pci`/`virtio`/…, go only to
-//! the initial network namespace, and carry no `IFINDEX=`, so there is
-//! no key to join them on. Measured across veth, dummy, bridge, vlan
+//! the network namespaces the initial user namespace owns, and carry no
+//! `IFINDEX=`, so there is no key to join them on. Measured across veth, dummy, bridge, vlan
 //! and a virtio NIC: `DRIVER=` never appeared (#328). The recipe table
 //! and this module said otherwise until 0.27; [`NetdevInfo::driver`]
 //! is kept for a kernel or driver that does emit it, and is `None` in
@@ -95,14 +95,16 @@
 //! assumptions. The `scripts/audit-sysfs-in-lib.sh` CI gate enforces
 //! the same rule mechanically.
 //!
-//! ## 4. Inside a namespace you see net uevents and nothing else
+//! ## 4. Inside a namespace you see net uevents, and maybe the rest
 //!
 //! Net-device uevents are delivered to the network namespace of the
-//! listening socket. Uevents for every other subsystem go only to the
-//! initial namespace. So a `NetdevLifecycle` running inside a netns
-//! sees exactly what it needs and nothing more — but do not expect the
-//! PCI-parent uevent of a device passed into that namespace to turn
-//! up. It won't.
+//! listening socket. Uevents for every other subsystem go to every
+//! network namespace the initial user namespace owns
+//! (`uevent_sock_list`): a namespace `ip netns add` made gets them all,
+//! and one made inside a user namespace (a rootless container) gets
+//! none. Either way the join keys on `IFINDEX=`, which only net uevents
+//! carry, so the rest is noise to it — filter it out in the kernel with
+//! [`UeventFilter`](crate::netlink::uevent_filter::UeventFilter).
 //!
 //! # Frame loss
 //!
@@ -414,11 +416,15 @@ mod sealed {
 /// let mut lifecycle = NetdevLifecycle::new(links.events().await, uevents.events().await);
 ///
 /// while let Some(event) = lifecycle.next().await {
-///     match event? {
-///         NetdevEvent::Added(info) => {
+///     match event {
+///         Ok(NetdevEvent::Added(info)) => {
 ///             println!("{} ({:?}) devpath={:?}", info.ifindex(), info.name(), info.devpath());
 ///         }
-///         other => println!("{other:?}"),
+///         Ok(other) => println!("{other:?}"),
+///         // Events dropped under load (ENOBUFS): what was missed is gone.
+///         // Feed the join a resync stream to have it re-read (#510).
+///         Err(e) if e.is_no_buffer_space() => continue,
+///         Err(e) => return Err(e),
 ///     }
 /// }
 /// # Ok(())

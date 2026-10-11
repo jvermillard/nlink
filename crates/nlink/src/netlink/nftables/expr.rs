@@ -456,6 +456,13 @@ impl From<LimitExpr> for Expr {
 }
 
 /// `log`: to syslog (no group), or to an `nflog` group.
+///
+/// Two things every namespace user meets. To syslog, a `log` in any
+/// namespace but the initial one writes **nothing** unless the host sets
+/// `net.netfilter.nf_log_all_netns=1` (`nf_log_allowed()`); an `nflog`
+/// group has no such limit. And the logger is the `nf_log_syslog` module:
+/// where it cannot be loaded, the rule — and the whole batch with it —
+/// fails with `ENOENT`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LogExpr {
