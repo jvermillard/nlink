@@ -309,6 +309,8 @@ pub struct NetemOptions {
     pub(crate) slot: Option<NetemSlotOptions>,
     /// Loss model (if using state-based loss instead of random).
     pub(crate) loss_model: Option<NetemLossModel>,
+    /// The PRNG seed (Linux 6.3+ dumps one always, random unless set).
+    pub(crate) seed: Option<u64>,
 }
 
 /// A netem Markov loss model — `tc`'s `loss state …` and `loss gemodel …`.
@@ -815,6 +817,14 @@ impl NetemOptions {
     #[inline]
     pub fn loss_model(&self) -> Option<&NetemLossModel> {
         self.loss_model.as_ref()
+    }
+
+    /// The seed of netem's random numbers. Linux 6.3+ reports one whether
+    /// or not it was set — a random one when it was not — and keeps it
+    /// across a change that does not send one; older kernels report none.
+    #[inline]
+    pub fn seed(&self) -> Option<u64> {
+        self.seed
     }
 
     /// Returns the set of configured parameters.
@@ -1576,6 +1586,9 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
             TCA_NETEM_LOSS => {
                 // Loss model is a nested attribute containing the model type and parameters
                 parse_netem_loss_model(payload, &mut opts);
+            }
+            TCA_NETEM_PRNG_SEED if payload.len() >= 8 => {
+                opts.seed = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
             }
             _ => {}
         }

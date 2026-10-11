@@ -54,6 +54,10 @@ All notable changes to this project will be documented in this file.
     `From<RouteProtocol> for u8`, and a `Display` that prints the name,
     or the number for `Other`. `as u8` no longer compiles.
 
+- **`NetemConfig` is `#[non_exhaustive]` (#515).** It gained seven fields.
+  Build one with `NetemConfig::new()` and its setters, not a struct
+  literal.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -251,6 +255,27 @@ All notable changes to this project will be documented in this file.
   - `QdiscConfig` is implemented for `Box<T>` and `&T`, so
     `conn.replace_qdisc(dev, Box<dyn QdiscConfig>)` works. nlink-lab
     carried an enum of every config type to get that.
+
+- **netem: slot, ECN, a PRNG seed, rate overheads and delay
+  distributions (#515, part 2).**
+  - `NetemConfig` gains `ecn`, `slot(NetemSlot)`, `seed(u64)`,
+    `distribution(NetemDistribution)` and `rate_overhead(packet, cell_size,
+    cell)`. `parse_params` accepts their tc(8) tokens instead of
+    refusing them: `ecn`, `slot MIN [MAX] [packets N] [bytes N]`,
+    `seed N`, `distribution NAME` and `rate R [OVERHEAD [CELLSIZE
+    [CELLOVERHEAD]]]`. The same tokens through `tc` and through
+    `parse_params` give the same `tc -d qdisc show` line.
+  - A seed makes loss repeatable: the same seed drops the same
+    packets of the same traffic, run after run (Linux 6.3+). The kernel
+    keeps a seed across a change that does not send one.
+    `NetemOptions::seed()` reads it back.
+  - `NetemDistribution::named("normal")` reads iproute2's `.dist` tables
+    from where tc(8) looks: `$TC_LIB_DIR`, `/usr/lib/tc`, `/usr/lib64/tc`,
+    `/usr/lib/<triplet>/tc`. `from_file` and `from_table` take your own.
+    The kernel never dumps a table, so a reconcile cannot see one.
+  - `PerPeerImpairer`'s comparison covers the new fields.
+  - The docs now say that jitter without a rate reorders packets
+    (netem's queue is sorted by send time).
 
 ## [0.31.0] - 2026-10-11
 
