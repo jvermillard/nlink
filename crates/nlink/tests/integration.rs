@@ -283,6 +283,11 @@ mod api_surface;
 #[path = "integration/network_config_echo.rs"]
 mod network_config_echo;
 
+// Every declared field changed A→B in one apply, and the boundary values
+// of the inputs that take numbers or names (#534, Wave 7).
+#[path = "integration/transitions.rs"]
+mod transitions;
+
 #[path = "integration/wireguard_echo.rs"]
 mod wireguard_echo;
 
