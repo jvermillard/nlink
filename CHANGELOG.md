@@ -1155,6 +1155,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Waiting for a link, and for IPv6 duplicate address detection (#524).**
+  - `Connection::wait_link(iface, LinkCond, timeout)` waits for
+    `AdminUp`, `Running`, `OperUp` or `Carrier` and returns the link.
+    `wait_link_up` is `wait_link(.., AdminUp, ..)`. It waits for `IFF_UP`,
+    which `set_link_up` sets before it returns, and its doc no longer
+    claims it waits for the operstate.
+  - `Connection::wait_addresses_settled(iface_or_all, timeout)` waits
+    until no IPv6 address is tentative. It fails with the new
+    `Error::DadFailed { addresses }` (`is_dad_failed()`) when DAD finds an
+    address in use.
+  - New: `AddressMessage::{is_dad_failed, is_optimistic}`.
+
 - **Declarative configs compare, say when they are empty, and the diffs
   have JSON Schemas (#531).**
   - `NetworkConfig`, `NftablesConfig` and `WireguardConfig` and the

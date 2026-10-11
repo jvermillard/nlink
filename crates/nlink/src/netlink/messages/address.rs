@@ -158,9 +158,24 @@ impl AddressMessage {
         self.flags() & 0x20 != 0 // IFA_F_DEPRECATED
     }
 
-    /// Check if this address is tentative.
+    /// Check if this address is tentative: IPv6 duplicate address
+    /// detection has not finished, and the address cannot be used yet.
     pub fn is_tentative(&self) -> bool {
         self.flags() & 0x40 != 0 // IFA_F_TENTATIVE
+    }
+
+    /// Check if duplicate address detection found this address in use
+    /// elsewhere on the link (`IFA_F_DADFAILED`). It stays tentative, and
+    /// never becomes usable (#524).
+    pub fn is_dad_failed(&self) -> bool {
+        self.flags() & 0x08 != 0 // IFA_F_DADFAILED
+    }
+
+    /// Check if this is an optimistic address (`IFA_F_OPTIMISTIC`, RFC
+    /// 4429): usable while duplicate address detection is still running
+    /// (#524).
+    pub fn is_optimistic(&self) -> bool {
+        self.flags() & 0x04 != 0 // IFA_F_OPTIMISTIC
     }
 }
 
@@ -444,6 +459,17 @@ impl AddressMessageBuilder {
 
 #[cfg(test)]
 mod tests {
+    /// `IFA_F_DADFAILED` and `IFA_F_OPTIMISTIC` are read from the flags
+    /// (#524).
+    #[test]
+    fn dad_failed_and_optimistic_flags() {
+        let with = |flags| AddressMessageBuilder::new().flags(flags).build();
+        assert!(with(0x08 | 0x40).is_dad_failed());
+        assert!(with(0x08 | 0x40).is_tentative());
+        assert!(with(0x04).is_optimistic());
+        assert!(!with(0x80).is_dad_failed() && !with(0x80).is_optimistic());
+    }
+
     use std::net::Ipv4Addr;
 
     use super::*;

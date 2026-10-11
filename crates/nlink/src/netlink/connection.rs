@@ -1658,7 +1658,7 @@ impl Connection<Route> {
 // ============================================================================
 
 use super::messages::{
-    AddressMessage, LinkMessage, NeighborMessage, RouteMessage, RuleMessage, TcMessage,
+    AddressMessage, LinkCond, LinkMessage, NeighborMessage, RouteMessage, RuleMessage, TcMessage,
 };
 
 impl Connection<Route> {
@@ -1815,25 +1815,14 @@ impl Connection<Route> {
         }
     }
 
-    /// Wait for an interface to reach the `IFF_UP` state.
+    /// Wait for an interface's `IFF_UP` flag: [`wait_link`](Self::wait_link)
+    /// with [`LinkCond::AdminUp`].
     ///
-    /// Polls the interface state with exponential backoff (starting
-    /// at 10ms, capped at 100ms) until `IFF_UP` is observed or
-    /// `timeout` elapses. The polling form is preferred over a
-    /// subscription-based wait because it keeps lifetime concerns
-    /// trivial — no multicast socket to manage, no event-stream
-    /// drop semantics to document.
-    ///
-    /// Returns `Err(Timeout)` on deadline. Returns
-    /// `Err(InterfaceNotFound)` if the interface is removed during
-    /// the wait.
-    ///
-    /// # Namespace safety
-    ///
-    /// Takes `impl Into<InterfaceRef>`. With a `Name` variant the
-    /// lookup goes via netlink (`get_link_by_name`), which queries
-    /// the connection's netns — namespace-correct even from a
-    /// process running in a different mount namespace.
+    /// `IFF_UP` is the administrative state, which
+    /// [`set_link_up`](Self::set_link_up) sets before it returns, so after
+    /// your own `set_link_up` this waits for nothing. To wait until the
+    /// link can carry traffic, wait for [`LinkCond::Running`] or
+    /// [`LinkCond::Carrier`] (#524).
     ///
     /// # Example
     ///
@@ -1843,9 +1832,7 @@ impl Connection<Route> {
     /// use nlink::{Connection, Route};
     /// # async fn f() -> nlink::Result<()> {
     /// let conn = Connection::<Route>::new()?;
-    /// // Bring up the interface, then wait for the kernel to report it
-    /// // up (`IFF_UP`; carrier and operstate are separate, and may lag).
-    /// conn.set_link_up("eth0").await?;
+    /// // Wait for someone else to bring eth0 up.
     /// conn.wait_link_up("eth0", Duration::from_secs(5)).await?;
     /// # Ok(())
     /// # }
@@ -1856,6 +1843,47 @@ impl Connection<Route> {
         iface: impl Into<InterfaceRef>,
         timeout: Duration,
     ) -> Result<()> {
+        self.wait_link(iface, LinkCond::AdminUp, timeout)
+            .await
+            .map(drop)
+    }
+
+    /// Wait until an interface meets `cond`, and return it as it then is.
+    ///
+    /// Polls with exponential backoff (10 ms, doubling, capped at 100 ms)
+    /// until `cond` holds or `timeout` elapses. A poll of a dump cannot
+    /// miss a change the way a subscription opened too late can, and
+    /// leaves no multicast socket behind.
+    ///
+    /// Returns `Err(Timeout)` on deadline, and `Err(InterfaceNotFound)` if
+    /// the interface goes away during the wait.
+    ///
+    /// # Namespace safety
+    ///
+    /// Takes `impl Into<InterfaceRef>`. A `Name` resolves through netlink,
+    /// in the connection's namespace.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    ///
+    /// use nlink::{Connection, LinkCond, Route};
+    /// # async fn f() -> nlink::Result<()> {
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.set_link_up("veth0").await?;
+    /// // Up is immediate; a carrier comes when the peer is up too.
+    /// conn.wait_link("veth0", LinkCond::Carrier, Duration::from_secs(5)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "wait_link"))]
+    pub async fn wait_link(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        cond: LinkCond,
+        timeout: Duration,
+    ) -> Result<LinkMessage> {
         let iface = iface.into();
         let label = match &iface {
             InterfaceRef::Name(n) => n.clone(),
@@ -1874,7 +1902,68 @@ impl Connection<Route> {
                     .ok_or_else(|| Error::InterfaceNotFound {
                         name: label.clone(),
                     })?;
-            if link.is_up() {
+            if cond.holds(&link) {
+                return Ok(link);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(100));
+        }
+    }
+
+    /// Wait until IPv6 duplicate address detection has settled — no
+    /// address tentative any more — on `iface`, or on every interface
+    /// when `None` (#524).
+    ///
+    /// An address that DAD found in use elsewhere ends in
+    /// [`Error::DadFailed`], naming every such address: it will never
+    /// become usable. Until DAD is done, an address is tentative, and
+    /// binding or sending from it fails (`EADDRNOTAVAIL`), which is why
+    /// a test that pings over IPv6 straight after configuring it fails.
+    /// Polled, like [`wait_link`](Self::wait_link).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    ///
+    /// use nlink::{Connection, Route};
+    /// # async fn f() -> nlink::Result<()> {
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.wait_addresses_settled(Some("eth0".into()), Duration::from_secs(5)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "wait_addresses_settled"))]
+    pub async fn wait_addresses_settled(
+        &self,
+        iface: Option<InterfaceRef>,
+        timeout: Duration,
+    ) -> Result<()> {
+        let ifindex = match &iface {
+            Some(iface) => Some(self.resolve_interface(iface).await?),
+            None => None,
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            let addresses: Vec<AddressMessage> = self
+                .get_addresses()
+                .await?
+                .into_iter()
+                .filter(|a| a.is_ipv6() && ifindex.is_none_or(|i| a.ifindex() == i))
+                .collect();
+            let failed: Vec<std::net::IpAddr> = addresses
+                .iter()
+                .filter(|a| a.is_dad_failed())
+                .filter_map(|a| a.address)
+                .collect();
+            if !failed.is_empty() {
+                return Err(Error::DadFailed { addresses: failed });
+            }
+            if !addresses.iter().any(|a| a.is_tentative()) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {

@@ -1356,6 +1356,38 @@ fn parse_bond_slave_info(data: &[u8]) -> BondSlaveInfo {
     info
 }
 
+/// What [`Connection::wait_link`](crate::Connection::wait_link) waits for
+/// (#524).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinkCond {
+    /// `IFF_UP`, the administrative state.
+    /// [`set_link_up`](crate::Connection::set_link_up) sets it before it
+    /// returns, so this is for waiting on someone else's change.
+    AdminUp,
+    /// `IFF_RUNNING`: the driver says the link can pass traffic — it has a
+    /// carrier, and is not dormant.
+    Running,
+    /// `IFLA_OPERSTATE` is `UP` (RFC 2863). A device that does not track
+    /// its operational state reports `UNKNOWN`, which is not `UP`: wait
+    /// for [`Running`](Self::Running) there.
+    OperUp,
+    /// `IFLA_CARRIER` is 1: the physical (or virtual) link is there.
+    Carrier,
+}
+
+impl LinkCond {
+    /// Whether `link` meets the condition.
+    pub fn holds(self, link: &LinkMessage) -> bool {
+        match self {
+            Self::AdminUp => link.is_up(),
+            Self::Running => link.is_running(),
+            Self::OperUp => link.operstate() == Some(OperState::Up),
+            Self::Carrier => link.carrier() == Some(true),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
