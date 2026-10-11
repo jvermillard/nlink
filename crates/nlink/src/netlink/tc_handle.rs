@@ -306,6 +306,12 @@ impl From<u16> for FilterPriority {
 
 /// Extract the raw priority value. Lossless inverse of
 /// [`From<u16>`](FilterPriority).
+impl PartialEq<u16> for FilterPriority {
+    fn eq(&self, other: &u16) -> bool {
+        self.as_u16() == *other
+    }
+}
+
 impl From<FilterPriority> for u16 {
     #[inline]
     fn from(p: FilterPriority) -> Self {

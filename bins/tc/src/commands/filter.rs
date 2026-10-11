@@ -4,14 +4,13 @@ use std::io::{self, Write};
 
 use clap::{Args, Subcommand};
 use nlink::{
-    Error, TcHandle,
+    Error, EthProto, FilterPriority, TcHandle,
     netlink::{
         Connection, Result, Route,
         filter::{
             BasicFilter, BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter, FwFilter,
             MatchallFilter, RouteFilter, RsvpFilter, TcindexFilter, U32Filter,
         },
-        message::NlMsgType,
         messages::TcMessage,
         types::tc::tc_handle,
     },
@@ -236,8 +235,9 @@ impl FilterCmd {
                 match (protocol.as_deref(), prio) {
                     // Full lookup tuple → delete exactly that filter.
                     (Some(proto_str), Some(p)) => {
-                        let proto_u = parse_protocol_u16(proto_str)?;
-                        conn.del_filter(dev.as_str(), parent_t, proto_u, p).await
+                        let proto = parse_protocol(proto_str)?;
+                        conn.del_filter(dev.as_str(), parent_t, proto, FilterPriority::new(p))
+                            .await
                     }
                     // Bare parent → flush every filter on that parent
                     // (tc(8) `tc filter del dev X parent 1:`).
@@ -341,10 +341,16 @@ impl FilterCmd {
             })
             .transpose()?;
 
-        let proto_filter = protocol_filter.map(parse_protocol_u16).transpose()?;
+        let proto_filter = protocol_filter.map(parse_protocol).transpose()?;
 
-        // Fetch all filters using typed API
-        let all_filters: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTFILTER).await?;
+        // The library's per-device dumps: a filter dump has to name the
+        // device (and a hook, for ingress/clsact), so the bare
+        // RTM_GETTFILTER this sent came back empty and `filter show` never
+        // printed a filter.
+        let all_filters: Vec<TcMessage> = match parent_handle {
+            Some(parent) => conn.get_filters_by_parent_index(ifindex, parent).await?,
+            None => conn.get_filters_by_index(ifindex).await?,
+        };
 
         // Filter results
         let filters: Vec<_> = all_filters
@@ -410,8 +416,8 @@ async fn dispatch_filter(
     let parent = parent
         .parse::<TcHandle>()
         .map_err(|e| Error::InvalidMessage(format!("tc filter: invalid parent `{parent}`: {e}")))?;
-    let proto = parse_protocol_u16(protocol)?;
-    let priority = prio.unwrap_or(0);
+    let proto = parse_protocol(protocol)?;
+    let priority = FilterPriority::new(prio.unwrap_or(0));
 
     // Strict: a present-but-unparseable handle is an error, never a
     // silently-dropped filter (see the CLAUDE.md strict-parse contract).
@@ -459,8 +465,8 @@ async fn run_typed_filter<C: FilterConfig>(
     dev: &str,
     parent: TcHandle,
     handle: Option<TcHandle>,
-    proto: u16,
-    priority: u16,
+    proto: EthProto,
+    priority: FilterPriority,
     cfg: C,
     verb: FilterVerb,
 ) -> Result<()> {
@@ -480,44 +486,10 @@ async fn run_typed_filter<C: FilterConfig>(
     }
 }
 
-/// Parse a protocol name (or hex `0x…`) into the kernel's `u16`.
-/// Recognised names mirror what `tc(8)` accepts.
-fn parse_protocol_u16(s: &str) -> Result<u16> {
-    Ok(match s.to_lowercase().as_str() {
-        "all" => 0x0003,             // ETH_P_ALL
-        "ip" => 0x0800,              // ETH_P_IP
-        "ipv6" => 0x86DD,            // ETH_P_IPV6
-        "arp" => 0x0806,             // ETH_P_ARP
-        "802.1q" | "vlan" => 0x8100, // ETH_P_8021Q
-        "802.1ad" => 0x88A8,         // ETH_P_8021AD
-        "mpls_uc" => 0x8847,         // ETH_P_MPLS_UC
-        "mpls_mc" => 0x8848,         // ETH_P_MPLS_MC
-        _ => {
-            if let Some(hex) = s.strip_prefix("0x") {
-                u16::from_str_radix(hex, 16)
-                    .map_err(|_| Error::InvalidMessage(format!("invalid protocol: {s}")))?
-            } else {
-                s.parse()
-                    .map_err(|_| Error::InvalidMessage(format!("unknown protocol: {s}")))?
-            }
-        }
-    })
-}
-
-/// Inverse of [`parse_protocol_u16`]. Inlined for the same
-/// reason — keeps the bin off the deprecated module.
-fn format_protocol(proto: u16) -> String {
-    match proto {
-        0x0003 => "all".to_string(),
-        0x0800 => "ip".to_string(),
-        0x86DD => "ipv6".to_string(),
-        0x0806 => "arp".to_string(),
-        0x8100 => "802.1Q".to_string(),
-        0x88A8 => "802.1ad".to_string(),
-        0x8847 => "mpls_uc".to_string(),
-        0x8848 => "mpls_mc".to_string(),
-        _ => format!("0x{proto:04x}"),
-    }
+/// A protocol as tc(8) takes it: a name or a number (`EthProto`'s
+/// `FromStr` reads it as iproute2's `ll_proto_a2n` does).
+fn parse_protocol(s: &str) -> Result<EthProto> {
+    s.parse()
 }
 
 /// Convert a TcMessage to JSON representation for filter.
@@ -528,8 +500,8 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
         "dev": dev,
         "kind": filter.kind().unwrap_or(""),
         "parent": filter.parent().to_string(),
-        "protocol": format_protocol(filter.protocol()),
-        "pref": filter.priority(),
+        "protocol": filter.protocol().to_string(),
+        "pref": filter.priority().as_u16(),
     });
 
     if !filter.handle().is_unspec() {
@@ -570,7 +542,7 @@ fn print_filter_text(
         w,
         "filter parent {} protocol {} pref {} {} ",
         filter.parent(),
-        format_protocol(filter.protocol()),
+        filter.protocol(),
         filter.priority(),
         filter.kind().unwrap_or("")
     )?;

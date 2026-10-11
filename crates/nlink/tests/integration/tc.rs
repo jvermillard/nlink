@@ -1495,10 +1495,19 @@ async fn test_filter_add_explicit_protocol_priority() -> Result<()> {
     // Explicit IPv4 protocol + non-zero priority: the exact combination that
     // returned EINVAL before the tcm_info packing fix.
     const ETH_P_IP: u16 = 0x0800;
-    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).build();
-    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, ETH_P_IP, 200, filter)
-        .await
-        .expect("filter add with explicit protocol + priority must be accepted (pre-fix: EINVAL)");
+    let filter = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .build();
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(ETH_P_IP),
+        nlink::FilterPriority::new(200),
+        filter,
+    )
+    .await
+    .expect("filter add with explicit protocol + priority must be accepted (pre-fix: EINVAL)");
 
     Ok(())
 }
@@ -1690,8 +1699,11 @@ async fn test_replace_filter() -> Result<()> {
         "dummy0",
         TcHandle::major_only(1),
         Some(TcHandle::from_raw(1)),
-        0x0800, // ETH_P_IP
-        prio,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(
+            // ETH_P_IP
+            prio,
+        ),
         FlowerFilter::new()
             .classid(TcHandle::new(1, 0x10))
             .dst_ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1), 32)
@@ -1703,8 +1715,8 @@ async fn test_replace_filter() -> Result<()> {
         "dummy0",
         TcHandle::major_only(1),
         Some(TcHandle::from_raw(1)),
-        0x0800,
-        prio,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(prio),
         FlowerFilter::new()
             .classid(TcHandle::new(1, 0x20))
             .dst_ipv4(std::net::Ipv4Addr::new(10, 0, 0, 2), 32)
@@ -1985,8 +1997,15 @@ async fn flower_sctp_port_classifies_only_its_port() -> Result<()> {
         .ip_proto(132)
         .dst_port(5001)
         .build();
-    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 1, filter)
-        .await?;
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
+        filter,
+    )
+    .await?;
 
     // The kernel holds the SCTP port key…
     let mut failures = Vec::new();
@@ -2081,8 +2100,15 @@ async fn flower_vlan_id_classifies_only_its_vlan() -> Result<()> {
         .classid(TcHandle::new(1, 0x10))
         .vlan_id(10)
         .build();
-    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0003, 1, filter)
-        .await?;
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x0003),
+        nlink::FilterPriority::new(1),
+        filter,
+    )
+    .await?;
 
     const PER_TARGET: usize = 5;
     {
@@ -2156,10 +2182,24 @@ async fn flower_takes_its_ethertype_from_the_filter_protocol() -> Result<()> {
         FlowerFilter::parse_params(&["classid", &format!("1:{minor:x}"), "ip_proto", "udp", "dst_port", port])
             .expect("parses")
     };
-    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 1, udp_port(0x10, "5001"))
-        .await?;
-    conn.replace_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 2, udp_port(0x20, "5002"))
-        .await?;
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
+        udp_port(0x10, "5001"),
+    )
+    .await?;
+    conn.replace_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(2),
+        udp_port(0x20, "5002"),
+    )
+    .await?;
     let handle = conn
         .get_filters_by_name("dummy0")
         .await?
@@ -2167,8 +2207,15 @@ async fn flower_takes_its_ethertype_from_the_filter_protocol() -> Result<()> {
         .find(|f| f.kind() == Some("flower") && f.priority() == 2 && f.handle_raw() != 0)
         .map(|f| f.handle())
         .expect("the replaced filter is installed");
-    conn.change_filter_full("dummy0", TcHandle::major_only(1), Some(handle), 0x0800, 2, udp_port(0x20, "5003"))
-        .await?;
+    conn.change_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        Some(handle),
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(2),
+        udp_port(0x20, "5003"),
+    )
+    .await?;
 
     let mut failures = Vec::new();
     for f in conn.get_filters_by_name("dummy0").await? {
@@ -2260,8 +2307,15 @@ async fn flower_vlan_id_under_802_1ad_classifies_its_vlan() -> Result<()> {
     }
     // tc(8): `protocol 802.1ad flower vlan_id 20 classid 1:10`.
     let filter = FlowerFilter::parse_params(&["vlan_id", "20", "classid", "1:10"]).expect("parses");
-    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x88A8, 1, filter)
-        .await?;
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x88A8),
+        nlink::FilterPriority::new(1),
+        filter,
+    )
+    .await?;
 
     const PER_TARGET: usize = 5;
     {
@@ -2326,8 +2380,15 @@ async fn flower_actions_run_on_its_match() -> Result<()> {
         .dst_port(5001)
         .actions(ActionList::new().with(GactAction::drop()))
         .build();
-    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 1, filter)
-        .await?;
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
+        filter,
+    )
+    .await?;
 
     const PER_PORT: usize = 5;
     {
@@ -2410,8 +2471,15 @@ async fn u32_port_matches_classify_traffic() -> Result<()> {
         .match_dst_port(5001)
         .classid(TcHandle::new(1, 0x10))
         .build();
-    conn.add_filter_full(pair.a_if, TcHandle::major_only(1), None, 0x0800, 1, filter)
-        .await?;
+    conn.add_filter_full(
+        pair.a_if,
+        TcHandle::major_only(1),
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
+        filter,
+    )
+    .await?;
 
     let to = |port| SocketAddr::new(pair.b_addr.into(), port);
     assert_eq!(deliver_udp(&pair.a, &pair.b, to(5001), 10), 10);
@@ -2454,8 +2522,8 @@ async fn u32_next_header_port_matches_behind_a_link() -> Result<()> {
         pair.a_if,
         parent,
         Some(TcHandle::from_raw(table)),
-        0x0800,
-        1,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
         U32Filter::new().divisor(1).build(),
     )
     .await?;
@@ -2464,12 +2532,26 @@ async fn u32_next_header_port_matches_behind_a_link() -> Result<()> {
         "match", "ip", "protocol", "17", "0xff", "offset", "at", "0", "mask", "0f00", "shift", "6",
         "link", "2:",
     ])?;
-    conn.add_filter_full(pair.a_if, parent, None, 0x0800, 1, linker)
-        .await?;
+    conn.add_filter_full(
+        pair.a_if,
+        parent,
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
+        linker,
+    )
+    .await?;
     let port = U32Filter::parse_params(&["ht", "2:", "match", "udp", "dst", "5003", "0xffff"])?
         .classid(TcHandle::new(1, 0x10));
-    conn.add_filter_full(pair.a_if, parent, None, 0x0800, 1, port)
-        .await?;
+    conn.add_filter_full(
+        pair.a_if,
+        parent,
+        None,
+        nlink::EthProto::new(0x0800),
+        nlink::FilterPriority::new(1),
+        port,
+    )
+    .await?;
 
     let to = |port| SocketAddr::new(pair.b_addr.into(), port);
     assert_eq!(deliver_udp(&pair.a, &pair.b, to(5003), 10), 10);
@@ -2542,8 +2624,8 @@ async fn u32_port_filters_match_what_tc_installs() -> Result<()> {
             "dummy0",
             TcHandle::major_only(1),
             None,
-            0x0800,
-            nlink_prio,
+            nlink::EthProto::new(0x0800),
+            nlink::FilterPriority::new(nlink_prio),
             filter,
         )
         .await?;

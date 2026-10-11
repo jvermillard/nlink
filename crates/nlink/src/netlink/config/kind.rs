@@ -1902,7 +1902,7 @@ pub(crate) fn plan(
                 blocked_by.push(Blocker::Filter {
                     dev: name.to_string(),
                     filter: f.kind().unwrap_or("?").to_string(),
-                    priority: f.priority(),
+                    priority: f.priority().as_u16(),
                     parent: f.parent(),
                 });
             }

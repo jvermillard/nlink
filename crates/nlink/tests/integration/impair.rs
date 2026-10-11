@@ -625,7 +625,7 @@ async fn test_reconcile_shrinks_past_the_recipe_band() -> nlink::Result<()> {
     let filters = conn.get_filters_by_index(ifindex).await?;
     let left: Vec<u16> = filters
         .iter()
-        .map(|f| f.priority())
+        .map(|f| f.priority().as_u16())
         .filter(|p| *p > 101)
         .collect();
     assert!(left.is_empty(), "filters left behind at {left:?}");

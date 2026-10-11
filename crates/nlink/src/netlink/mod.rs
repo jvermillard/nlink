@@ -95,6 +95,7 @@ pub mod dispatcher;
 pub(crate) mod dump_frame;
 pub mod dump_stream;
 mod error;
+pub mod eth_proto;
 pub mod events;
 pub mod fdb;
 pub mod fib_lookup;

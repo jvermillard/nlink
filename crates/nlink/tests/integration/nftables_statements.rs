@@ -526,8 +526,11 @@ async fn masked_mark_classifies_through_a_fw_filter() -> nlink::Result<()> {
                 "dummy0",
                 TcHandle::major_only(1),
                 Some(TcHandle::from(0x10u32)),
-                0x0003, // ETH_P_ALL
-                100,
+                nlink::EthProto::new(0x0003),
+                nlink::FilterPriority::new(
+                    // ETH_P_ALL
+                    100,
+                ),
                 FwFilter::new()
                     .mask(0xff)
                     .classid(TcHandle::new(1, 0x10))

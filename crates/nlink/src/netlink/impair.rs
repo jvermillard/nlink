@@ -87,14 +87,9 @@ use super::{
         flower_matches, htb_class_rates_match, netem_matches, recipe_owns_root, root_conflict,
     },
 };
+use crate::netlink::eth_proto::EthProto;
 use crate::util::Rate;
 
-// ETH_P_* values used in tcm_info when adding filters. These match the
-// classifier dispatch table that the kernel walks before flower's own
-// `eth_type` attribute is consulted.
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
-const ETH_P_ALL: u16 = 0x0003;
 
 /// Default link-rate placeholder used to fill HTB rate/ceil when the caller
 /// has not specified a per-rule cap.
@@ -894,8 +889,9 @@ impl PerPeerImpairer {
         // left those filters behind when the rules shrank, still bound to
         // the classes this reconcile deletes — EBUSY (#491). A filter that
         // targets something else is not ours.
-        let desired: std::collections::HashSet<u16> = (0..n).map(filter_priority).collect();
-        let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
+        let desired: std::collections::HashSet<FilterPriority> =
+            (0..n).map(filter_priority).collect();
+        let mut stale_filters: Vec<(FilterPriority, EthProto, TcHandle)> = Vec::new();
         for f in &tree.root_filters {
             let prio = f.priority();
             if desired.contains(&prio) {
@@ -906,7 +902,7 @@ impl PerPeerImpairer {
                 report.unmanaged.push(UnmanagedObject {
                     kind: "filter",
                     handle: f.parent(),
-                    priority: Some(FilterPriority::new(prio)),
+                    priority: Some(prio),
                 });
                 continue;
             }
@@ -927,7 +923,7 @@ impl PerPeerImpairer {
             report.stale_removed.push(StaleObject {
                 kind: "filter",
                 handle: parent,
-                priority: Some(FilterPriority::new(prio)),
+                priority: Some(prio),
             });
         }
 
@@ -1050,26 +1046,26 @@ impl PerPeerImpairer {
 // helpers
 // ============================================================================
 
-fn protocol_for(m: &PeerMatch) -> u16 {
+fn protocol_for(m: &PeerMatch) -> EthProto {
     match m {
         PeerMatch::DstIp(IpAddr::V4(_))
         | PeerMatch::DstSubnet(IpAddr::V4(_), _)
         | PeerMatch::SrcIp(IpAddr::V4(_))
-        | PeerMatch::SrcSubnet(IpAddr::V4(_), _) => ETH_P_IP,
+        | PeerMatch::SrcSubnet(IpAddr::V4(_), _) => EthProto::IP,
         PeerMatch::DstIp(IpAddr::V6(_))
         | PeerMatch::DstSubnet(IpAddr::V6(_), _)
         | PeerMatch::SrcIp(IpAddr::V6(_))
-        | PeerMatch::SrcSubnet(IpAddr::V6(_), _) => ETH_P_IPV6,
-        PeerMatch::DstMac(_) | PeerMatch::SrcMac(_) => ETH_P_ALL,
+        | PeerMatch::SrcSubnet(IpAddr::V6(_), _) => EthProto::IPV6,
+        PeerMatch::DstMac(_) | PeerMatch::SrcMac(_) => EthProto::ALL,
     }
 }
 
 // Sit above the conventional operator-installed range (1..50).
-fn filter_priority(index: usize) -> u16 {
-    100u16.saturating_add(u16::try_from(index).unwrap_or(u16::MAX - 100))
+fn filter_priority(index: usize) -> FilterPriority {
+    FilterPriority::new(100u16.saturating_add(u16::try_from(index).unwrap_or(u16::MAX - 100)))
 }
 
-fn build_flower(classid: TcHandle, priority: u16, match_: &PeerMatch) -> FlowerFilter {
+fn build_flower(classid: TcHandle, priority: FilterPriority, match_: &PeerMatch) -> FlowerFilter {
     let mut f = FlowerFilter::new().classid(classid).priority(priority);
     match *match_ {
         PeerMatch::DstIp(IpAddr::V4(addr)) => f = f.dst_ipv4(addr, 32),
@@ -1281,7 +1277,7 @@ mod tests {
     fn protocol_for_dst_ipv4() {
         assert_eq!(
             protocol_for(&PeerMatch::DstIp(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))),
-            ETH_P_IP
+            EthProto::IP
         );
     }
 
@@ -1289,7 +1285,7 @@ mod tests {
     fn protocol_for_dst_ipv6() {
         assert_eq!(
             protocol_for(&PeerMatch::DstIp(Ipv6Addr::LOCALHOST.into())),
-            ETH_P_IPV6
+            EthProto::IPV6
         );
     }
 
@@ -1297,14 +1293,14 @@ mod tests {
     fn protocol_for_src_subnet_ipv6() {
         assert_eq!(
             protocol_for(&PeerMatch::SrcSubnet(Ipv6Addr::UNSPECIFIED.into(), 64)),
-            ETH_P_IPV6
+            EthProto::IPV6
         );
     }
 
     #[test]
     fn protocol_for_mac_is_eth_p_all() {
-        assert_eq!(protocol_for(&PeerMatch::DstMac([0; 6])), ETH_P_ALL);
-        assert_eq!(protocol_for(&PeerMatch::SrcMac([0; 6])), ETH_P_ALL);
+        assert_eq!(protocol_for(&PeerMatch::DstMac([0; 6])), EthProto::ALL);
+        assert_eq!(protocol_for(&PeerMatch::SrcMac([0; 6])), EthProto::ALL);
     }
 
     #[test]
@@ -1357,7 +1353,7 @@ mod tests {
     fn build_flower_dst_ip_v4_classid() {
         let f = build_flower(
             TcHandle::new(1, 2),
-            100,
+            FilterPriority::new(100),
             &PeerMatch::DstIp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
         );
         // Smoke test: builder runs without panicking and returns a flower
@@ -1394,7 +1390,7 @@ mod tests {
         // ipv4 mask helper.
         let _ = build_flower(
             TcHandle::new(1, 2),
-            100,
+            FilterPriority::new(100),
             &PeerMatch::DstSubnet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 99),
         );
     }

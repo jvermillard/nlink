@@ -1042,7 +1042,8 @@ let filter = FlowerFilter::new()
     .dst_port(443)
     .actions(ActionList::new().with(MirredAction::mirror_to_egress(eth1)))
     .build();
-conn.add_filter_full("eth0", TcHandle::INGRESS, None, 0x0800, 20, filter).await?;
+conn.add_filter_full("eth0", TcHandle::INGRESS, None, nlink::EthProto::IP, nlink::FilterPriority::new(20), filter)
+    .await?;
 # Ok(())
 # }
 ```

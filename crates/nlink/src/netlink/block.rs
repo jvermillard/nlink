@@ -24,22 +24,20 @@ use super::{
     action::{ActionList, GactAction},
     connection::Connection,
     error::{Error, Result},
+    eth_proto::EthProto,
     filter::MatchallFilter,
     interface_ref::InterfaceRef,
     protocol::Route,
     tc::ClsactConfig,
 };
-use crate::TcHandle;
-
-/// `ETH_P_ALL`: every protocol.
-const ETH_P_ALL: u16 = 0x0003;
+use crate::{FilterPriority, TcHandle};
 
 /// The priority of the blocking filter: 1, ahead of every other filter on
 /// the hook, so nothing classifies a packet before it is dropped. A filter
 /// of another kind already at priority 1 for every protocol makes
 /// [`Connection::block`] fail; the kernel refuses two kinds at one
 /// priority and protocol.
-pub const BLOCK_PRIORITY: u16 = 1;
+pub const BLOCK_PRIORITY: FilterPriority = FilterPriority::new(1);
 
 /// Which way [`Connection::block`] drops traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,7 +93,7 @@ impl Connection<Route> {
             ifindex,
             direction.hook(),
             None,
-            ETH_P_ALL,
+            EthProto::ALL,
             BLOCK_PRIORITY,
             filter,
         )
@@ -111,7 +109,7 @@ impl Connection<Route> {
         if !self.blocking_filter(ifindex, direction).await? {
             return Ok(());
         }
-        self.del_filter_by_index(ifindex, direction.hook(), ETH_P_ALL, BLOCK_PRIORITY)
+        self.del_filter_by_index(ifindex, direction.hook(), EthProto::ALL, BLOCK_PRIORITY)
             .await
             .map_err(|e| e.with_context("unblock"))
     }
@@ -138,7 +136,7 @@ impl Connection<Route> {
             f.parent() == direction.hook()
                 && f.kind() == Some("matchall")
                 && f.priority() == BLOCK_PRIORITY
-                && f.protocol() == ETH_P_ALL
+                && f.protocol() == EthProto::ALL
         }))
     }
 }

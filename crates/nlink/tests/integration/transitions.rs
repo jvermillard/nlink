@@ -862,8 +862,8 @@ async fn flower_lines_install_the_same_through_tc_and_nlink() -> nlink::Result<(
             "d0",
             TcHandle::major_only(1),
             None,
-            *proto_id,
-            (i + 1) as u16,
+            nlink::EthProto::new(*proto_id),
+            nlink::FilterPriority::new((i + 1) as u16),
             filter,
         )
         .await?;

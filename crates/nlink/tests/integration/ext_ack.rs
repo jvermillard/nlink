@@ -40,7 +40,12 @@ async fn kernel_error_messages_reach_the_caller() -> Result<()> {
     conn.add_link(DummyLink::new("dummy0")).await?;
 
     let err = conn
-        .del_filter("dummy0", TcHandle::ROOT, 0x0800, 100)
+        .del_filter(
+            "dummy0",
+            TcHandle::ROOT,
+            nlink::EthProto::new(0x0800),
+            nlink::FilterPriority::new(100),
+        )
         .await
         .expect_err("deleting a filter with no qdisc must fail");
 

@@ -496,8 +496,8 @@ async fn clsact_with_a_filter(
         ifindex,
         nlink::TcHandle::CLSACT_INGRESS,
         None,
-        0x0003,
-        7,
+        nlink::EthProto::new(0x0003),
+        nlink::FilterPriority::new(7),
         MatchallFilter::new().actions(ActionList::new().with(GactAction::pass())),
     )
     .await

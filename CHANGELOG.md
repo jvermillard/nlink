@@ -102,6 +102,20 @@ All notable changes to this project will be documented in this file.
     used to take bytes per second as a bare `u64`, next to a `rate_bps`
     for bits. `rate_bps` is gone.
 
+- **The filter API is typed: `EthProto` and `FilterPriority` (#515, part
+  4b).** These take a protocol as `EthProto` and a priority as
+  `FilterPriority`, where they took a bare `u16`:
+  - every `Connection` filter method (`add_filter_full`, `del_filter`,
+    `replace_filter_full`, `change_filter*`, and the `_by_index`
+    variants);
+  - the filter builders' `.protocol()` and `.priority()`;
+  - the `FilterConfig` trait.
+
+  `TcMessage::protocol()`/`priority()` and `filter_protocol()`/
+  `filter_priority()` return the typed values. Both types compare equal
+  to a `u16`, so `f.priority() == 100` still compiles.
+  `DEFAULT_FILTER_PROTOCOL` is an `EthProto`.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -197,6 +211,20 @@ All notable changes to this project will be documented in this file.
   ingress or clsact goes to its hook, and a classful kind to `1:`. It
   used to send every qdisc to the root, where the kernel refuses an
   ingress.
+
+- **Ethertypes parse in tc's number bases (#515).** Flower's `eth_type`
+  read a bare number as hex, so `2048` meant 0x2048 rather than IPv4.
+  The ethertypes of the mpls, skbmod and ife actions took no octal.
+  All four now go through `EthProto`, which reads numbers the way
+  `strtoul(s, NULL, 0)` does.
+
+- **`nlink-tc`: `filter show` lists filters, and `qdisc add DEV clsact`
+  works.** `filter show` sent a filter dump that named no device and no
+  hook, which the kernel answers with nothing, so it never printed a
+  filter. It now uses the library's per-device dumps, which sweep the
+  root and the ingress/clsact hooks. `qdisc add` sent `ingress` and
+  `clsact` to its default `--parent root`, which the kernel refuses; it
+  now sends them to their hook, as `tc qdisc add dev X clsact` does.
 
 ### Added
 
@@ -422,6 +450,13 @@ All notable changes to this project will be documented in this file.
   mirror_to_egress, mirror_to_ingress}` (#515).** The direction is in
   the name, and the docs say an IFB needs `redirect_to_egress`. The
   `*_by_index` constructors are deprecated.
+
+- **`EthProto` (#515).** An ethertype type with tc(8)'s names (`all`,
+  `ip`, `ipv6`, `arp`, `802.1Q`, `802.1ad`, `mpls_uc`, …). It parses
+  like iproute2's `ll_proto_a2n`: a name, case-insensitively, or a
+  number in any base `strtoul` reads. `Display` prints the name, or
+  `0x` and four hex digits. It replaces the `ETH_P_*` constants
+  duplicated in five modules, and `nlink-tc`'s own protocol table.
 
 ## [0.31.0] - 2026-10-11
 

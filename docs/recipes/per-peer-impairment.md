@@ -296,7 +296,7 @@ conn.add_qdisc_full(dev, TcHandle::new(1, 2), Some(TcHandle::major_only(0xa)),
 conn.add_filter(dev, TcHandle::major_only(1),
     FlowerFilter::new()
         .classid(TcHandle::new(1, 2))
-        .priority(100)
+        .priority(nlink::FilterPriority::new(100))
         .dst_ipv4(Ipv4Addr::new(172, 100, 3, 18), 32)
         .build()
 ).await?;
