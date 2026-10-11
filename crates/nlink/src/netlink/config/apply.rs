@@ -1040,6 +1040,7 @@ async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChan
         || !changes.add_altnames.is_empty()
         || !changes.del_altnames.is_empty()
         || !changes.set_ipv4_conf.is_empty()
+        || !changes.set_ipv6_conf.is_empty()
         || changes.set_addr_gen_mode.is_some()
         || changes.set_ipv6_token.is_some();
     if !has_any {
@@ -1084,6 +1085,9 @@ async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChan
         conn.set_ipv4_devconf_by_index(ifindex, &changes.set_ipv4_conf)
             .await?;
     }
+    if !changes.set_ipv6_conf.is_empty() {
+        set_ipv6_devconf(conn, name, &changes.set_ipv6_conf)?;
+    }
     if let Some(mode) = changes.set_addr_gen_mode {
         conn.set_addr_gen_mode_by_index(ifindex, mode).await?;
     }
@@ -1091,6 +1095,25 @@ async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChan
         conn.set_ipv6_token_by_index(ifindex, token).await?;
     }
     Ok(())
+}
+
+/// Write IPv6 per-device settings to `/proc/sys/net/ipv6/conf/<dev>/` in
+/// the connection's namespace, from a thread that enters it (#516): the
+/// kernel takes them no other way.
+fn set_ipv6_devconf(
+    conn: &Connection<Route>,
+    dev: &str,
+    settings: &[(crate::netlink::devconf::Ipv6Devconf, i32)],
+) -> Result<()> {
+    conn.netns()?.run(|| -> Result<()> {
+        for (d, v) in settings {
+            crate::netlink::sysctl::set(
+                &crate::netlink::sysctl::ipv6_conf_key(dev, d.name()),
+                &v.to_string(),
+            )?;
+        }
+        Ok(())
+    })?
 }
 
 /// Change a live link's kind parameters in place: only the attributes

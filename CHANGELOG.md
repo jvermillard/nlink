@@ -783,6 +783,32 @@ All notable changes to this project will be documented in this file.
     from `/proc/sys`, `ip -d link` and `ip token`, on iproute2 6.15 and
     6.1, and fails with the devconf never written.
 
+- **Per-link IPv6 devconf (#516, row 5).**
+  `LinkBuilder::ipv6_conf(Ipv6Devconf, value)` declares
+  `/proc/sys/net/ipv6/conf/<dev>/<name>`: `accept_dad`, `disable_ipv6`,
+  `accept_ra`, `forwarding`, `hop_limit`, `keep_addr_on_down` and 41
+  more integer settings. The JSON form is `"ipv6-conf": {"accept_dad":
+  0}`.
+  - **Writes.** The kernel takes these only through `/proc/sys`. The apply
+    writes them from a thread inside the connection's namespace
+    (`Connection::netns()` → `Netns::run`), before the link comes up.
+  - **Reads.** The diff reads them back from the link dump
+    (`IFLA_INET6_CONF`, `LinkMessage::ipv6_devconf`).
+  - **Left out.** `Ipv6Devconf` leaves out:
+    - the intervals, which the dump reports in milliseconds while `/proc`
+      takes seconds;
+    - `stable_secret`, which is an address;
+    - the read-only `mc_forwarding`;
+    - `addr_gen_mode`, set over netlink in row 4.
+
+    It is checked by the UAPI audit.
+  - **Containers.** In a container whose `/proc/sys` is read-only, as the
+    privileged CI lane's are, the apply fails with that error. The root
+    test therefore skips there.
+  - **Test.** It changes five settings A→B on a veth the first step
+    creates. It reads them back from `/proc/sys`, and fails with the
+    write skipped.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

@@ -670,6 +670,8 @@ pub struct LinkChanges {
     pub del_altnames: Vec<String>,
     /// IPv4 per-device settings to set (#516).
     pub set_ipv4_conf: Vec<(crate::netlink::devconf::Ipv4Devconf, u32)>,
+    /// IPv6 per-device settings to write (#516).
+    pub set_ipv6_conf: Vec<(crate::netlink::devconf::Ipv6Devconf, i32)>,
     /// New IPv6 address generation mode (#516).
     pub set_addr_gen_mode: Option<crate::netlink::devconf::AddrGenMode>,
     /// New IPv6 token (#516).
@@ -701,6 +703,7 @@ pub(crate) struct LinkWas {
     pub(crate) promisc: bool,
     pub(crate) protodown: Option<bool>,
     pub(crate) ipv4_conf: Vec<(crate::netlink::devconf::Ipv4Devconf, u32)>,
+    pub(crate) ipv6_conf: Vec<(crate::netlink::devconf::Ipv6Devconf, i32)>,
     pub(crate) addr_gen_mode: Option<crate::netlink::devconf::AddrGenMode>,
     pub(crate) ipv6_token: Option<std::net::Ipv6Addr>,
 }
@@ -723,6 +726,11 @@ impl LinkChanges {
                 .ipv4_conf
                 .iter()
                 .filter_map(|(name, v)| Some((crate::netlink::devconf::Ipv4Devconf::from_name(name)?, *v)))
+                .collect(),
+            set_ipv6_conf: a
+                .ipv6_conf
+                .iter()
+                .filter_map(|(name, v)| Some((crate::netlink::devconf::Ipv6Devconf::from_name(name)?, *v)))
                 .collect(),
             set_addr_gen_mode: a.addr_gen_mode,
             set_ipv6_token: a.ipv6_token,
@@ -750,6 +758,7 @@ impl LinkChanges {
             && self.add_altnames.is_empty()
             && self.del_altnames.is_empty()
             && self.set_ipv4_conf.is_empty()
+            && self.set_ipv6_conf.is_empty()
             && self.set_addr_gen_mode.is_none()
             && self.set_ipv6_token.is_none()
     }
@@ -805,6 +814,7 @@ impl LinkChanges {
         parts.extend(self.add_altnames.iter().map(|a| format!("+altname {a}")));
         parts.extend(self.del_altnames.iter().map(|a| format!("-altname {a}")));
         parts.extend(self.set_ipv4_conf.iter().map(|(d, v)| format!("ipv4 {d}={v}")));
+        parts.extend(self.set_ipv6_conf.iter().map(|(d, v)| format!("ipv6 {d}={v}")));
         if let Some(mode) = self.set_addr_gen_mode {
             parts.push(format!("addrgenmode {}", mode.name()));
         }
@@ -1553,6 +1563,10 @@ fn compute_link_changes(
                 .into_iter()
                 .filter_map(|d| Some((d, existing.ipv4_devconf(d)?)))
                 .collect(),
+            ipv6_conf: crate::netlink::devconf::Ipv6Devconf::ALL
+                .into_iter()
+                .filter_map(|d| Some((d, existing.ipv6_devconf(d)?)))
+                .collect(),
             addr_gen_mode: existing.addr_gen_mode(),
             ipv6_token: existing.ipv6_token(),
         }),
@@ -1583,6 +1597,13 @@ fn compute_link_changes(
             && existing.ipv4_devconf(d) != Some(*want)
         {
             changes.set_ipv4_conf.push((d, *want));
+        }
+    }
+    for (name, want) in &a.ipv6_conf {
+        if let Some(d) = crate::netlink::devconf::Ipv6Devconf::from_name(name)
+            && existing.ipv6_devconf(d) != Some(*want)
+        {
+            changes.set_ipv6_conf.push((d, *want));
         }
     }
     changes.set_addr_gen_mode = a.addr_gen_mode.filter(|m| Some(*m) != existing.addr_gen_mode());

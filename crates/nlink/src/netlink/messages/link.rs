@@ -375,6 +375,12 @@ impl LinkMessage {
         self.inet.as_ref()?.ipv4(d)
     }
 
+    /// An IPv6 per-device setting (`/proc/sys/net/ipv6/conf/<dev>/<name>`),
+    /// from the dump's `IFLA_AF_SPEC` (#516).
+    pub fn ipv6_devconf(&self, d: crate::netlink::devconf::Ipv6Devconf) -> Option<i32> {
+        self.inet.as_ref()?.ipv6(d)
+    }
+
     /// An IPv6 per-device setting by its `DEVCONF_*` id
     /// (`linux/ipv6.h`), from the dump's `IFLA_AF_SPEC`.
     pub fn ipv6_devconf_raw(&self, id: usize) -> Option<i32> {

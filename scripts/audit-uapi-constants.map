@@ -18,6 +18,7 @@ Ipv4Devconf = IPV4_DEVCONF
     NoXfrm -> NOXFRM
     NoPolicy -> NOPOLICY
 AddrGenMode = IN6_ADDR_GEN_MODE
+Ipv6Devconf = DEVCONF
 IfaAttr = IFA
 RtaAttr = RTA
 RouteScope = RT_SCOPE

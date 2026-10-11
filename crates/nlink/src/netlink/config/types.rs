@@ -193,6 +193,14 @@ impl NetworkConfig {
                     ));
                 }
             }
+            for name in l.attrs.ipv6_conf.keys() {
+                if crate::netlink::devconf::Ipv6Devconf::from_name(name).is_none() {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        format!("ipv6-conf: no IPv6 device setting nlink manages is called {name:?}"),
+                    ));
+                }
+            }
             if let Some(token) = l.attrs.ipv6_token
                 && token.octets()[..8] != [0; 8]
             {
@@ -798,6 +806,14 @@ pub(crate) struct LinkAttrs {
         serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")
     )]
     pub(crate) ipv4_conf: std::collections::BTreeMap<String, u32>,
+    /// IPv6 per-device settings by sysctl name (`accept_dad`,
+    /// `disable_ipv6`, …), written to `/proc/sys` in the link's namespace
+    /// before it comes up.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")
+    )]
+    pub(crate) ipv6_conf: std::collections::BTreeMap<String, i32>,
     /// How the kernel makes the IPv6 link-local address.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) addr_gen_mode: Option<crate::netlink::devconf::AddrGenMode>,
@@ -1650,6 +1666,23 @@ impl LinkBuilder {
     /// ```
     pub fn ipv4_conf(mut self, setting: crate::netlink::devconf::Ipv4Devconf, value: u32) -> Self {
         self.attrs.ipv4_conf.insert(setting.name().to_string(), value);
+        self
+    }
+
+    /// An IPv6 per-device setting (`/proc/sys/net/ipv6/conf/<dev>/<name>`)
+    /// (#516). The kernel takes these only through `/proc/sys`: the apply
+    /// writes them from a thread in the link's namespace, before the link
+    /// comes up, which is when `accept_dad` and `disable_ipv6` matter.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use nlink::netlink::devconf::Ipv6Devconf;
+    /// let cfg = NetworkConfig::new()
+    ///     .link("v0", |l| l.ipv6_conf(Ipv6Devconf::AcceptDad, 0).ipv6_conf(Ipv6Devconf::AcceptRa, 2));
+    /// cfg.validate().unwrap();
+    /// ```
+    pub fn ipv6_conf(mut self, setting: crate::netlink::devconf::Ipv6Devconf, value: i32) -> Self {
+        self.attrs.ipv6_conf.insert(setting.name().to_string(), value);
         self
     }
 
@@ -4252,6 +4285,8 @@ mod serde_roundtrip_tests {
             l.veth("v1")
                 .ipv4_conf(Ipv4Devconf::RpFilter, 2)
                 .ipv4_conf(Ipv4Devconf::NoPolicy, 1)
+                .ipv6_conf(crate::netlink::devconf::Ipv6Devconf::AcceptDad, 0)
+                .ipv6_conf(crate::netlink::devconf::Ipv6Devconf::KeepAddrOnDown, -1)
                 .addr_gen_mode(AddrGenMode::StablePrivacy)
                 .ipv6_token("::1:2".parse().unwrap())
         });
@@ -4260,6 +4295,7 @@ mod serde_roundtrip_tests {
         let json = cfg.to_json_string().unwrap();
         for want in [
             r#""ipv4-conf":{"disable_policy":1,"rp_filter":2}"#,
+            r#""ipv6-conf":{"accept_dad":0,"keep_addr_on_down":-1}"#,
             r#""addr-gen-mode":"stable_secret""#,
             r#""ipv6-token":"::1:2""#,
         ] {
@@ -4279,6 +4315,10 @@ mod serde_roundtrip_tests {
             (
                 r#"{"links":[{"name":"v0","link-type":"physical","addr-gen-mode":"eui48"}]}"#,
                 "unknown addrgenmode",
+            ),
+            (
+                r#"{"links":[{"name":"v0","link-type":"physical","ipv6-conf":{"stable_secret":1}}]}"#,
+                "no IPv6 device setting nlink manages",
             ),
         ] {
             let err = NetworkConfig::from_json_str(doc).unwrap_err().to_string();

@@ -1392,3 +1392,49 @@ async fn devconf_changes_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// IPv6 devconf changed A→B on a veth the first step creates (#516): the
+/// kernel takes it only through `/proc/sys`, so the apply writes it from a
+/// thread in the namespace, before the link comes up; the diff reads it
+/// back from the link dump.
+#[tokio::test]
+async fn ipv6_devconf_changes_in_place() -> nlink::Result<()> {
+    use nlink::netlink::devconf::Ipv6Devconf;
+    require_root!();
+    nlink::require_modules!("veth");
+    // The privileged CI lane's containers mount /proc/sys read-only, and
+    // the kernel takes these settings no other way.
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv6/conf/all/accept_dad");
+
+    let settings = [
+        (Ipv6Devconf::AcceptDad, [0, 1]),
+        (Ipv6Devconf::AcceptRa, [0, 2]),
+        (Ipv6Devconf::Forwarding, [1, 0]),
+        (Ipv6Devconf::Hoplimit, [32, 64]),
+        (Ipv6Devconf::KeepAddrOnDown, [1, -1]),
+    ];
+    let step = |i: usize| {
+        NetworkConfig::new()
+            .link("v0", move |mut l| {
+                l = l.veth("v1");
+                for (d, values) in settings {
+                    l = l.ipv6_conf(d, values[i]);
+                }
+                l.up()
+            })
+            .link("v1", |l| l.up())
+    };
+    let ns = TestNamespace::new("tr-devconf6")?;
+    crate::common::converge::assert_transition(&ns, &[step(0), step(1)], false, async |i, _conn| {
+        for (d, values) in settings {
+            let have = ns
+                .exec("cat", &[&format!("/proc/sys/net/ipv6/conf/v0/{}", d.name())])
+                .map_err(|e| e.to_string())?;
+            if have.trim() != values[i].to_string() {
+                return Err(format!("step {}: {d} is {}, want {}", i + 1, have.trim(), values[i]));
+            }
+        }
+        Ok(())
+    })
+    .await
+}

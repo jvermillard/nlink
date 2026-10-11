@@ -257,6 +257,11 @@ fn invert_link_changes(changes: &LinkChanges) -> Option<LinkChanges> {
             .iter()
             .filter_map(|(d, _)| was.ipv4_conf.iter().find(|(w, _)| w == d).copied())
             .collect(),
+        set_ipv6_conf: changes
+            .set_ipv6_conf
+            .iter()
+            .filter_map(|(d, _)| was.ipv6_conf.iter().find(|(w, _)| w == d).copied())
+            .collect(),
         set_addr_gen_mode: changes.set_addr_gen_mode.and(was.addr_gen_mode),
         // `::` clears a token (`inet6_set_iftoken`).
         set_ipv6_token: changes
