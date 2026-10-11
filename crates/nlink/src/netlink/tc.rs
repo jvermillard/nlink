@@ -8783,6 +8783,20 @@ impl Connection<Route> {
             .await
     }
 
+    /// Delete the qdisc at `parent` (and `handle`) only if it is a `kind`;
+    /// the kernel refuses another (`tc_get_qdisc` compares `TCA_KIND`). The
+    /// error says what is there, and an empty slot is `QdiscNotFound`.
+    pub async fn del_qdisc_kind_by_index(
+        &self,
+        ifindex: u32,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
+        kind: &str,
+    ) -> Result<()> {
+        self.del_qdisc_inner(ifindex, parent, handle, Some(kind))
+            .await
+    }
+
     /// One `RTM_DELQDISC`; with `kind`, the kernel deletes only a qdisc of
     /// that kind (`tc_get_qdisc` compares `TCA_KIND`).
     async fn del_qdisc_inner(

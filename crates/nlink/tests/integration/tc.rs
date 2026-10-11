@@ -2888,3 +2888,99 @@ async fn recipe_remove_deletes_only_its_own_root() -> Result<()> {
     assert_eq!(dummy0_root_kind(&conn).await?, None);
     Ok(())
 }
+
+/// #515: the verbs do what their table says, on a live device: create
+/// refuses an occupied slot, change refuses another kind or one only a
+/// recreate can change, replace takes anything, apply does nothing when the
+/// live qdisc already is the spec, delete_kind names the kind at the hook.
+#[tokio::test]
+async fn the_tc_verbs_do_what_their_table_says() -> Result<()> {
+    use nlink::netlink::tc::ClsactConfig;
+    use nlink::netlink::tc_verbs::Parent;
+    require_root!();
+    nlink::require_modules!("sch_netem", "sch_htb", "sch_ingress");
+
+    let (_ns, conn) = setup_tc_ns("tc-verbs").await?;
+    let tc = conn.tc("dummy0");
+    let root = tc.qdisc(Parent::Root);
+    let netem = |ms| NetemConfig::new().delay(Duration::from_millis(ms));
+
+    assert!(
+        root.get().await?.is_none(),
+        "the kernel's default root is not configured"
+    );
+    assert!(
+        root.change(netem(5)).await.unwrap_err().is_not_found(),
+        "change needs something to change"
+    );
+    root.create(netem(5)).await?;
+    assert!(root.create(netem(5)).await.unwrap_err().is_already_exists());
+    root.change(netem(9)).await?;
+    let live = root.get().await?.expect("netem");
+    assert_eq!(
+        dummy0_netem(&conn).await?.delay(),
+        Some(Duration::from_millis(9))
+    );
+
+    let htb = HtbQdiscConfig::new().default_class(0x10).build();
+    let err = root.change(htb.clone()).await.unwrap_err();
+    assert!(err.to_string().contains("replace it"), "{err}");
+    assert_eq!(
+        root.get().await?.expect("netem").handle(),
+        live.handle(),
+        "untouched"
+    );
+
+    // apply: a change when it differs, nothing when it matches.
+    assert!(
+        root.apply(netem(12)).await?,
+        "a different delay is a change"
+    );
+    assert!(!root.apply(netem(12)).await?, "the same netem is nothing");
+    root.replace(htb.clone()).await?;
+    assert_eq!(
+        root.get().await?.expect("htb").handle(),
+        TcHandle::major_only(1)
+    );
+    let err = root.change(htb).await.unwrap_err();
+    assert!(
+        err.to_string().contains("cannot be changed in place"),
+        "{err}"
+    );
+
+    // A leaf in a class.
+    conn.add_class(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 0x10),
+        HtbClassConfig::new(nlink::Rate::mbit(10)).build(),
+    )
+    .await?;
+    let leaf = tc.qdisc(Parent::Class(TcHandle::new(1, 0x10))).handle(0x20);
+    leaf.create(netem(1)).await?;
+    assert_eq!(
+        leaf.get().await?.expect("leaf").handle(),
+        TcHandle::major_only(0x20)
+    );
+
+    root.delete().await?;
+    assert!(root.get().await?.is_none());
+    assert!(root.delete().await.is_err(), "nothing left to delete");
+
+    let hook = tc.qdisc(Parent::Ingress);
+    hook.create(ClsactConfig::new()).await?;
+    assert!(
+        hook.delete_kind("ingress").await.is_err(),
+        "a clsact is not an ingress"
+    );
+    assert_eq!(
+        hook.get()
+            .await?
+            .and_then(|q| q.kind().map(str::to_string))
+            .as_deref(),
+        Some("clsact")
+    );
+    hook.delete_kind("clsact").await?;
+    assert!(hook.get().await?.is_none());
+    Ok(())
+}

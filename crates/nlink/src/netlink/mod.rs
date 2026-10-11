@@ -149,6 +149,7 @@ pub mod tc_handle;
 pub mod tc_options;
 pub mod tc_recipe;
 pub mod tc_spec;
+pub mod tc_verbs;
 pub(crate) mod tc_recipe_internals;
 /// Byte-level assertions on encoder output, shared by the `tc` and
 /// `action` test modules.
