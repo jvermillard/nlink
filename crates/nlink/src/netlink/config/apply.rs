@@ -868,7 +868,7 @@ pub(crate) fn link_config(
             }
             Box::new(config)
         }
-        DeclaredLinkType::Veth { peer } => {
+        DeclaredLinkType::Veth { peer, .. } => {
             let mut config = VethLink::new(&link.name, peer);
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
@@ -1337,7 +1337,27 @@ async fn create_link(
     link: &DeclaredLink,
     owner: Option<&str>,
 ) -> Result<()> {
-    if let Some(config) = link_config(link) {
+    // A veth peer created in its declared namespace (#516); the handle
+    // keeps the namespace open until the create is sent.
+    let peer_netns = match link.peer_netns() {
+        Some(r) if !r.is_default() => Some(r.open()?),
+        _ => None,
+    };
+    let config = match (&link.link_type, &peer_netns) {
+        (DeclaredLinkType::Veth { peer, .. }, Some(netns)) => {
+            use std::os::fd::{AsFd, AsRawFd};
+            let mut c = VethLink::new(&link.name, peer).peer_netns_fd(netns.as_fd().as_raw_fd());
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                c = c.address(addr);
+            }
+            Some(Box::new(c) as Box<dyn crate::netlink::link::LinkConfig>)
+        }
+        _ => link_config(link),
+    };
+    if let Some(config) = config {
         conn.add_link(config).await?;
         // The owner tag: the kernel ignores IFLA_IFALIAS on create, so it
         // is set right after (#512, #517).

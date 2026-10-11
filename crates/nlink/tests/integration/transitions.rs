@@ -1985,6 +1985,60 @@ async fn rules_change_and_go_with_the_previous_config() -> nlink::Result<()> {
     .await
 }
 
+/// A veth whose peer lives in another namespace, A→B→C→D (#516). Step 1
+/// creates the peer in namespace B; step 2 declares it in C, which
+/// recreates the pair — not refused over the peer, whose namespace the
+/// config declares; step 3 declares it here. Then the peer is moved to B by
+/// hand, as a CNI moves one into a container, and step 4 — the peer's
+/// namespace undeclared — leaves it there. `ip link` in each namespace
+/// shows where the peer is.
+#[tokio::test]
+async fn a_veth_peer_lives_in_its_declared_namespace() -> nlink::Result<()> {
+    use nlink::netlink::namespace::NetnsRef;
+    require_root!();
+    nlink::require_modules!("veth");
+
+    let ns = TestNamespace::new("tr-peer")?;
+    let b = TestNamespace::new("tr-peer-b")?;
+    let c = TestNamespace::new("tr-peer-c")?;
+    let step = |netns: Option<NetnsRef>| {
+        NetworkConfig::new().link("v0", move |l| {
+            let l = l.veth("p0").up();
+            match netns {
+                Some(r) => l.veth_peer_netns(r),
+                None => l,
+            }
+        })
+    };
+    let named = |t: &TestNamespace| NetnsRef::Named(t.name().to_string());
+    let steps = [
+        step(Some(named(&b))),
+        step(Some(named(&c))),
+        step(Some(NetnsRef::Default)),
+        step(None),
+    ];
+    let has_p0 = |t: &TestNamespace| t.exec("ip", &["link", "show", "p0"]).is_ok();
+    let mut v0 = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let place = [has_p0(&ns), has_p0(&b), has_p0(&c)];
+        let want = [[false, true, false], [false, false, true], [true, false, false], [false, true, false]];
+        if place != want[i] {
+            return Err(format!("step {}: p0 here/b/c = {place:?}, want {:?}", i + 1, want[i]));
+        }
+        v0.push(link_json(&ns, "v0")?["ifindex"].as_u64());
+        if i == 2 {
+            // A CNI moving the peer into a container.
+            ns.exec("ip", &["link", "set", "p0", "netns", b.name()]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await?;
+    assert_ne!(v0[0], v0[1], "a peer declared elsewhere recreates the pair");
+    assert_ne!(v0[1], v0[2]);
+    assert_eq!(v0[2], v0[3], "an undeclared namespace leaves the peer where it was moved");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

@@ -128,7 +128,7 @@ fn test_veth_link_builder() {
     assert_eq!(link.name(), "veth0");
     assert!(matches!(
         link.link_type(),
-        DeclaredLinkType::Veth { peer } if peer == "veth1"
+        DeclaredLinkType::Veth { peer, .. } if peer == "veth1"
     ));
     assert_eq!(link.master(), Some("br0"));
     assert_eq!(link.state(), LinkState::Up);

@@ -1174,6 +1174,28 @@ All notable changes to this project will be documented in this file.
       rule goes), and if live rules are matched without it (the config's
       rule is never added).
 
+- **A veth peer in another namespace (#516, row 10).**
+  - **Builder.** `LinkBuilder::veth_peer_netns(NetnsRef)` declares the
+    namespace a veth's peer lives in. The apply creates the peer there.
+    One found elsewhere, here included, is recreated in it.
+    `NetnsRef::Default` is this namespace.
+  - **Unset stays unmanaged.** Without it, the peer is created here and
+    left wherever it is moved: a CNI moving it into a container is not
+    undone.
+  - **Diff.** It compares the live peer's `IFLA_LINK_NETNSID` with the
+    declared namespace's id here (`RTM_GETNSID`). `Snapshot::read`
+    resolves every named namespace; `NetworkConfig::diff` resolves the
+    ones the config names.
+  - **Recreates.** A recreate that puts the peer back in its declared
+    namespace no longer counts it as a foreign-namespace blocker.
+  - **Tests.**
+    - A transition test creates the peer in namespace B, moves it to C,
+      then brings it here. Each move is a recreate.
+    - The peer is then moved to B by hand, and the undeclared step 4
+      leaves it there.
+    - It fails with the foreign-peer blocker kept (step 2 is refused),
+      and with the namespace uncompared (the peer stays in B).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

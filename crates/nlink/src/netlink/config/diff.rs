@@ -1022,6 +1022,11 @@ pub struct Snapshot {
     /// [`read`](Self::read), and by `read_for` when its config or the
     /// previous one declares one.
     rules: Vec<RuleMessage>,
+    /// The id this namespace knows each namespace by, for the veth peers
+    /// a config places in one (#516): every named namespace for
+    /// [`read`](Self::read), the ones a config names for `read_for`. A
+    /// namespace with no id has no peer of ours in it.
+    netns_ids: HashMap<crate::netlink::namespace::NetnsRef, Option<u32>>,
 }
 
 impl Snapshot {
@@ -1043,7 +1048,38 @@ impl Snapshot {
         snapshot.read_neighbours(conn).await?;
         snapshot.fdb = conn.get_bridge_neighbors().await?;
         snapshot.rules = conn.get_rules().await?;
+        let named: Vec<crate::netlink::namespace::NetnsRef> = crate::netlink::namespace::list()?
+            .into_iter()
+            .map(crate::netlink::namespace::NetnsRef::Named)
+            .collect();
+        snapshot.read_netns_ids(conn, named, false).await?;
         Ok(snapshot)
+    }
+
+    /// The id each of `refs` has here (#516). With `required` off, one
+    /// that will not open — a stale name in `/run/netns`, one that went
+    /// away since it was listed — is left out.
+    async fn read_netns_ids(
+        &mut self,
+        conn: &Connection<Route>,
+        refs: impl IntoIterator<Item = crate::netlink::namespace::NetnsRef>,
+        required: bool,
+    ) -> Result<()> {
+        use std::os::fd::{AsFd, AsRawFd};
+        for r in refs {
+            if r.is_default() || self.netns_ids.contains_key(&r) {
+                continue;
+            }
+            let netns = match r.open() {
+                Ok(netns) => netns,
+                Err(_) if !required => continue,
+                Err(e) => return Err(e),
+            };
+            // NETNSA_NSID_NOT_ASSIGNED (-1): no id, so no peer of ours there.
+            let id = conn.get_nsid(netns.as_fd().as_raw_fd()).await?;
+            self.netns_ids.insert(r, (id != u32::MAX).then_some(id));
+        }
+        Ok(())
     }
 
     async fn read_neighbours(&mut self, conn: &Connection<Route>) -> Result<()> {
@@ -1109,6 +1145,9 @@ impl Snapshot {
         if !config.rules.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.rules.is_empty()) {
             snapshot.rules = conn.get_rules().await?;
         }
+        let peer_namespaces: Vec<crate::netlink::namespace::NetnsRef> =
+            config.links.iter().filter_map(|l| l.peer_netns().cloned()).collect();
+        snapshot.read_netns_ids(conn, peer_namespaces, true).await?;
         Ok(snapshot)
     }
 
@@ -1125,6 +1164,7 @@ impl Snapshot {
             proxies: Vec::new(),
             fdb: Vec::new(),
             rules: Vec::new(),
+            netns_ids: HashMap::new(),
         })
     }
 
@@ -1178,14 +1218,29 @@ pub(crate) fn diff_snapshot(
         }
         None => &no_extras,
     };
+    // Every namespace a veth peer is declared in has to be known (#516).
+    if let Some(r) = config
+        .links
+        .iter()
+        .filter_map(|l| l.peer_netns())
+        .find(|r| !r.is_default() && !snapshot.netns_ids.contains_key(*r))
+    {
+        return Err(crate::Error::InvalidMessage(format!(
+            "this snapshot does not know namespace {r}, which a veth peer is declared in: \
+             Snapshot::read knows the named ones, and NetworkConfig::diff any it names"
+        )));
+    }
     let plan = kind::plan(
         config,
         opts,
-        &current_links,
-        &current_addresses,
-        &current_routes,
-        &current_qdiscs,
-        extras,
+        kind::Live {
+            links: &current_links,
+            addresses: &current_addresses,
+            routes: &current_routes,
+            qdiscs: &current_qdiscs,
+            extras,
+            netns_ids: &snapshot.netns_ids,
+        },
     );
     diff.links_to_recreate = plan.recreate.clone();
     diff.links_to_remove = plan.remove.clone();
@@ -1638,9 +1693,12 @@ fn diff_links<'a>(
         .iter()
         .filter(|l| !current.contains_key(l.name.as_str()))
         .filter_map(|l| match &l.link_type {
-            DeclaredLinkType::Veth { peer } | DeclaredLinkType::Netkit { peer, .. } => {
-                Some(peer.as_str())
+            // A peer in another namespace is not a link here.
+            DeclaredLinkType::Veth {
+                peer,
+                peer_netns: None | Some(crate::netlink::namespace::NetnsRef::Default),
             }
+            | DeclaredLinkType::Netkit { peer, .. } => Some(peer.as_str()),
             _ => None,
         })
         .collect();
