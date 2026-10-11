@@ -544,6 +544,9 @@ impl ConntrackBuilder {
     /// returns `Error::InvalidArgument` (EINVAL). For UDP / ICMP it's
     /// optional but recommended (kernel defaults are protocol-specific
     /// and surprisingly long, e.g. 30 s for unreplied UDP).
+    ///
+    /// The kernel keeps whole seconds and expires an entry whose timeout
+    /// is 0 at once, so a fraction rounds up: 500 ms is 1 s (#603).
     pub fn timeout(mut self, d: Duration) -> Self {
         self.timeout = Some(d);
         self
@@ -623,7 +626,11 @@ impl ConntrackBuilder {
             // CTA_TIMEOUT is a u32 of seconds. `as u32` on the u64 from
             // as_secs() *wraps*, so a Duration beyond ~136 years silently
             // became a tiny timeout rather than a large one. Saturate (#211).
-            let secs = t.as_secs().min(u32::MAX as u64) as u32;
+            // A fraction rounds up: the kernel expires an entry whose
+            // timeout is 0 at once, which is what truncating made of any
+            // sub-second timeout (#603).
+            let secs = t.as_secs() + u64::from(t.subsec_nanos() > 0);
+            let secs = secs.min(u64::from(u32::MAX)) as u32;
             b.append_attr_u32_be(CTA_TIMEOUT, secs);
         }
         if let Some(m) = self.mark {
@@ -1445,6 +1452,30 @@ mod tests {
         assert_eq!(entry.timeout, Some(120));
         assert_eq!(entry.mark, Some(0x42));
         assert_eq!(entry.tcp_state, Some(TcpConntrackState::Established));
+    }
+
+    /// A sub-second timeout is 1 s on the wire, not the 0 that expires the
+    /// entry at once (#603).
+    #[test]
+    fn sub_second_timeout_rounds_up() {
+        let encoded = |d| {
+            let mut b = MessageBuilder::new(
+                ctnl_msg_type(IPCTNL_MSG_CT_NEW),
+                NLMF_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+            );
+            append_nfgenmsg(&mut b, libc::AF_INET as u8);
+            ConntrackBuilder::new_v4(IpProtocol::Udp)
+                .orig(ConntrackTuple::v4(
+                    Ipv4Addr::new(10, 0, 0, 1),
+                    Ipv4Addr::new(10, 0, 0, 2),
+                ))
+                .timeout(d)
+                .append_attrs(&mut b, false, true);
+            roundtrip(&b.finish()).timeout
+        };
+        assert_eq!(encoded(Duration::from_millis(500)), Some(1));
+        assert_eq!(encoded(Duration::from_millis(1_500)), Some(2));
+        assert_eq!(encoded(Duration::from_secs(30)), Some(30));
     }
 
     #[test]

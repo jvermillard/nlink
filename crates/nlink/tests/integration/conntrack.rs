@@ -71,6 +71,39 @@ async fn ct_inject_and_query_tcp_entry() -> nlink::Result<()> {
     Ok(())
 }
 
+/// `CTA_TIMEOUT` is whole seconds, and the kernel expires an entry whose
+/// timeout is 0 at once. A sub-second `timeout` was truncated to 0, so the
+/// entry it added was gone before anything could see it (#603).
+#[tokio::test]
+async fn ct_sub_second_timeout_is_one_second() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-subsec")?;
+    let nf = nf_in_ns(&ns)?;
+    let orig =
+        ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)).ports(40001, 53);
+    nf.add_conntrack(
+        ConntrackBuilder::new_v4(IpProtocol::Udp)
+            .orig(orig)
+            .timeout(Duration::from_millis(500)),
+    )
+    .await?;
+
+    let entries = nf.get_conntrack().await?;
+    let added = entries
+        .iter()
+        .find(|e| e.proto == IpProtocol::Udp && e.orig.src_port == Some(40001))
+        .expect("a 500 ms entry should still be there right after the add");
+    assert!(
+        added.timeout.is_some_and(|t| t <= 1),
+        "timeout {:?}",
+        added.timeout
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn ct_update_changes_mark_in_place() -> nlink::Result<()> {
     nlink::require_root!();
