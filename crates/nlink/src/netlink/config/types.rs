@@ -1130,6 +1130,9 @@ impl DeclaredLink {
             DeclaredLinkType::Ovpn => Some(
                 "a MAC address is declared, but an ovpn link is an L3 device with no hardware address",
             ),
+            DeclaredLinkType::Ipvlan { .. } => Some(
+                "a MAC address is declared, but an ipvlan link shares its parent's and cannot have its own",
+            ),
             DeclaredLinkType::Netkit { mode, .. }
                 if *mode != Some(crate::netlink::link::NetkitMode::L2) =>
             {
@@ -1299,6 +1302,14 @@ pub enum DeclaredLinkType {
     },
     /// Macvlan interface.
     Macvlan { parent: String, mode: MacvlanMode },
+    /// Ipvlan interface (#516): it shares its parent's MAC.
+    Ipvlan {
+        parent: String,
+        mode: IpvlanMode,
+        isolation: IpvlanIsolation,
+    },
+    /// Macvtap interface (#516): a macvlan with a tap queue.
+    Macvtap { parent: String, mode: MacvlanMode },
     /// Bond interface. Plan 190 §8 added 5 new option knobs.
     Bond {
         mode: BondMode,
@@ -1362,6 +1373,8 @@ impl DeclaredLinkType {
             Self::Vlan { .. } => Some("vlan"),
             Self::Vxlan { .. } => Some("vxlan"),
             Self::Macvlan { .. } => Some("macvlan"),
+            Self::Ipvlan { .. } => Some("ipvlan"),
+            Self::Macvtap { .. } => Some("macvtap"),
             Self::Bond { .. } => Some("bond"),
             Self::Ifb => Some("ifb"),
             Self::Vrf { .. } => Some("vrf"),
@@ -1412,6 +1425,38 @@ pub enum MacvlanMode {
     Passthru,
     /// Source mode (filter by source MAC).
     Source,
+}
+
+/// Ipvlan mode (#516).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum IpvlanMode {
+    /// L2: the slaves see the parent's broadcasts.
+    #[default]
+    L2,
+    /// L3: routed, no broadcast or multicast.
+    L3,
+    /// L3 with netfilter on the slave (`l3s`).
+    L3s,
+}
+
+/// Ipvlan isolation between slaves (#516).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum IpvlanIsolation {
+    /// Slaves talk to each other.
+    #[default]
+    Bridge,
+    /// They do not.
+    Private,
+    /// Their traffic goes out through the parent.
+    Vepa,
 }
 
 /// Bond mode.
@@ -1629,6 +1674,57 @@ impl LinkBuilder {
             };
         } else {
             self.wrong_kind("macvlan_mode", "macvlan");
+        }
+        self
+    }
+
+    /// Create an ipvlan interface on `parent` (#516). It shares the
+    /// parent's MAC, so it takes no [`address`](Self::address).
+    pub fn ipvlan(mut self, parent: &str) -> Self {
+        self.link_type = DeclaredLinkType::Ipvlan {
+            parent: parent.to_string(),
+            mode: IpvlanMode::default(),
+            isolation: IpvlanIsolation::default(),
+        };
+        self
+    }
+
+    /// Set the ipvlan mode.
+    pub fn ipvlan_mode(mut self, want: IpvlanMode) -> Self {
+        if let DeclaredLinkType::Ipvlan { mode, .. } = &mut self.link_type {
+            *mode = want;
+        } else {
+            self.wrong_kind("ipvlan_mode", "ipvlan");
+        }
+        self
+    }
+
+    /// Set the ipvlan isolation.
+    pub fn ipvlan_isolation(mut self, want: IpvlanIsolation) -> Self {
+        if let DeclaredLinkType::Ipvlan { isolation, .. } = &mut self.link_type {
+            *isolation = want;
+        } else {
+            self.wrong_kind("ipvlan_isolation", "ipvlan");
+        }
+        self
+    }
+
+    /// Create a macvtap interface on `parent` (#516). A device hosts
+    /// macvlan/macvtap links or ipvlan links, not both.
+    pub fn macvtap(mut self, parent: &str) -> Self {
+        self.link_type = DeclaredLinkType::Macvtap {
+            parent: parent.to_string(),
+            mode: MacvlanMode::default(),
+        };
+        self
+    }
+
+    /// Set the macvtap mode.
+    pub fn macvtap_mode(mut self, want: MacvlanMode) -> Self {
+        if let DeclaredLinkType::Macvtap { mode, .. } = &mut self.link_type {
+            *mode = want;
+        } else {
+            self.wrong_kind("macvtap_mode", "macvtap");
         }
         self
     }
@@ -4596,6 +4692,40 @@ mod serde_roundtrip_tests {
             (
                 NetworkConfig::new().link("d0", |l| l.dummy().altname("d0")),
                 "not the name",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+    }
+
+    #[test]
+    fn ipvlan_and_macvtap_roundtrip_and_validate() {
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy())
+            .link("iv0", |l| {
+                l.ipvlan("d0")
+                    .ipvlan_mode(IpvlanMode::L3s)
+                    .ipvlan_isolation(IpvlanIsolation::Private)
+            })
+            .link("mt0", |l| l.macvtap("d0").macvtap_mode(MacvlanMode::Vepa));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""ipvlan":{"parent":"d0","mode":"l3s","isolation":"private"}"#,
+            r#""macvtap":{"parent":"d0","mode":"vepa"}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        for (cfg, says) in [
+            (
+                NetworkConfig::new().link("iv0", |l| l.ipvlan("d0").address([2, 0, 0, 0, 0, 1])),
+                "an ipvlan link shares its parent's",
+            ),
+            (
+                NetworkConfig::new().link("m0", |l| l.macvlan("d0").ipvlan_mode(IpvlanMode::L3)),
+                "ipvlan_mode",
             ),
         ] {
             let err = cfg.validate().unwrap_err().to_string();

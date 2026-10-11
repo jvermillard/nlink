@@ -866,6 +866,20 @@ All notable changes to this project will be documented in this file.
     iproute2 6.15 and 6.1. It fails when the undeclared VLANs aren't
     removed.
 
+- **Declared ipvlan and macvtap links (#516, row 7, first batch).**
+  - **Builders.** `LinkBuilder::ipvlan(parent)` with `ipvlan_mode` (l2,
+    l3, l3s) and `ipvlan_isolation` (bridge, private, vepa), and
+    `macvtap(parent)` with `macvtap_mode`.
+  - **Changes.** Modes and isolation change in place (`changelink`).
+    Another parent is a recreate. Passthru in or out is a recreate for
+    macvtap, as it is for macvlan.
+  - **Validation.** A MAC declared on an ipvlan, which shares its
+    parent's, is a validation error.
+  - **CI.** `macvtap` is now in CI's module guard and strict list.
+  - **Test.** A transition test takes both through three values, checked
+    through `ip -d -j link` on iproute2 6.15 and 6.1, and fails with the
+    ipvlan mode uncompared.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

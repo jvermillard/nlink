@@ -1555,3 +1555,44 @@ async fn port_vlans_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// Ipvlan and macvtap declared and changed in place (#516): an ipvlan's
+/// mode and isolation, a macvtap's mode, each through three values.
+/// `ip -d link` shows each step. (A device hosts ipvlans or
+/// macvlans/macvtaps, not both: two parents.)
+#[tokio::test]
+async fn ipvlan_and_macvtap_change_in_place() -> nlink::Result<()> {
+    use nlink::netlink::config::{IpvlanIsolation, IpvlanMode};
+    require_root!();
+    nlink::require_modules!("dummy", "ipvlan", "macvtap");
+
+    let step = |mode: IpvlanMode, iso: IpvlanIsolation, tap: MacvlanMode| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .link("iv0", move |l| l.ipvlan("d0").ipvlan_mode(mode).ipvlan_isolation(iso))
+            .link("mt0", move |l| l.macvtap("d1").macvtap_mode(tap))
+    };
+    let steps = [
+        step(IpvlanMode::L2, IpvlanIsolation::Bridge, MacvlanMode::Bridge),
+        step(IpvlanMode::L3, IpvlanIsolation::Private, MacvlanMode::Vepa),
+        step(IpvlanMode::L3s, IpvlanIsolation::Vepa, MacvlanMode::Private),
+    ];
+    let want = [("l2", "bridge", "bridge"), ("l3", "private", "vepa"), ("l3s", "vepa", "private")];
+    let ns = TestNamespace::new("tr-ipvlan")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let iv = &ip_json(&ns, &["-d", "link", "show", "iv0"])?[0]["linkinfo"]["info_data"];
+        let mt = &ip_json(&ns, &["-d", "link", "show", "mt0"])?[0]["linkinfo"]["info_data"];
+        let (mode, iso, tap) = want[i];
+        let have = (
+            iv["mode"].as_str(),
+            iv[iso].as_bool(),
+            mt["mode"].as_str(),
+        );
+        if have != (Some(mode), Some(true), Some(tap)) {
+            return Err(format!("step {}: want {:?}, have {have:?}: {iv} {mt}", i + 1, want[i]));
+        }
+        Ok(())
+    })
+    .await
+}
