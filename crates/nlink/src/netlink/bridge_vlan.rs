@@ -269,6 +269,12 @@ impl BridgeVlanTunnelBuilder {
         let af_spec = builder.nest_start(IflaAttr::AfSpec as u16);
 
         if let Some(vid_end) = self.vid_end {
+            if vid_end < self.vid {
+                return Err(Error::InvalidMessage(format!(
+                    "VLAN tunnel range {}..={vid_end} ends before it starts",
+                    self.vid
+                )));
+            }
             // Range operation: emit tunnel entries with RANGE_BEGIN and RANGE_END flags
             self.add_tunnel_entry(
                 builder,
@@ -2314,6 +2320,19 @@ mod tests {
     fn test_tunnel_max_id() {
         // Maximum valid tunnel ID
         assert_eq!(BridgeVlanTunnelBuilder::MAX_TUNNEL_ID, 0xFFFFFF);
+    }
+
+    /// A range that ends before it starts is an error. It was `vid_end -
+    /// vid` on `u16`: a panic in a debug build and a wrapped tunnel id in
+    /// a release one.
+    #[test]
+    fn test_tunnel_reversed_range_is_an_error() {
+        let mut b = MessageBuilder::new(0, 0);
+        let err = BridgeVlanTunnelBuilder::new(200, 1000)
+            .range(100)
+            .write_add(&mut b, 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("range"), "{err}");
     }
 
     // ========================================================================

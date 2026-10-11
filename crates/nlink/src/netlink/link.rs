@@ -1112,7 +1112,8 @@ impl VlanLink {
     ///
     /// * `name` - Name for the VLAN interface (e.g., "eth0.100")
     /// * `parent` - Parent interface name (e.g., "eth0")
-    /// * `vlan_id` - VLAN ID (1-4094)
+    /// * `vlan_id` - VLAN ID, 0 (priority-tagged) to 4094; a larger one
+    ///   makes [`Connection::add_link`] fail before sending (#598)
     pub fn new(name: impl Into<String>, parent: impl Into<String>, vlan_id: u16) -> Self {
         Self {
             name: name.into(),
@@ -1138,7 +1139,8 @@ impl VlanLink {
     ///
     /// * `name` - Name for the VLAN interface
     /// * `parent_index` - Parent interface index
-    /// * `vlan_id` - VLAN ID (1-4094)
+    /// * `vlan_id` - VLAN ID, 0 (priority-tagged) to 4094; a larger one
+    ///   makes [`Connection::add_link`] fail before sending (#598)
     pub fn with_parent_index(name: impl Into<String>, parent_index: u32, vlan_id: u16) -> Self {
         Self {
             name: name.into(),
@@ -1230,6 +1232,12 @@ impl LinkConfig for VlanLink {
 
     fn kind(&self) -> &str {
         "vlan"
+    }
+
+    /// The kernel refuses an id past 4094 with `ERANGE` ("8021q: Invalid
+    /// VLAN id"); refuse it before anything is sent (#598).
+    fn creation_error(&self) -> Option<&str> {
+        (self.vlan_id > 4094).then_some("VLAN id is past 4094, which the kernel refuses (ERANGE)")
     }
 
     fn parent_ref(&self) -> Option<&InterfaceRef> {
