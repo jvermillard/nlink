@@ -215,46 +215,48 @@ impl Connection<Wireguard> {
         self.apply_device_config(ifname, &device_builder).await
     }
 
-    /// Apply device configuration to the kernel.
+    /// Apply device configuration to the kernel, in as many `SET_DEVICE`
+    /// messages as it takes (#500).
+    ///
+    /// Every peer went into one `WGDEVICE_A_PEERS` nest, whose `nla_len` is
+    /// a u16: past about 400 peers, or 1,600 IPv6 allowed-ips on one peer,
+    /// that was a debug-build panic and a malformed message in release.
+    /// This splits the way `wg(8)` does: the device's own settings, and
+    /// `WGDEVICE_F_REPLACE_PEERS`, go in the first message only; a peer
+    /// continued in the next one repeats just its public key and the rest
+    /// of its allowed-ips, without `WGPEER_F_REPLACE_ALLOWEDIPS`. The
+    /// messages are separate kernel operations, as they are for `wg`.
     async fn apply_device_config(&self, ifname: &str, config: &WgDeviceBuilder) -> Result<()> {
-        self.wg_command(WgCmd::SetDevice as u8, |builder| {
-            // Device name
-            builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
-
-            // Device flags
-            if config.has_replace_peers() {
-                builder.append_attr_u32(
-                    WgDeviceAttr::Flags as u16,
-                    WgDeviceFlag::ReplacePeers as u32,
-                );
-            }
-
-            // Private key
-            if let Some(key) = config.get_private_key() {
-                builder.append_attr(WgDeviceAttr::PrivateKey as u16, key);
-            }
-
-            // Listen port
-            if let Some(port) = config.get_listen_port() {
-                builder.append_attr_u16(WgDeviceAttr::ListenPort as u16, port);
-            }
-
-            // Fwmark
-            if let Some(mark) = config.get_fwmark() {
-                builder.append_attr_u32(WgDeviceAttr::Fwmark as u16, mark);
-            }
-
-            // Peers
-            if !config.get_peers().is_empty() {
-                let peers_token = builder.nest_start(WgDeviceAttr::Peers as u16 | NLA_F_NESTED);
-                for (idx, peer) in config.get_peers().iter().enumerate() {
-                    append_peer_attrs(builder, idx as u16, peer);
+        for (i, message) in plan_set_device(config.get_peers()).iter().enumerate() {
+            self.wg_command(WgCmd::SetDevice as u8, |builder| {
+                builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
+                if i == 0 {
+                    if config.has_replace_peers() {
+                        builder.append_attr_u32(
+                            WgDeviceAttr::Flags as u16,
+                            WgDeviceFlag::ReplacePeers as u32,
+                        );
+                    }
+                    if let Some(key) = config.get_private_key() {
+                        builder.append_attr(WgDeviceAttr::PrivateKey as u16, key);
+                    }
+                    if let Some(port) = config.get_listen_port() {
+                        builder.append_attr_u16(WgDeviceAttr::ListenPort as u16, port);
+                    }
+                    if let Some(mark) = config.get_fwmark() {
+                        builder.append_attr_u32(WgDeviceAttr::Fwmark as u16, mark);
+                    }
                 }
-                builder.nest_end(peers_token);
-            }
-        })
-        .await?;
-
+                if !message.is_empty() {
+                    let peers = builder.nest_start(WgDeviceAttr::Peers as u16 | NLA_F_NESTED);
+                    for (idx, part) in message.iter().enumerate() {
+                        append_peer_part(builder, idx as u16, part);
+                    }
+                    builder.nest_end(peers);
+                }
+            })
+            .await?;
+        }
         Ok(())
     }
 
@@ -436,44 +438,129 @@ fn parse_device_attr_scalar(attr_type: u16, payload: &[u8], device: &mut WgDevic
 }
 
 /// Append peer attributes to a message builder.
-fn append_peer_attrs(builder: &mut MessageBuilder, idx: u16, peer: &super::types::WgPeerBuilder) {
+/// How many attribute bytes one `SET_DEVICE` message carries before
+/// [`plan_set_device`] starts the next; well inside the u16 `nla_len` of
+/// the peers nest, as `wg(8)`'s own socket-buffer-sized messages are.
+const SET_DEVICE_BUDGET: usize = 32 * 1024;
+
+/// Room kept in every message for the GENL header, the device name and,
+/// in the first, the device's own settings.
+const SET_DEVICE_OVERHEAD: usize = 256;
+
+/// One peer's share of one `SET_DEVICE` message: all of its settings if
+/// `first`, and the allowed-ips in `ips`.
+struct PeerPart<'a> {
+    peer: &'a super::types::WgPeerBuilder,
+    first: bool,
+    ips: std::ops::Range<usize>,
+}
+
+/// The bytes `write` appends to a message.
+fn encoded_len(write: impl FnOnce(&mut MessageBuilder)) -> usize {
+    let mut builder = MessageBuilder::new(0, 0);
+    let start = builder.len();
+    write(&mut builder);
+    builder.len() - start
+}
+
+/// Split `peers` into `SET_DEVICE` messages of at most
+/// [`SET_DEVICE_BUDGET`] bytes (#500). Always at least one message, so the
+/// device's own settings are sent even with no peers.
+fn plan_set_device(peers: &[super::types::WgPeerBuilder]) -> Vec<Vec<PeerPart<'_>>> {
+    let mut messages = Vec::new();
+    let mut current = Vec::new();
+    let mut used = SET_DEVICE_OVERHEAD;
+    for peer in peers {
+        let ips = peer.get_allowed_ips();
+        let (mut next, mut first) = (0, true);
+        loop {
+            let head = encoded_len(|b| {
+                append_peer_part(
+                    b,
+                    0,
+                    &PeerPart {
+                        peer,
+                        first,
+                        ips: 0..0,
+                    },
+                );
+            }) + 4; // the allowed-ips nest header
+            if used + head > SET_DEVICE_BUDGET && !current.is_empty() {
+                messages.push(std::mem::take(&mut current));
+                used = SET_DEVICE_OVERHEAD;
+            }
+            used += head;
+            let start = next;
+            while let Some(ip) = ips.get(next) {
+                let len = encoded_len(|b| append_allowed_ip(b, 0, ip));
+                if used + len > SET_DEVICE_BUDGET {
+                    break;
+                }
+                used += len;
+                next += 1;
+            }
+            current.push(PeerPart {
+                peer,
+                first,
+                ips: start..next,
+            });
+            if next == ips.len() {
+                break;
+            }
+            messages.push(std::mem::take(&mut current));
+            used = SET_DEVICE_OVERHEAD;
+            first = false;
+        }
+    }
+    messages.push(current);
+    messages
+}
+
+/// One allowed-ip entry, nested under index `idx`.
+fn append_allowed_ip(builder: &mut MessageBuilder, idx: u16, allowed_ip: &AllowedIp) {
+    let ip_token = builder.nest_start(idx | NLA_F_NESTED);
+    builder.append_attr_u16(WgAllowedIpAttr::Family as u16, allowed_ip.family());
+    builder.append_attr(WgAllowedIpAttr::IpAddr as u16, &allowed_ip.addr_bytes());
+    builder.append_attr_u8(WgAllowedIpAttr::CidrMask as u16, allowed_ip.cidr);
+    builder.nest_end(ip_token);
+}
+
+/// One peer's part of a `SET_DEVICE` message, nested under index `idx`. A
+/// continued peer (`!first`) carries its public key, its flags but
+/// `REPLACE_ALLOWEDIPS` — that would drop what the earlier message added —
+/// and its remaining allowed-ips.
+fn append_peer_part(builder: &mut MessageBuilder, idx: u16, part: &PeerPart<'_>) {
+    let peer = part.peer;
     let peer_token = builder.nest_start(idx | NLA_F_NESTED);
 
-    // Public key (required)
     builder.append_attr(WgPeerAttr::PublicKey as u16, peer.get_public_key());
 
-    // Flags
-    let flags = peer.get_flags();
+    let mut flags = peer.get_flags();
+    if !part.first {
+        flags &= !(super::types::WgPeerFlags::ReplaceAllowedIps as u32);
+    }
     if flags != 0 {
         builder.append_attr_u32(WgPeerAttr::Flags as u16, flags);
     }
 
-    // Preshared key
-    if let Some(psk) = peer.get_preshared_key() {
-        builder.append_attr(WgPeerAttr::PresharedKey as u16, psk);
+    if part.first {
+        if let Some(psk) = peer.get_preshared_key() {
+            builder.append_attr(WgPeerAttr::PresharedKey as u16, psk);
+        }
+        if let Some(endpoint) = peer.get_endpoint() {
+            let sockaddr_bytes = sockaddr_to_bytes(endpoint);
+            builder.append_attr(WgPeerAttr::Endpoint as u16, &sockaddr_bytes);
+        }
+        if let Some(interval) = peer.get_persistent_keepalive() {
+            builder.append_attr_u16(WgPeerAttr::PersistentKeepalive as u16, interval);
+        }
     }
 
-    // Endpoint
-    if let Some(endpoint) = peer.get_endpoint() {
-        let sockaddr_bytes = sockaddr_to_bytes(endpoint);
-        builder.append_attr(WgPeerAttr::Endpoint as u16, &sockaddr_bytes);
-    }
-
-    // Persistent keepalive
-    if let Some(interval) = peer.get_persistent_keepalive() {
-        builder.append_attr_u16(WgPeerAttr::PersistentKeepalive as u16, interval);
-    }
-
-    // Allowed IPs
-    let allowed_ips = peer.get_allowed_ips();
-    if !allowed_ips.is_empty() {
+    let ips = &peer.get_allowed_ips()[part.ips.clone()];
+    if !ips.is_empty() {
         let ips_token = builder.nest_start(WgPeerAttr::AllowedIps as u16 | NLA_F_NESTED);
-        for (ip_idx, allowed_ip) in allowed_ips.iter().enumerate() {
-            let ip_token = builder.nest_start(ip_idx as u16 | NLA_F_NESTED);
-            builder.append_attr_u16(WgAllowedIpAttr::Family as u16, allowed_ip.family());
-            builder.append_attr(WgAllowedIpAttr::IpAddr as u16, &allowed_ip.addr_bytes());
-            builder.append_attr_u8(WgAllowedIpAttr::CidrMask as u16, allowed_ip.cidr);
-            builder.nest_end(ip_token);
+        for (ip_idx, allowed_ip) in ips.iter().enumerate() {
+            append_allowed_ip(builder, ip_idx as u16, allowed_ip);
         }
         builder.nest_end(ips_token);
     }
@@ -687,5 +774,121 @@ mod tests {
         let bytes = sockaddr_to_bytes(&addr);
         let parsed = parse_sockaddr(&bytes).unwrap();
         assert_eq!(addr, parsed);
+    }
+
+    fn peer(
+        n: u32,
+        ips: impl IntoIterator<Item = AllowedIp>,
+    ) -> super::super::types::WgPeerBuilder {
+        let mut key = [0u8; WG_KEY_LEN];
+        key[..4].copy_from_slice(&n.to_be_bytes());
+        super::super::types::WgPeerBuilder::new(key)
+            .replace_allowed_ips()
+            .allowed_ips(ips)
+    }
+
+    /// The peers nest of one planned message, as `apply_device_config`
+    /// writes it.
+    fn encode(message: &[PeerPart<'_>]) -> MessageBuilder {
+        let mut b = MessageBuilder::new(0, 0);
+        let peers = b.nest_start(WgDeviceAttr::Peers as u16 | NLA_F_NESTED);
+        for (idx, part) in message.iter().enumerate() {
+            append_peer_part(&mut b, idx as u16, part);
+        }
+        b.nest_end(peers);
+        b
+    }
+
+    /// #500: every peer went into one `WGDEVICE_A_PEERS` nest, which a u16
+    /// `nla_len` cannot describe past ~400 peers or ~1,600 IPv6 allowed-ips
+    /// on one peer. The plan splits them, every message fits, and every
+    /// peer and allowed-ip is sent exactly once.
+    #[test]
+    fn a_large_peer_set_is_split_across_messages_that_fit() {
+        let mut peers: Vec<_> = (0..1000)
+            .map(|n| peer(n, [AllowedIp::v4(Ipv4Addr::from(0x0a00_0000 + n), 32)]))
+            .collect();
+        let v6 = (0..3000u32)
+            .map(|n| AllowedIp::v6(Ipv6Addr::from(0xfd00_u128 << 112 | u128::from(n)), 128));
+        peers.push(peer(1000, v6));
+
+        let plan = plan_set_device(&peers);
+        assert!(plan.len() > 2, "{} messages", plan.len());
+        let mut seen = vec![0usize; peers.len()];
+        for message in &plan {
+            let encoded = encode(message);
+            assert_eq!(encoded.oversized_nest(), None);
+            assert!(
+                encoded.len() <= SET_DEVICE_BUDGET,
+                "{} bytes",
+                encoded.len()
+            );
+            for part in message {
+                let i = peers
+                    .iter()
+                    .position(|p| std::ptr::eq(p, part.peer))
+                    .unwrap();
+                assert_eq!(
+                    part.first,
+                    part.ips.start == 0,
+                    "peer {i}: first is its first part"
+                );
+                assert_eq!(
+                    part.ips.start, seen[i],
+                    "peer {i}: contiguous, no gap or repeat"
+                );
+                seen[i] = part.ips.end;
+            }
+        }
+        for (i, p) in peers.iter().enumerate() {
+            assert_eq!(
+                seen[i],
+                p.get_allowed_ips().len(),
+                "peer {i}: every allowed-ip sent"
+            );
+        }
+        // A continued peer does not replace what its first part added.
+        let continued = plan
+            .iter()
+            .flatten()
+            .find(|p| !p.first)
+            .expect("the big peer continues");
+        let encoded = encode(std::slice::from_ref(continued));
+        let flags_attr = WgPeerAttr::Flags as u16;
+        let peers_payload = &encoded.as_bytes()[16 + 4..];
+        let peer_payload = crate::netlink::attr::AttrIter::new(peers_payload)
+            .next()
+            .unwrap()
+            .1;
+        let flags =
+            crate::netlink::attr::AttrIter::new(peer_payload).find(|(t, _)| *t == flags_attr);
+        assert!(
+            flags.is_none(),
+            "REPLACE_ALLOWEDIPS must not be repeated: {flags:?}"
+        );
+    }
+
+    /// No peers: still one message, for the device's own settings.
+    #[test]
+    fn a_device_with_no_peers_is_one_message() {
+        let plan = plan_set_device(&[]);
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].is_empty());
+    }
+
+    /// #500: a nest past `nla_len` is refused before it is sent, in every
+    /// build — it was a debug-only panic and a clamped header in release.
+    #[tokio::test]
+    async fn an_oversized_nest_is_refused() {
+        let conn = Connection::<crate::netlink::Route>::new().expect("socket");
+        let mut b = MessageBuilder::new(0, 0);
+        let nest = b.nest_start(1 | NLA_F_NESTED);
+        for _ in 0..2_000 {
+            b.append_attr(2, &[0u8; 36]); // 40 bytes each, like a key
+        }
+        b.nest_end(nest);
+        assert!(b.oversized_nest().is_some_and(|len| len > 80_000));
+        let err = conn.send_ack(b).await.expect_err("oversized");
+        assert!(err.to_string().contains("65535"), "{err}");
     }
 }

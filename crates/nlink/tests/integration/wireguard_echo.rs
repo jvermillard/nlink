@@ -242,3 +242,60 @@ async fn a_prefix_on_two_peers_is_refused() -> nlink::Result<()> {
     assert!(device.peers.is_empty(), "nothing was written: {device:?}");
     Ok(())
 }
+
+/// #500: all peers went into one `WGDEVICE_A_PEERS` nest, whose u16
+/// `nla_len` cannot describe ~400 peers, or ~1,600 IPv6 allowed-ips on one
+/// peer — a debug-build panic, a malformed message in release. Now it is
+/// split the way wg(8) splits it, and the kernel ends up with every peer
+/// and every allowed-ip.
+#[tokio::test]
+async fn a_large_peer_set_reaches_the_kernel_whole() -> nlink::Result<()> {
+    use nlink::netlink::genl::wireguard::WgPeerBuilder;
+    use nlink::netlink::link::WireguardLink;
+    use nlink::netlink::{Wireguard, namespace};
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_module!("wireguard");
+
+    let ns = TestNamespace::new("wg-many")?;
+    ns.connection()?
+        .add_link(WireguardLink::new("wgm0"))
+        .await?;
+    let wg = namespace::connection_for_async::<Wireguard>(ns.name()).await?;
+    let key = |n: u32| {
+        let mut k = [0u8; 32];
+        k[..4].copy_from_slice(&n.to_be_bytes());
+        k[31] = 1;
+        k
+    };
+    let big: Vec<AllowedIp> = (0..2000u32)
+        .map(|n| AllowedIp::v6(Ipv6Addr::from((0xfd00_u128 << 112) | u128::from(n)), 128))
+        .collect();
+    wg.set_device("wgm0", |mut d| {
+        d = d.private_key([7; 32]).replace_peers();
+        for n in 0..500u32 {
+            let ip = AllowedIp::v4(Ipv4Addr::from(0x0a00_0000 + n), 32);
+            d = d.peer(
+                WgPeerBuilder::new(key(n))
+                    .replace_allowed_ips()
+                    .allowed_ip(ip),
+            );
+        }
+        d.peer(
+            WgPeerBuilder::new(key(9999))
+                .replace_allowed_ips()
+                .allowed_ips(big.clone()),
+        )
+    })
+    .await?;
+
+    let device = wg.get_device("wgm0").await?;
+    assert_eq!(device.peers.len(), 501);
+    let the_big_one = device
+        .peers
+        .iter()
+        .find(|p| p.public_key == key(9999))
+        .expect("the peer with 2000 allowed-ips");
+    assert_eq!(the_big_one.allowed_ips.len(), 2000);
+    Ok(())
+}

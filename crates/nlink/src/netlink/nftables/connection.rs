@@ -1820,6 +1820,17 @@ impl Transaction {
         }
     }
 
+    /// Queue one message; an oversized nest (#500) is recorded as the
+    /// transaction's error, so `commit` refuses the batch.
+    fn push(&mut self, builder: MessageBuilder) {
+        if let Err(e) = builder.check_size()
+            && self.error.is_none()
+        {
+            self.error = Some(e);
+        }
+        self.messages.push(builder.finish());
+    }
+
     /// Commit only if the ruleset is still at generation `genid`
     /// ([`Connection::generation`]): the kernel refuses the whole batch
     /// with `ERESTART` ([`Error::is_restart`]) if anything changed it in
@@ -1869,7 +1880,7 @@ impl Transaction {
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -1916,7 +1927,7 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
         }
 
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -1967,7 +1978,7 @@ impl Transaction {
             }
         }
 
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2006,7 +2017,7 @@ impl Transaction {
             }
         }
 
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2016,7 +2027,7 @@ impl Transaction {
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2039,7 +2050,7 @@ impl Transaction {
             // `parse_table` which reads it as `from_be_bytes`).
             builder.append_attr_u32_be(NFTA_TABLE_FLAGS, flags);
         }
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2051,7 +2062,7 @@ impl Transaction {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, table);
         builder.append_attr_str(NFTA_CHAIN_NAME, name);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2065,7 +2076,7 @@ impl Transaction {
         builder.append_attr_str(NFTA_RULE_TABLE, table);
         builder.append_attr_str(NFTA_RULE_CHAIN, chain);
         builder.append_attr_u64_be(NFTA_RULE_HANDLE, handle);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2099,7 +2110,7 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_FLOWTABLE_FLAGS, ft.flags);
         }
 
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2111,7 +2122,7 @@ impl Transaction {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_FLOWTABLE_TABLE, table);
         builder.append_attr_str(NFTA_FLOWTABLE_NAME, name);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2156,7 +2167,7 @@ impl Transaction {
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2168,7 +2179,7 @@ impl Transaction {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_SET_TABLE, table);
         builder.append_attr_str(NFTA_SET_NAME, name);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2179,7 +2190,7 @@ impl Transaction {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST | NLM_F_CREATE);
         match append_set_elements(&mut builder, set, elements, ElementWrite::Add) {
-            Ok(()) => self.messages.push(builder.finish()),
+            Ok(()) => self.push(builder),
             Err(e) => self.defer(e),
         }
         self
@@ -2190,7 +2201,7 @@ impl Transaction {
     pub fn del_set_elements(mut self, set: &Set, elements: &[SetElement]) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST);
         match append_set_elements(&mut builder, set, elements, ElementWrite::Delete) {
-            Ok(()) => self.messages.push(builder.finish()),
+            Ok(()) => self.push(builder),
             Err(e) => self.defer(e),
         }
         self
@@ -2202,7 +2213,7 @@ impl Transaction {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_NEWOBJ), NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL);
         append_object(&mut builder, object);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2214,7 +2225,7 @@ impl Transaction {
     pub fn update_object(mut self, object: &Object) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWOBJ), NLM_F_REQUEST);
         append_object(&mut builder, object);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2229,7 +2240,7 @@ impl Transaction {
     ) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELOBJ), NLM_F_REQUEST);
         append_object_key(&mut builder, table, name, object_type, family);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 
@@ -2242,7 +2253,7 @@ impl Transaction {
         );
         builder.append(&NfGenMsg::new(message.family));
         builder.append_bytes(&message.attrs);
-        self.messages.push(builder.finish());
+        self.push(builder);
         self
     }
 

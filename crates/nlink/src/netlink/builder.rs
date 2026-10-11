@@ -19,6 +19,9 @@ pub struct NestToken {
 #[derive(Debug, Clone)]
 pub struct MessageBuilder {
     buf: Vec<u8>,
+    /// The largest nested attribute that did not fit `nla_len`, if any;
+    /// see [`oversized_nest`](Self::oversized_nest).
+    oversized: Option<usize>,
 }
 
 impl MessageBuilder {
@@ -27,14 +30,37 @@ impl MessageBuilder {
         let header = NlMsgHdr::new(msg_type, flags);
         let mut buf = vec![0u8; NLMSG_HDRLEN];
         buf[..std::mem::size_of::<NlMsgHdr>()].copy_from_slice(header.as_bytes());
-        Self { buf }
+        Self {
+            buf,
+            oversized: None,
+        }
     }
 
     /// Create a builder from an existing header.
     pub fn with_header(header: NlMsgHdr) -> Self {
         let mut buf = vec![0u8; NLMSG_HDRLEN];
         buf[..std::mem::size_of::<NlMsgHdr>()].copy_from_slice(header.as_bytes());
-        Self { buf }
+        Self {
+            buf,
+            oversized: None,
+        }
+    }
+
+    /// The length of the largest nested attribute that exceeded the
+    /// 65535-byte `nla_len`, if one did (#500). Its header is clamped, which
+    /// the kernel would misparse; nlink's send paths refuse such a message.
+    pub fn oversized_nest(&self) -> Option<usize> {
+        self.oversized
+    }
+
+    /// An error for a message with an [oversized nest](Self::oversized_nest).
+    pub(crate) fn check_size(&self) -> crate::Result<()> {
+        match self.oversized {
+            None => Ok(()),
+            Some(len) => Err(crate::Error::InvalidMessage(format!(
+                "netlink: a nested attribute of {len} bytes exceeds the 65535 an nla_len can say"
+            ))),
+        }
     }
 
     /// Get the current message length.
@@ -138,17 +164,16 @@ impl MessageBuilder {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if the nested attribute's total length exceeds
-    /// `u16::MAX` (kernel `nla_len` wire limit). Release builds saturate the
-    /// header to `u16::MAX` so the kernel rejects the malformed message rather
-    /// than misinterpreting a silently-wrapped length.
+    /// A nested attribute longer than `u16::MAX` (the `nla_len` wire limit)
+    /// is recorded in [`oversized_nest`](Self::oversized_nest), and its
+    /// header clamped. It used to be a debug-only panic and a silently
+    /// clamped header in release (#500); `Connection`'s send paths now
+    /// refuse the message, in every build.
     pub fn nest_end(&mut self, token: NestToken) {
         let len = self.buf.len() - token.offset;
-        debug_assert!(
-            len <= u16::MAX as usize,
-            "MessageBuilder::nest_end: nested attribute is {len} bytes, exceeds \
-             u16::MAX wire limit; the kernel cannot represent this nla_len"
-        );
+        if len > u16::MAX as usize {
+            self.oversized = Some(self.oversized.map_or(len, |seen| seen.max(len)));
+        }
         // Update the length in the nested attribute header
         let len_bytes = (len.min(u16::MAX as usize) as u16).to_ne_bytes();
         self.buf[token.offset] = len_bytes[0];
