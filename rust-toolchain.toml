@@ -1,5 +1,6 @@
 # Fleet-uniformized toolchain (myserver#33): all marcpardo/* repos build
-# with the same rustc; MSRV in Cargo.toml matches.
+# with the same rustc. nlink's MSRV (rust-version in Cargo.toml) is lower,
+# 1.88, and CI's msrv job checks it with that toolchain (#532).
 [toolchain]
 channel = "1.98"
 components = ["rustfmt", "clippy"]

@@ -49,8 +49,10 @@ schemars = ["dep:schemars", "serde"]
 # (`PrivateKey::generate`, `PrivateKey::public_key`): X25519, without a
 # separate crypto dependency of your own.
 wireguard-keys = ["dep:x25519-dalek"]
-# All features
-full = ["sockdiag", "tuntap", "output", "namespace_watcher", "lab", "syscall_batch", "serde", "schemars", "wireguard-keys"]
+# Every library feature. `lab` is test code (namespace helpers,
+# require_root!, a tracing subscriber) and is not in it: enable it in
+# dev-dependencies (#532).
+full = ["sockdiag", "tuntap", "output", "namespace_watcher", "syscall_batch", "serde", "schemars", "wireguard-keys"]
 # Enable integration tests (require root or network namespace)
 integration = []
 

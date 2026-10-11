@@ -25,12 +25,12 @@ use nlink::netlink::{Connection, Route};
 async fn main() -> nlink::netlink::Result<()> {
     // Default — 30s safety net (Plan 171, shipped in 0.17).
     let conn = Connection::<Route>::new()?;
-    println!("Default timeout: {:?}", conn.get_timeout());
-    assert_eq!(conn.get_timeout(), Some(Duration::from_secs(30)));
+    println!("Default timeout: {:?}", conn.operation_timeout());
+    assert_eq!(conn.operation_timeout(), Some(Duration::from_secs(30)));
 
     // Override to something tighter for a known-fast operation.
     let conn = conn.timeout(Duration::from_secs(5));
-    println!("Tightened timeout: {:?}", conn.get_timeout());
+    println!("Tightened timeout: {:?}", conn.operation_timeout());
     let links = conn.get_links().await?;
     println!("Found {} interfaces (within timeout)", links.len());
 
@@ -45,7 +45,7 @@ async fn main() -> nlink::netlink::Result<()> {
     // Opt out entirely. Rare; only useful when you have your own
     // higher-level watchdog or are running a known-very-slow op.
     let conn = conn.no_timeout();
-    assert_eq!(conn.get_timeout(), None);
+    assert_eq!(conn.operation_timeout(), None);
     println!("Timeout cleared (opt-out form).");
 
     Ok(())

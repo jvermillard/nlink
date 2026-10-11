@@ -35,6 +35,13 @@ cargo clippy --workspace --all-targets --all-features -- --deny warnings
 cargo machete                             # no unused deps
 ```
 
+MSRV is 1.88 (`rust-version` in the workspace `Cargo.toml`; CI's `msrv`
+job checks it): the oldest stable that builds every target with every
+feature, as checked with `cargo +1.88.0 check --workspace --all-targets
+--all-features` (#532). Before using a newer language or std feature, check
+it there; raise the MSRV only in a minor release, and say so in the
+CHANGELOG.
+
 ## Integration tests
 
 Live under `crates/nlink/tests/integration/` and require root +
@@ -183,7 +190,7 @@ unsafe pointer casts in `types/`.
 | `serde` | `Serialize` + validating `Deserialize` on the declarative config types (`NetworkConfig` round-trips through JSON/YAML; addresses/routes as CIDR strings, MACs as `aa:bb:..`, validated via `try_from`). Also gates `ConfigDiff`/`NftablesDiff`/result-type `Serialize`. Pulls `serde_json` for the `NetworkConfig::{from_json_str,to_json_string}` helpers. |
 | `schemars` | JSON Schema (draft 7) for `NetworkConfig` via `json_schema()` / `json_schema_value()` — wire into editor `json.schemas`/`yaml.schemas` or CI validation. Opt-in; implies `serde`; faithful to the human-facing JSON shape (CIDR strings, not parsed structs). 0.23+. |
 | `wireguard-keys` | `genl::wireguard::PrivateKey::{generate, public_key}` — X25519 key pairs without a crypto crate of your own (`x25519-dalek`). The key type itself, base64 and clamping, is always available. 0.31+, #529. |
-| `full` | All of the above |
+| `full` | All of the above except `lab`, which is test code: enable it in dev-dependencies (0.32, #532) |
 
 ## Type-safe units (Rate / Bytes / Percent)
 

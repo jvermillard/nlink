@@ -20,10 +20,12 @@ nlink = "0.31"
 Feature flags: `sockdiag`, `tuntap`, `output`, `namespace_watcher`,
 `syscall_batch` (recvmmsg/sendmmsg batching), `serde`, `schemars` (JSON Schema for
 `NetworkConfig`), `lab` (test harness), `wireguard-keys` (WireGuard key
-generation), `full`. Full list in the
+generation), `full` (all of them but `lab`). Full list in the
 [docs.rs feature table](https://docs.rs/crate/nlink/latest/features).
 
-MSRV: Rust 1.98, edition 2024.
+MSRV: Rust 1.88, edition 2024: the oldest stable that builds every target with
+every feature. It is raised only in a minor release, for a language or library
+feature worth it, and the CHANGELOG says so.
 
 ## Quick start
 

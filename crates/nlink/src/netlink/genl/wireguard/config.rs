@@ -1448,8 +1448,20 @@ impl WireguardConfigDiff {
     }
 }
 
+/// No trailing newline, like `ConfigDiff`'s and `NftablesDiff`'s, so
+/// `println!` prints each diff on its own lines with nothing doubled
+/// (#532).
 impl fmt::Display for WireguardConfigDiff {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        self.render(&mut out)?;
+        f.write_str(out.trim_end_matches('\n'))
+    }
+}
+
+impl WireguardConfigDiff {
+    fn render(&self, f: &mut String) -> fmt::Result {
+        use fmt::Write as _;
         if self.is_empty() {
             return f.write_str("WireguardConfigDiff: no changes\n");
         }
@@ -2367,6 +2379,17 @@ mod tests {
         assert_eq!(dev[1]["peers-to-modify"][0]["changes"]["endpoint-set"], true);
         assert_eq!(dev[1]["peers-to-remove"][0], b64_encode_32(&key(0xDD)));
         assert_eq!(json["devices-to-add"][0], "wg1");
+    }
+
+    /// No trailing newline, like the other diffs' `Display` (#532).
+    #[test]
+    fn display_has_no_trailing_newline() {
+        let empty = WireguardConfigDiff::default();
+        assert_eq!(empty.to_string(), "WireguardConfigDiff: no changes");
+        let mut diff = WireguardConfigDiff::default();
+        diff.devices_to_add.push("wg0".to_string());
+        let shown = diff.to_string();
+        assert!(shown.ends_with("needs creation)"), "{shown:?}");
     }
 
     /// The diff shows the keepalive the kernel gets: 500 ms is 1 s, not

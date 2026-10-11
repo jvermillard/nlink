@@ -25,7 +25,7 @@ pub enum Error {
     /// Carries optional extended-ack TLVs ([`ext_ack`](Self::Kernel::ext_ack),
     /// [`ext_ack_offset`](Self::Kernel::ext_ack_offset)) populated by
     /// the kernel when `NETLINK_EXT_ACK` is enabled (on by default in
-    /// nlink — see [`Self::is_namespace_restore_failed`] note).
+    /// nlink).
     ///
     /// # Wrapping in a downstream error type
     ///
@@ -188,15 +188,6 @@ pub enum Error {
     /// Invalid attribute format.
     #[error("invalid attribute: {0}")]
     InvalidAttribute(String),
-
-    /// Sequence number mismatch.
-    #[error("sequence mismatch: expected {expected}, got {actual}")]
-    SequenceMismatch {
-        /// Expected sequence number.
-        expected: u32,
-        /// Actual sequence number received.
-        actual: u32,
-    },
 
     /// Operation not supported.
     #[error("operation not supported: {0}")]
@@ -367,36 +358,6 @@ pub enum Error {
     /// race; the surviving task should fail through.
     #[error("connection pool is closed (all handles dropped)")]
     PoolClosed,
-
-    /// `setns()` failed to restore the calling thread to its original
-    /// network namespace after a `new_in_namespace`-style socket
-    /// creation.
-    ///
-    /// The socket itself was created successfully and lives in the
-    /// target namespace as intended. But the **calling thread** is
-    /// now stuck in the target namespace — every subsequent
-    /// `/sys/class/net/`-reading call from this thread (or any
-    /// other tokio task scheduled on it) will read from the wrong
-    /// namespace. There is no automatic recovery; the calling code
-    /// must decide whether to abort, retry the restore manually, or
-    /// pin work to a different thread.
-    ///
-    /// Previously (≤ 0.15.1) this condition logged to stderr and
-    /// returned the socket anyway. Promoted to an error variant in
-    /// 0.16.0 because silent thread-state corruption was producing
-    /// surprises that took hours to debug.
-    ///
-    /// Recover via [`Error::is_namespace_restore_failed`] for the
-    /// predicate form.
-    #[error(
-        "netns restore failed after socket creation; thread \
-             stuck in target netns: {source}"
-    )]
-    NamespaceRestoreFailed {
-        /// The underlying `setns()` failure.
-        #[source]
-        source: io::Error,
-    },
 }
 
 /// What kind of failure an [`Error`] is: one answer per error, for
@@ -891,7 +852,6 @@ impl Error {
             },
             Self::InvalidMessage(_)
             | Self::InvalidAttribute(_)
-            | Self::SequenceMismatch { .. }
             | Self::Parse(_)
             | Self::Address(_)
             | Self::Interface(_)
@@ -1202,18 +1162,6 @@ impl Error {
     /// through.
     pub fn is_pool_closed(&self) -> bool {
         matches!(self, Self::PoolClosed)
-    }
-
-    /// Check if this is a namespace-restore failure
-    /// ([`Error::NamespaceRestoreFailed`]).
-    ///
-    /// Indicates that a socket was created successfully in a target
-    /// netns, but the calling thread could not be restored to its
-    /// original netns. The thread is now stuck in the target netns;
-    /// callers typically respond by aborting the affected task or
-    /// pinning subsequent work to a different thread.
-    pub fn is_namespace_restore_failed(&self) -> bool {
-        matches!(self, Self::NamespaceRestoreFailed { .. })
     }
 
     /// Check if this is an "address already in use" error (EADDRINUSE).
@@ -1600,22 +1548,6 @@ mod tests {
         assert!(!Error::Timeout.is_dump_interrupted());
         assert!(!Error::from_errno(-16).is_dump_interrupted()); // EBUSY
         assert!(!Error::InterfaceNotFound { name: "x".into() }.is_dump_interrupted());
-    }
-
-    #[test]
-    fn test_namespace_restore_failed_predicate() {
-        let err = Error::NamespaceRestoreFailed {
-            source: io::Error::from_raw_os_error(libc::EPERM),
-        };
-        assert!(err.is_namespace_restore_failed());
-        assert!(!err.is_timeout());
-        assert!(!err.is_permission_denied()); // not an errno predicate
-        assert!(err.to_string().contains("netns restore failed"));
-        assert!(err.to_string().contains("thread stuck"));
-
-        // Unrelated errors don't claim to be netns-restore failures.
-        let other = Error::Timeout;
-        assert!(!other.is_namespace_restore_failed());
     }
 
     #[test]

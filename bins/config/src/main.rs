@@ -89,7 +89,7 @@ async fn diff_cmd(args: FileArgs) -> Result<()> {
     if diff.is_empty() {
         println!("No changes needed; the system already matches the configuration.");
     } else {
-        print!("{diff}");
+        println!("{diff}");
     }
     Ok(())
 }

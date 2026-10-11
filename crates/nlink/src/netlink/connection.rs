@@ -609,7 +609,16 @@ impl<P: ProtocolState> Connection<P> {
         self
     }
 
-    /// Get the configured timeout.
+    /// The operation timeout: 30 seconds unless set with
+    /// [`timeout`](Self::timeout), `None` after
+    /// [`no_timeout`](Self::no_timeout). On a dump it is the per-frame
+    /// deadline (#272).
+    pub fn operation_timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// The operation timeout.
+    #[deprecated(since = "0.32.0", note = "renamed to `operation_timeout` (#532)")]
     pub fn get_timeout(&self) -> Option<Duration> {
         self.timeout
     }
@@ -819,13 +828,6 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// If no timeout is set, the future runs without time limit.
     /// On timeout, returns [`Error::Timeout`].
-    /// The configured per-operation (and, on dumps, per-frame)
-    /// timeout, or `None` when the caller opted out with
-    /// [`no_timeout`](Self::no_timeout).
-    pub(crate) fn operation_timeout(&self) -> Option<Duration> {
-        self.timeout
-    }
-
     pub(crate) async fn with_timeout<F, T>(&self, fut: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>>,
@@ -3991,7 +3993,7 @@ mod send_sync_tests {
     async fn connection_default_timeout_is_30s() {
         let conn = Connection::<Route>::new().expect("socket open");
         assert_eq!(
-            conn.get_timeout(),
+            conn.operation_timeout(),
             Some(DEFAULT_OPERATION_TIMEOUT),
             "Plan 171: fresh Connection<P> must default to 30s timeout"
         );
@@ -4008,7 +4010,7 @@ mod send_sync_tests {
             .expect("socket open")
             .no_timeout();
         assert_eq!(
-            conn.get_timeout(),
+            conn.operation_timeout(),
             None,
             "Plan 171: .no_timeout() must opt out of the default"
         );
@@ -4019,7 +4021,7 @@ mod send_sync_tests {
         let conn = Connection::<Route>::new()
             .expect("socket open")
             .timeout(Duration::from_secs(5));
-        assert_eq!(conn.get_timeout(), Some(Duration::from_secs(5)));
+        assert_eq!(conn.operation_timeout(), Some(Duration::from_secs(5)));
     }
 
     // -- #134 — dispatcher-mode end-to-end (non-root; reads only) ----

@@ -24,14 +24,16 @@ edition = "2024"
 # consumers stay on a recent toolchain in exchange for using
 # modern language features without contortion. Bump in lockstep
 # with stable; called out in CHANGELOG when it advances.
-rust-version = "1.98"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/p13marc/nlink"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
+# What the library uses, and no more: the binaries add rt-multi-thread
+# for #[tokio::main], and a consumer gets only what it asks for (#532).
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros"] }
 
 # X25519 for WireGuard key pairs (`wireguard-keys` feature)
 x25519-dalek = { version = "3", features = ["static_secrets"] }
