@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`Netns`, an owned network namespace handle (#520).**
+  `nlink::netlink::namespace::Netns` owns an fd to a namespace, so what
+  it names cannot change under it. A namespace deleted and recreated
+  under the same name is a different one, with a different `NetnsId`
+  (the nsfs device and inode).
+  - **Opening:** `open(name)`, `from_path`, `from_pid`, `from_pidfd` (the
+    pidfd ioctl on 6.11+, a reuse-safe fdinfo fallback before),
+    `current()` and `init()`. `create(name)` makes one and opens it.
+  - **Deleting:** `delete()` deletes the `ip netns` name only while it
+    still names this namespace.
+  - **Working inside it:** `run(f)` runs a closure, which may borrow, on
+    a thread of its own inside the namespace. `socket(domain, ty,
+    protocol)` makes a socket there, for capture or TCP probes.
+    `connection::<P>()` and `connection_async::<P>()` connect there.
+  - **`NetnsRef`** (`Default`, `Named`, `Path`, `Pid`) is the owned,
+    `Clone + Eq + Hash`, serde-able description for configs and state
+    files. `open()` turns it into a `Netns`.
+
+  `namespace.rs` became the `namespace/` module; the existing API is
+  unchanged.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
