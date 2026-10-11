@@ -516,14 +516,15 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                     );
                 }
             }
-            if let (Some(want), Some(have)) =
-                (xmit_hash_policy, data.u8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY))
-                && have != *want
+            if let (Some(want), Some(have)) = (
+                xmit_hash_policy,
+                data.u8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY),
+            ) && have != *want as u8
             {
                 d.update(
                     "bond",
-                    KindAttr::U8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY, *want),
-                    format!("bond xmit_hash_policy {have} -> {want}"),
+                    KindAttr::U8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY, *want as u8),
+                    format!("bond xmit_hash_policy {have} -> {want:?}"),
                 );
             }
             let counts = [

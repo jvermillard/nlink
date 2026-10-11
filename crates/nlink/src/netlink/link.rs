@@ -3454,8 +3454,11 @@ impl TryFrom<u8> for BondMode {
 }
 
 /// Transmit hash policy for XOR/LACP modes.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub enum XmitHashPolicy {
     /// Hash by L2 (MAC) addresses.
