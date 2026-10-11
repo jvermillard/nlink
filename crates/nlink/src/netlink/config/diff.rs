@@ -2716,6 +2716,7 @@ mod tests {
             keys(ConfigDiff::json_schema_value()),
             [
                 "addresses-to-add",
+                "addresses-to-change",
                 "addresses-to-remove",
                 "links-missing",
                 "links-to-add",
