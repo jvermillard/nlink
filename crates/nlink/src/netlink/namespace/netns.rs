@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn run_borrows() {
         let ns = Netns::current().unwrap();
-        let words = vec!["a", "b"];
+        let words = ["a", "b"];
         let n = ns.run(|| words.len()).unwrap();
         assert_eq!(n, 2);
     }
