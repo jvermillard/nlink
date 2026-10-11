@@ -822,3 +822,70 @@ async fn a_snapshot_diff_is_the_live_diff_without_a_read() -> Result<()> {
     })
     .await
 }
+
+/// With the previous config, an apply removes exactly what that config
+/// declared and this one does not: an address, a route in a table nothing
+/// declares into any more, a qdisc. What nobody declared stays (#512).
+#[tokio::test]
+async fn the_previous_config_says_what_to_remove() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_netem");
+
+    with_timeout(async {
+        use std::sync::Arc;
+
+        let ns = TestNamespace::new("previous")?;
+        let conn = conn_in_ns(&ns)?;
+        let a = Arc::new(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.80.0.1/24")?
+                .route("10.81.0.0/24", |r| r.dev("d0").table(100))?
+                .qdisc("d0", |q| {
+                    q.netem().delay(std::time::Duration::from_millis(5))
+                }),
+        );
+        let b = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.80.0.2/24")?
+            .route("10.81.0.0/24", |r| r.dev("d0").table(200))?;
+        a.apply(&conn)
+            .await?
+            .errors
+            .is_empty()
+            .then_some(())
+            .expect("A applies");
+        ns.exec("ip", &["addr", "add", "10.80.0.9/24", "dev", "d0"])?;
+
+        let diff = b
+            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .await?;
+        assert_eq!(diff.addresses_to_remove.len(), 1, "{diff}");
+        assert_eq!(diff.routes_to_remove.len(), 1, "{diff}");
+        assert_eq!(diff.qdiscs_to_remove.len(), 1, "{diff}");
+
+        let applied = b
+            .apply_with_options(&conn, ApplyOptions::default().with_previous(a.clone()))
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let again = b
+            .diff_with_options(&conn, DiffOptions::default().previous(a.clone()))
+            .await?;
+        assert!(again.is_empty(), "the second diff: {again}");
+
+        let addrs = ns.exec("ip", &["-j", "addr", "show", "dev", "d0"])?;
+        assert!(!addrs.contains("10.80.0.1"), "A's address stayed: {addrs}");
+        assert!(
+            addrs.contains("10.80.0.2") && addrs.contains("10.80.0.9"),
+            "{addrs}"
+        );
+        let t100 = ns.exec("ip", &["route", "show", "table", "100"])?;
+        assert!(t100.trim().is_empty(), "table 100 kept its route: {t100}");
+        let t200 = ns.exec("ip", &["route", "show", "table", "200"])?;
+        assert!(t200.contains("10.81.0.0/24"), "{t200}");
+        let qdisc = ns.exec("tc", &["qdisc", "show", "dev", "d0"])?;
+        assert!(!qdisc.contains("netem"), "the netem stayed: {qdisc}");
+        Ok(())
+    })
+    .await
+}

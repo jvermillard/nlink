@@ -86,6 +86,16 @@ pub struct DiffOptions {
     /// in its previous config and declares nothing on it now. Ignored
     /// unless [`Self::purge`] is on.
     pub purge_address_devs: Vec<String>,
+
+    /// The config applied before this one (#512). With it, the diff
+    /// removes what that config declared and this one no longer does —
+    /// exactly that, and nothing undeclared: its addresses, its routes in
+    /// whatever table they were (so a route moved to another table leaves
+    /// the old one), and its root and ingress qdiscs, which the kernel
+    /// replaces with its default. Each only while the kernel still has it.
+    /// It works with or without [`Self::purge`]; with both, the diff
+    /// removes the union.
+    pub previous: Option<std::sync::Arc<NetworkConfig>>,
 }
 
 impl DiffOptions {
@@ -110,6 +120,13 @@ impl DiffOptions {
     ) -> Self {
         self.purge_address_devs
             .extend(devs.into_iter().map(Into::into));
+        self
+    }
+
+    /// Remove what `previous` declared and the config no longer does; see
+    /// [`Self::previous`].
+    pub fn previous(mut self, previous: impl Into<std::sync::Arc<NetworkConfig>>) -> Self {
+        self.previous = Some(previous.into());
         self
     }
 
@@ -186,6 +203,10 @@ pub struct ConfigDiff {
     pub qdiscs_to_add: Vec<DeclaredQdisc>,
     /// Qdiscs to replace (same position, different config).
     pub qdiscs_to_replace: Vec<DeclaredQdisc>,
+    /// Qdiscs the previous config declared and this one does not, still in
+    /// the kernel: the apply deletes them, and the kernel puts its default
+    /// back. Only with [`DiffOptions::previous`] (#512).
+    pub qdiscs_to_remove: Vec<DeclaredQdisc>,
 
     /// Addresses to remove (purge mode only — see
     /// [`DiffOptions::purge`]). Populated **only** when the diff is
@@ -298,6 +319,7 @@ impl ConfigDiff {
             && self.routes_refused.is_empty()
             && self.qdiscs_to_add.is_empty()
             && self.qdiscs_to_replace.is_empty()
+            && self.qdiscs_to_remove.is_empty()
             && self.addresses_to_remove.is_empty()
             && self.routes_to_remove.is_empty()
     }
@@ -313,6 +335,7 @@ impl ConfigDiff {
             + self.routes_refused.len()
             + self.qdiscs_to_add.len()
             + self.qdiscs_to_replace.len()
+            + self.qdiscs_to_remove.len()
             + self.addresses_to_remove.len()
             + self.routes_to_remove.len()
     }
@@ -391,6 +414,14 @@ impl ConfigDiff {
                 qdisc.qdisc_type.kind(),
                 qdisc.dev,
                 qdisc.parent
+            ));
+        }
+        for qdisc in &self.qdiscs_to_remove {
+            lines.push(format!(
+                "- qdisc {} on {} ({:?})",
+                qdisc.qdisc_type.kind(),
+                qdisc.dev,
+                qdisc.effective_parent()
             ));
         }
 
@@ -794,7 +825,7 @@ pub(crate) fn diff_snapshot(
     diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
 
     // Diff qdiscs
-    diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, &mut diff);
+    diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, opts, &mut diff);
 
     Ok(diff)
 }
@@ -1350,6 +1381,18 @@ fn diff_addresses(
         }
     }
 
+    // Declared before, not now, and still there: it goes (#512). A
+    // re-prefixed IPv6 address was queued above already.
+    for prev in opts.previous.iter().flat_map(|p| p.addresses.iter()) {
+        let key = (prev.dev.as_str(), prev.address, prev.prefix_len);
+        let queued = diff.addresses_to_remove.iter().any(|q| {
+            q.dev == prev.dev && q.address == prev.address && q.prefix_len == prev.prefix_len
+        });
+        if !desired.contains(&key) && current_set.contains(&key) && !queued {
+            diff.addresses_to_remove.push(prev.clone());
+        }
+    }
+
     if !opts.purge {
         return;
     }
@@ -1616,6 +1659,21 @@ fn diff_routes(
             .and_then(|n| name_to_ifindex.get(n).copied())
     };
     let tables = opts.purge_table_scope(config);
+    // The routes the previous config declared, by the same key (#512).
+    let previous_by_key: HashMap<(IpAddr, u8, u32), Vec<&DeclaredRoute>> = opts
+        .previous
+        .iter()
+        .flat_map(|p| p.routes.iter())
+        .fold(HashMap::new(), |mut map, r| {
+            map.entry((
+                kernel_destination(r.destination, r.prefix_len),
+                r.prefix_len,
+                r.table.unwrap_or(254),
+            ))
+            .or_default()
+            .push(r);
+            map
+        });
 
     for r in current {
         if !(r.is_ipv4() || r.is_ipv6())
@@ -1654,7 +1712,11 @@ fn diff_routes(
             .iter()
             .any(|d| route_matches_but_metric(d, oif_of(d), r));
         let purged = purge && purgeable_route(r, &tables);
-        if !(superseded || purged) {
+        // Declared before, not now: it goes, wherever its table (#512).
+        let dropped = previous_by_key
+            .get(&(dst, r.dst_len(), r.table_id()))
+            .is_some_and(|prev| prev.iter().any(|d| route_matches(d, oif_of(d), r)));
+        if !(superseded || purged || dropped) {
             continue;
         }
         let dev = r
@@ -1750,6 +1812,7 @@ fn diff_qdiscs(
     config: &NetworkConfig,
     current: &[TcMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    opts: &DiffOptions,
     diff: &mut ConfigDiff,
 ) {
     // Build map of current root qdiscs by device
@@ -1788,6 +1851,30 @@ fn diff_qdiscs(
         } else {
             // No qdisc at this position, need to add.
             diff.qdiscs_to_add.push(declared.clone());
+        }
+    }
+
+    // Declared before at a slot nothing declares now, and not the kernel's
+    // default there (handle 0:): it goes, and the default comes back (#512).
+    for prev in opts.previous.iter().flat_map(|p| p.qdiscs.iter()) {
+        let parent = prev.effective_parent();
+        let still = config
+            .qdiscs
+            .iter()
+            .any(|d| d.dev == prev.dev && d.effective_parent() == parent);
+        let current_map = match parent {
+            QdiscParent::Root => &current_root_qdisc,
+            QdiscParent::Ingress => &current_ingress_qdisc,
+        };
+        let live = current_map
+            .get(prev.dev.as_str())
+            .is_some_and(|q| q.handle().major() != 0);
+        let queued = diff
+            .qdiscs_to_remove
+            .iter()
+            .any(|q| q.dev == prev.dev && q.effective_parent() == parent);
+        if !still && live && !queued {
+            diff.qdiscs_to_remove.push(prev.clone());
         }
     }
 }
@@ -2906,6 +2993,7 @@ mod tests {
                 "links-to-modify",
                 "links-to-recreate",
                 "qdiscs-to-add",
+                "qdiscs-to-remove",
                 "qdiscs-to-replace",
                 "routes-refused",
                 "routes-to-add",
