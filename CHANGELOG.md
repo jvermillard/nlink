@@ -498,6 +498,20 @@ All notable changes to this project will be documented in this file.
     `util::serde_units::{duration, option_duration}` does the same for a
     `Duration` (`"10ms"`). All of them have JSON schemas.
 
+- **TC verbs: `conn.tc(dev).qdisc(parent)…` (#515).**
+  - `create`, `change`, `replace`, `apply`, `delete`, `delete_kind` and
+    `get` each have defined semantics, tabled in `tc_verbs`.
+  - `create` refuses an occupied slot.
+  - `change` changes the live qdisc in place. It refuses another kind,
+    and one that only a recreate can change; `replace` does those.
+  - `apply` does nothing when the live qdisc already matches the spec,
+    and replaces it otherwise. It reports whether anything changed.
+  - `delete_kind` deletes only the named kind.
+  - `Parent::{Root, Ingress, ClsactIngress, ClsactEgress, Class}` names
+    the places that `TcHandle`'s constants mixed up.
+  - `Connection::del_qdisc_kind_by_index` is the kind-checked delete
+    underneath.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
