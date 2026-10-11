@@ -870,6 +870,104 @@ pub(crate) fn link_config(
             }
             Box::new(config)
         }
+        DeclaredLinkType::Gre(p) => {
+            let mut c = crate::netlink::link::GreLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.ttl {
+                c = c.ttl(v);
+            }
+            if let Some(v) = p.key {
+                c = c.key(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Gretap(p) => {
+            let mut c = crate::netlink::link::GretapLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.ttl {
+                c = c.ttl(v);
+            }
+            if let Some(v) = p.key {
+                c = c.key(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Ipip(p) => {
+            let mut c = crate::netlink::link::IpipLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.ttl {
+                c = c.ttl(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Sit(p) => {
+            let mut c = crate::netlink::link::SitLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.ttl {
+                c = c.ttl(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Vti(p) => {
+            let mut c = crate::netlink::link::VtiLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.key {
+                c = c.ikey(v).okey(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            Box::new(c)
+        }
         DeclaredLinkType::Macvtap { parent, mode } => {
             let mut config = crate::netlink::link::MacvtapLink::new(&link.name, parent)
                 .mode(kernel_macvlan_mode(*mode));

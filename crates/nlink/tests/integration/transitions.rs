@@ -1596,3 +1596,58 @@ async fn ipvlan_and_macvtap_change_in_place() -> nlink::Result<()> {
     })
     .await
 }
+
+/// IPv4 tunnels declared and changed in place (#516): gre, gretap, ipip,
+/// sit and vti, each with its ends, TTL, key and underlay device as its
+/// kind has them. A tunnel's `changelink` takes its whole configuration
+/// from the request, so a change of one parameter must not lose the
+/// others: each step checks all of them through `ip -d link`.
+#[tokio::test]
+async fn ipv4_tunnels_change_in_place() -> nlink::Result<()> {
+    use std::net::Ipv4Addr;
+    require_root!();
+    nlink::require_modules!("dummy", "ip_gre", "ipip", "sit", "ip_vti");
+
+    let a = |n: u8, h: u8| Ipv4Addr::new(10, 90, n, h);
+    let step = |b: bool| {
+        let (r, ttl, key) = if b { (3, 32, 200) } else { (2, 64, 100) };
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("gr1", move |l| {
+                l.gre().tunnel_local(a(0, 1)).tunnel_remote(a(0, r)).tunnel_ttl(ttl).tunnel_key(key).tunnel_underlay_dev("d0")
+            })
+            .link("gt1", move |l| l.gretap().tunnel_local(a(1, 1)).tunnel_remote(a(1, 2)).tunnel_key(key + 1))
+            .link("ip1", move |l| l.ipip().tunnel_local(a(2, 1)).tunnel_remote(a(2, r)).tunnel_ttl(ttl))
+            .link("st1", move |l| l.sit().tunnel_local(a(3, 1)).tunnel_remote(a(3, r)))
+            .link("vt1", move |l| l.vti().tunnel_local(a(4, 1)).tunnel_remote(a(4, 2)).tunnel_key(key + 2))
+    };
+    let ns = TestNamespace::new("tr-tunnels")?;
+    crate::common::converge::assert_transition(&ns, &[step(false), step(true)], false, async |i, _conn| {
+        let b = i == 1;
+        let (r, ttl, key) = if b { (3, 32, 200u32) } else { (2, 64, 100u32) };
+        let data = |dev: &str| -> Result<serde_json::Value, String> {
+            Ok(ip_json(&ns, &["-d", "link", "show", dev])?[0]["linkinfo"]["info_data"].clone())
+        };
+        let dotted = |k: u32| Ipv4Addr::from(k).to_string();
+        let gre = data("gr1")?;
+        let checks = [
+            ("gr1 remote", gre["remote"].clone(), serde_json::json!(a(0, r).to_string())),
+            ("gr1 local", gre["local"].clone(), serde_json::json!(a(0, 1).to_string())),
+            ("gr1 ttl", gre["ttl"].clone(), serde_json::json!(ttl)),
+            ("gr1 key", gre["ikey"].clone(), serde_json::json!(dotted(key))),
+            ("gr1 dev", gre["link"].clone(), serde_json::json!("d0")),
+            ("gt1 key", data("gt1")?["okey"].clone(), serde_json::json!(dotted(key + 1))),
+            ("ip1 remote", data("ip1")?["remote"].clone(), serde_json::json!(a(2, r).to_string())),
+            ("ip1 ttl", data("ip1")?["ttl"].clone(), serde_json::json!(ttl)),
+            ("st1 remote", data("st1")?["remote"].clone(), serde_json::json!(a(3, r).to_string())),
+            ("vt1 key", data("vt1")?["ikey"].clone(), serde_json::json!(dotted(key + 2))),
+        ];
+        for (what, have, want) in checks {
+            if have != want {
+                return Err(format!("step {}: {what} is {have}, want {want}", i + 1));
+            }
+        }
+        Ok(())
+    })
+    .await
+}

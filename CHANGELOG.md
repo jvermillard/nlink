@@ -348,6 +348,19 @@ All notable changes to this project will be documented in this file.
   Both now read the `AF_BRIDGE` dump. A root test adds a VLAN to a port
   and finds it through both. It fails without the fix.
 
+- **GRE keys and tunnel underlay devices reach the kernel (#516).**
+  - **Keys.** `GreLink` and `GretapLink` wrote the key and its `GRE_KEY`
+    flag native-endian, while the kernel reads them big-endian. The flag
+    read as no key, and `.key(100)` made a tunnel without one.
+  - **Underlay.** `GreLink`, `GretapLink`, `IpipLink`, `SitLink`,
+    `VtiLink` and `Vti6Link` sent their `.link(dev)` as the top-level
+    `IFLA_LINK`, but a tunnel binds through its own link attribute
+    (`IFLA_GRE_LINK`, `IFLA_IPTUN_LINK`, `IFLA_VTI_LINK`). The tunnel was
+    never bound. `Ip6GreLink` already did it right.
+
+  The GRE root test now checks both through `ip -d -j link`. It fails
+  without each fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -879,6 +892,27 @@ All notable changes to this project will be documented in this file.
   - **Test.** A transition test takes both through three values, checked
     through `ip -d -j link` on iproute2 6.15 and 6.1, and fails with the
     ipvlan mode uncompared.
+
+- **Declared IPv4 tunnels: gre, gretap, ipip, sit and vti (#516, row 7,
+  second batch).**
+  - **Builders.** `LinkBuilder::gre()` (and `gretap`, `ipip`, `sit`,
+    `vti`) with `tunnel_local`, `tunnel_remote`, `tunnel_ttl`,
+    `tunnel_key` and `tunnel_underlay_dev`, as each kind has them. The
+    JSON form is `{"gre": {"local": .., "remote": .., "key": 7}}`.
+  - **Changes.** Every parameter changes in place. A tunnel's
+    `changelink` rebuilds its configuration from the request, zeroing
+    what it isn't sent, so any difference sends the whole declared set.
+  - **TTL.** An unset TTL is the kernel's (inherit, or 64 for sit) and
+    isn't compared.
+  - **Validation.** These are validation errors:
+    - a MAC on an L3 tunnel;
+    - a setter the kind lacks (a key on ipip, a TTL on vti);
+    - a tunnel named after the kernel's fallback device (`gre0`, `tunl0`,
+      `sit0`, `ip_vti0`, …), which every namespace has and nothing can
+      configure.
+  - **CI.** `ip_vti` joins CI's module lists.
+  - **Test.** A transition test takes all five A→B and checks every
+    parameter through `ip -d -j link`, on iproute2 6.15 and 6.1.
 
 ## [0.31.0] - 2026-10-11
 
