@@ -5425,10 +5425,12 @@ impl LinkConfig for MacsecLink {
 
         let data = builder.nest_start(IflaInfo::Data as u16);
         if let Some(sci) = self.sci {
-            builder.append_attr_u64(macsec::IFLA_MACSEC_SCI, sci);
+            // Big-endian, as iproute2 sends it and `sci_t` holds it (#516).
+            builder.append_attr(macsec::IFLA_MACSEC_SCI, &sci.to_be_bytes());
         }
         if let Some(port) = self.port {
-            builder.append_attr_u16(macsec::IFLA_MACSEC_PORT, port);
+            // Big-endian: the kernel reads it with `nla_get_be16` (#516).
+            builder.append_attr_u16_be(macsec::IFLA_MACSEC_PORT, port);
         }
         if let Some(window) = self.replay_window {
             builder.append_attr_u32(macsec::IFLA_MACSEC_WINDOW, window);

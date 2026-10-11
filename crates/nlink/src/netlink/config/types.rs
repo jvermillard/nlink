@@ -185,6 +185,15 @@ impl NetworkConfig {
                     ));
                 }
             }
+            // `macsec_validate_attr` refuses an SCI left out of frames without
+            // end-station or SCB mode, which are not modelled (#516).
+            if let DeclaredLinkType::Macsec { include_sci: Some(false), .. } = &l.link_type {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    "macsec_include_sci(false) needs end-station or SCB mode, which a \
+                     declaration does not carry; the kernel refuses it",
+                ));
+            }
             // Port options need a bridge master (#516).
             if l.port.is_some() {
                 let master = l.master.name();
@@ -1361,6 +1370,23 @@ pub enum DeclaredLinkType {
         /// The UDP port; the kernel's 6081 when unset.
         port: Option<u16>,
     },
+    /// MACsec (IEEE 802.1AE) link on `parent` (#516). The SCI and port are
+    /// fixed at create; encryption, protection, SCI inclusion and the
+    /// replay window change in place. Its keys and SAs are the MACsec
+    /// Generic Netlink API's, not a declaration's.
+    Macsec {
+        parent: String,
+        /// The Secure Channel Identifier, MAC then port as `ip macsec`
+        /// shows it; the kernel derives one from the parent's MAC and
+        /// [`port`](Self::Macsec::port) when unset.
+        sci: Option<u64>,
+        port: Option<u16>,
+        encrypt: Option<bool>,
+        protect: Option<bool>,
+        include_sci: Option<bool>,
+        /// Replay protection with this window; unset leaves it alone.
+        replay_window: Option<u32>,
+    },
     /// Bare UDP tunnel (#516): an L3 tunnel of `ethertype` over UDP `port`.
     /// It has no changelink, so any change is a recreate. Unverified on a
     /// live kernel: the one these were written on does not build it.
@@ -1442,6 +1468,7 @@ impl DeclaredLinkType {
             Self::Vti(_) => Some("vti"),
             Self::Geneve { .. } => Some("geneve"),
             Self::Bareudp { .. } => Some("bareudp"),
+            Self::Macsec { .. } => Some("macsec"),
             Self::Bond { .. } => Some("bond"),
             Self::Ifb => Some("ifb"),
             Self::Vrf { .. } => Some("vrf"),
@@ -1920,6 +1947,73 @@ impl LinkBuilder {
             self.wrong_kind("geneve_port", "geneve");
         }
         self
+    }
+
+    /// Create a MACsec link on `parent` (#516).
+    pub fn macsec(mut self, parent: &str) -> Self {
+        self.link_type = DeclaredLinkType::Macsec {
+            parent: parent.to_string(),
+            sci: None,
+            port: None,
+            encrypt: None,
+            protect: None,
+            include_sci: None,
+            replay_window: None,
+        };
+        self
+    }
+
+    fn macsec_field<T>(
+        mut self,
+        setter: &str,
+        set: impl FnOnce(&mut Option<u64>, &mut Option<u16>, &mut Option<bool>, &mut Option<bool>, &mut Option<bool>, &mut Option<u32>) -> T,
+    ) -> Self {
+        if let DeclaredLinkType::Macsec {
+            sci,
+            port,
+            encrypt,
+            protect,
+            include_sci,
+            replay_window,
+            ..
+        } = &mut self.link_type
+        {
+            set(sci, port, encrypt, protect, include_sci, replay_window);
+        } else {
+            self.wrong_kind(setter, "macsec");
+        }
+        self
+    }
+
+    /// A MACsec link's SCI (fixed at create).
+    pub fn macsec_sci(self, v: u64) -> Self {
+        self.macsec_field("macsec_sci", |sci, _, _, _, _, _| *sci = Some(v))
+    }
+
+    /// The port the kernel derives a MACsec SCI with (fixed at create).
+    pub fn macsec_port(self, v: u16) -> Self {
+        self.macsec_field("macsec_port", |_, port, _, _, _, _| *port = Some(v))
+    }
+
+    /// Encrypt, or only authenticate.
+    pub fn macsec_encrypt(self, on: bool) -> Self {
+        self.macsec_field("macsec_encrypt", |_, _, e, _, _, _| *e = Some(on))
+    }
+
+    /// Protect frames at all.
+    pub fn macsec_protect(self, on: bool) -> Self {
+        self.macsec_field("macsec_protect", |_, _, _, p, _, _| *p = Some(on))
+    }
+
+    /// Put the SCI in every frame. Leaving it out needs end-station or
+    /// SCB mode, which a declaration does not model: `false` is refused.
+    pub fn macsec_include_sci(self, on: bool) -> Self {
+        self.macsec_field("macsec_include_sci", |_, _, _, _, i, _| *i = Some(on))
+    }
+
+    /// Replay protection with `window`.
+    pub fn macsec_replay_window(self, window: u32) -> Self {
+        self.macsec_field("macsec_replay_window", |_, _, _, _, _, w| *w = Some(window))
     }
 
     /// Create a bare UDP tunnel of `ethertype` (0x8847 MPLS, 0x0800 IPv4,
@@ -5013,6 +5107,28 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("an L3 tunnel has no hardware address"), "{err}");
+    }
+
+    #[test]
+    fn macsec_roundtrips_predicts_and_validates() {
+        let ms = |sci: u64, encrypt: bool| {
+            NetworkConfig::new().link("ms1", move |l| {
+                l.macsec("d0").macsec_sci(sci).macsec_encrypt(encrypt).macsec_replay_window(32)
+            })
+        };
+        assert_roundtrips(&ms(0x0200_0000_0001_0001, true));
+        let json = ms(0x0200_0000_0001_0001, true).to_json_string().unwrap();
+        assert!(json.contains(r#""macsec":{"parent":"d0","sci":144115188075921409"#), "{json}");
+        // Encryption changes in place; a new SCI recreates.
+        assert!(ms(1, false).diff_against(&ms(1, true)).recreates.is_empty());
+        let r = ms(2, true).diff_against(&ms(1, true)).recreates;
+        assert!(r.iter().any(|r| r.reason.contains("macsec sci")), "{r:?}");
+        let err = NetworkConfig::new()
+            .link("ms1", |l| l.macsec("d0").macsec_include_sci(false))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("end-station or SCB"), "{err}");
     }
 
     #[test]

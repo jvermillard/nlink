@@ -367,6 +367,15 @@ All notable changes to this project will be documented in this file.
   stored as `0x30100`. A root test checks it through `ip -d -j link`, and
   fails without the fix.
 
+- **MACsec SCIs and ports are big-endian, as the kernel and `ip macsec`
+  have them (#516).** `MacsecLink::sci` and `port` were sent
+  native-endian. An SCI of `0x0200000000010001` (MAC
+  02:00:00:00:00:01, port 1) became `0100010000000002`, and a port of 7
+  was another port. The MACsec Generic Netlink API read and wrote SCIs
+  the same way: consistent with itself, byte-reversed against everything
+  else. Both now use big-endian. A root test checks both through
+  `ip -d -j link` and `ip macsec show`, and fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -936,6 +945,22 @@ All notable changes to this project will be documented in this file.
   - **Test.** A root test changes a Geneve tunnel's remote and TTL in
     place (same ifindex), then its VNI (recreated), checked through
     `ip -d -j link` on iproute2 6.15 and 6.1. It fails with the VNI
+    uncompared.
+
+- **Declared MACsec links (#516, row 7, fourth batch).**
+  - **Builder.** `LinkBuilder::macsec(parent)` with `macsec_sci`,
+    `macsec_port`, `macsec_encrypt`, `macsec_protect`,
+    `macsec_include_sci` and `macsec_replay_window`.
+  - **Changes.** `macsec_changelink` refuses the SCI and port, so those
+    recreate. The rest change in place.
+  - **Validation.** `macsec_include_sci(false)` is a validation error:
+    the kernel needs end-station or SCB mode for it, which a declaration
+    doesn't carry.
+  - **Keys and SAs** stay with the MACsec Generic Netlink API.
+  - **CI.** `macsec` joins CI's module lists.
+  - **Test.** A root test changes encryption and the window in place
+    (same ifindex), then the SCI (recreated), checked through
+    `ip -d -j link` on iproute2 6.15 and 6.1. It fails with the SCI
     uncompared.
 
 ## [0.31.0] - 2026-10-11

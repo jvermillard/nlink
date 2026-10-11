@@ -267,7 +267,7 @@ impl Connection<Macsec> {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
             let rxsc_config = builder.nest_start(macsec_attr::RXSC_CONFIG | NLA_F_NESTED);
-            builder.append_attr_u64(macsec_rxsc_attr::SCI, sci);
+            builder.append_attr(macsec_rxsc_attr::SCI, &sci.to_be_bytes());
             builder.append_attr_u8(macsec_rxsc_attr::ACTIVE, 1);
             builder.nest_end(rxsc_config);
         })
@@ -285,7 +285,7 @@ impl Connection<Macsec> {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
             let rxsc_config = builder.nest_start(macsec_attr::RXSC_CONFIG | NLA_F_NESTED);
-            builder.append_attr_u64(macsec_rxsc_attr::SCI, sci);
+            builder.append_attr(macsec_rxsc_attr::SCI, &sci.to_be_bytes());
             builder.nest_end(rxsc_config);
         })
         .await?;
@@ -312,7 +312,7 @@ impl Connection<Macsec> {
 
             // RX SC config with SCI
             let rxsc_config = builder.nest_start(macsec_attr::RXSC_CONFIG | NLA_F_NESTED);
-            builder.append_attr_u64(macsec_rxsc_attr::SCI, sci);
+            builder.append_attr(macsec_rxsc_attr::SCI, &sci.to_be_bytes());
             builder.nest_end(rxsc_config);
 
             // SA config
@@ -344,7 +344,7 @@ impl Connection<Macsec> {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
             let rxsc_config = builder.nest_start(macsec_attr::RXSC_CONFIG | NLA_F_NESTED);
-            builder.append_attr_u64(macsec_rxsc_attr::SCI, sci);
+            builder.append_attr(macsec_rxsc_attr::SCI, &sci.to_be_bytes());
             builder.nest_end(rxsc_config);
 
             let sa_config = builder.nest_start(macsec_attr::SA_CONFIG | NLA_F_NESTED);
@@ -368,7 +368,7 @@ impl Connection<Macsec> {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
             let rxsc_config = builder.nest_start(macsec_attr::RXSC_CONFIG | NLA_F_NESTED);
-            builder.append_attr_u64(macsec_rxsc_attr::SCI, sci);
+            builder.append_attr(macsec_rxsc_attr::SCI, &sci.to_be_bytes());
             builder.nest_end(rxsc_config);
 
             let sa_config = builder.nest_start(macsec_attr::SA_CONFIG | NLA_F_NESTED);
@@ -560,8 +560,10 @@ fn parse_device_attrs(data: &[u8], device: &mut MacsecDevice) -> Result<()> {
 fn parse_secy_config(data: &[u8], device: &mut MacsecDevice) -> Result<()> {
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
+            // `sci_t` is `__be64`: MAC then port, as `ip macsec` shows it
+            // (#516).
             t if t == macsec_secy_attr::SCI => {
-                device.sci = get::u64_ne(payload)?;
+                device.sci = get::u64_be(payload)?;
             }
             t if t == macsec_secy_attr::ENCODING_SA => {
                 device.encoding_sa = get::u8(payload)?;
@@ -660,7 +662,7 @@ fn parse_rxsc_attrs(data: &[u8]) -> Result<MacsecRxSc> {
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
             t if t == macsec_rxsc_attr::SCI => {
-                rxsc.sci = get::u64_ne(payload)?;
+                rxsc.sci = get::u64_be(payload)?;
             }
             t if t == macsec_rxsc_attr::ACTIVE => {
                 rxsc.active = get::u8(payload)? != 0;

@@ -1685,3 +1685,51 @@ async fn geneve_changes_in_place_and_recreates_for_the_vni() -> nlink::Result<()
     assert_ne!(ifindexes[1], ifindexes[2], "a new VNI recreates");
     Ok(())
 }
+
+/// A MACsec link A→B→C (#516): encryption, SCI inclusion and the replay
+/// window change in place (same ifindex); a new SCI, which
+/// `macsec_changelink` refuses, recreates it.
+#[tokio::test]
+async fn macsec_changes_in_place_and_recreates_for_the_sci() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "macsec");
+
+    let step = |sci: u64, encrypt: bool, protect: bool, window: u32| {
+        NetworkConfig::new().link("d0", |l| l.dummy().up()).link("ms1", move |l| {
+            l.macsec("d0")
+                .macsec_sci(sci)
+                .macsec_encrypt(encrypt)
+                .macsec_protect(protect)
+                .macsec_replay_window(window)
+        })
+    };
+    let (a, b) = (0x0200_0000_0001_0001u64, 0x0200_0000_0001_0002u64);
+    let steps = [step(a, true, true, 16), step(a, false, true, 64), step(b, false, true, 64)];
+    let want = [
+        ("0200000000010001", true, true, 16),
+        ("0200000000010001", false, true, 64),
+        ("0200000000010002", false, true, 64),
+    ];
+    let ns = TestNamespace::new("tr-macsec")?;
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let link = &ip_json(&ns, &["-d", "link", "show", "ms1"])?[0];
+        let data = &link["linkinfo"]["info_data"];
+        let have = (
+            data["sci"].as_str(),
+            data["encrypt"].as_bool(),
+            data["protect"].as_bool(),
+            data["window"].as_u64(),
+        );
+        let (sci, encrypt, protect, window) = want[i];
+        if have != (Some(sci), Some(encrypt), Some(protect), Some(window)) {
+            return Err(format!("step {}: want {:?}, have {have:?}", i + 1, want[i]));
+        }
+        ifindexes.push(link["ifindex"].as_u64());
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "encryption and the window change in place");
+    assert_ne!(ifindexes[1], ifindexes[2], "a new SCI recreates");
+    Ok(())
+}

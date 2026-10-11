@@ -1072,3 +1072,52 @@ async fn a_geneve_flow_label_is_the_one_asked_for() -> Result<()> {
     assert_eq!(data["label"], "0x12345", "{data}");
     Ok(())
 }
+
+/// A MACsec link's SCI and port reach the kernel as given (#516): both are
+/// big-endian on the wire (iproute2 sends the SCI with `get_be64`, the
+/// kernel reads the port with `nla_get_be16`). `0x0200000000010001` is MAC
+/// 02:00:00:00:00:01, port 1.
+#[tokio::test]
+async fn a_macsec_sci_and_port_are_the_ones_asked_for() -> Result<()> {
+    use nlink::netlink::link::MacsecLink;
+    require_root!();
+    nlink::require_modules!("dummy", "macsec");
+
+    let ns = TestNamespace::new("macsec-sci")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    conn.add_link(MacsecLink::new("ms0", "d0").sci(0x0200_0000_0001_0001)).await?;
+    conn.add_link(MacsecLink::new("ms1", "d0").port(7)).await?;
+    let data = |dev: &str| -> serde_json::Value {
+        let shown = ns.exec("ip", &["-d", "-j", "link", "show", dev]).expect("ip");
+        let v: serde_json::Value = serde_json::from_str(&shown).expect("ip -j");
+        v[0]["linkinfo"]["info_data"].clone()
+    };
+    assert_eq!(data("ms0")["sci"], "0200000000010001");
+    // The port is the SCI's last 16 bits when the kernel derives it.
+    let sci = data("ms1")["sci"].as_str().unwrap_or_default().to_string();
+    assert!(sci.ends_with("0007"), "port 7 in SCI {sci}");
+    Ok(())
+}
+
+/// The MACsec Generic Netlink API reads and writes an SCI as the kernel
+/// and `ip macsec` do: big-endian, MAC then port (#516). Its commands are
+/// `GENL_ADMIN_PERM`, checked against the initial user namespace.
+#[tokio::test]
+async fn the_macsec_genl_api_reads_and_writes_the_sci_as_the_kernel_does() -> Result<()> {
+    use nlink::netlink::link::MacsecLink;
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "macsec");
+
+    let ns = TestNamespace::new("macsec-genl")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    conn.add_link(MacsecLink::new("ms0", "d0").sci(0x0200_0000_0001_0001)).await?;
+    let genl = ns.connection_for_async::<nlink::netlink::Macsec>().await?;
+    assert_eq!(genl.get_device("ms0").await?.sci, 0x0200_0000_0001_0001);
+    genl.add_rx_sc("ms0", 0x0200_0000_0002_0001).await?;
+    let shown = ns.exec("ip", &["macsec", "show", "ms0"])?;
+    assert!(shown.contains("0200000000020001"), "{shown}");
+    Ok(())
+}
