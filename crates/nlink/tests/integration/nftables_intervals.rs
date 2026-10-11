@@ -183,3 +183,90 @@ async fn declared_ranges_converge_and_change_one_at_a_time() -> nlink::Result<()
     })
     .await
 }
+
+/// A range declared with its own timeout keeps it. The diff rebuilt
+/// interval elements from bare ranges, so the timeout was never sent and
+/// the range never timed out (#483).
+#[tokio::test]
+async fn a_declared_range_keeps_its_timeout() -> nlink::Result<()> {
+    use std::time::Duration;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-iv-timeout")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
+            t.set("r", |s| {
+                s.key_type(SetKeyType::Ipv4Addr)
+                    .interval()
+                    .per_element_timeouts()
+                    .element(
+                        SetElement::ipv4_range(
+                            Ipv4Addr::new(10, 0, 0, 1),
+                            Ipv4Addr::new(10, 0, 0, 9),
+                        )
+                        .with_timeout(Duration::from_secs(600)),
+                    )
+            })
+        });
+        cfg.diff(&conn).await?.apply(&conn).await?;
+        assert!(cfg.diff(&conn).await?.is_empty());
+        let shown = ns.exec("nft", &["list", "set", "ip", "t", "r"])?;
+        assert!(
+            shown.contains("timeout 10m"),
+            "the range has no timeout:\n{shown}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// In ensure mode a declared range that overlaps one added at runtime goes
+/// in as the part not already covered. The kernel refuses an overlapping
+/// range, so every apply failed (#483).
+#[tokio::test]
+async fn ensure_mode_adds_around_a_runtime_range() -> nlink::Result<()> {
+    use crate::common::converge::converges;
+    use nlink::netlink::nftables::config::SetElementMode;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-iv-ensure")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = |declared: bool| {
+            NftablesConfig::new().table("t", Family::Ip, move |t| {
+                t.set("r", move |s| {
+                    let s = s
+                        .key_type(SetKeyType::Ipv4Addr)
+                        .interval()
+                        .element_mode(SetElementMode::Ensure);
+                    if !declared {
+                        return s;
+                    }
+                    s.element(SetElement::ipv4_range(
+                        Ipv4Addr::new(10, 0, 0, 10),
+                        Ipv4Addr::new(10, 0, 0, 40),
+                    ))
+                })
+            })
+        };
+        cfg(false).diff(&conn).await?.apply(&conn).await?;
+        ns.exec(
+            "nft",
+            &["add", "element", "ip", "t", "r", "{ 10.0.0.0-10.0.0.20 }"],
+        )?;
+        if let Err(why) = converges(&conn, &cfg(true), false).await {
+            panic!("{why}");
+        }
+        for addr in ["10.0.0.0", "10.0.0.20", "10.0.0.21", "10.0.0.40"] {
+            ns.exec(
+                "nft",
+                &["get", "element", "ip", "t", "r", &format!("{{ {addr} }}")],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+}

@@ -2254,6 +2254,19 @@ impl Transaction {
         self
     }
 
+    /// Like [`del_set_elements`](Self::del_set_elements), but an element
+    /// that is already gone — one that timed out since it was read — is not
+    /// an error: `NFT_MSG_DESTROYSETELEM`, kernel 6.3+. Older kernels refuse
+    /// the whole batch; see [`kernel_has_destroy`].
+    pub fn destroy_set_elements(mut self, set: &Set, elements: &[SetElement]) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DESTROYSETELEM), NLM_F_REQUEST);
+        match append_set_elements(&mut builder, set, elements, ElementWrite::Delete) {
+            Ok(()) => self.push(builder),
+            Err(e) => self.defer(e),
+        }
+        self
+    }
+
     /// Add an object creation to the batch. Mirrors
     /// [`Connection::<Nftables>::add_object`](Connection).
     pub fn add_object(mut self, object: &Object) -> Self {
@@ -2586,6 +2599,32 @@ fn append_set_elements(
 }
 
 /// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
+/// Whether the running kernel has the `NFT_MSG_DESTROY*` messages (6.3+):
+/// deletes that take something already gone as deleted. Read from
+/// `uname(2)` once; a kernel that predates them refuses a batch that
+/// carries one.
+pub fn kernel_has_destroy() -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS.get_or_init(|| {
+        // SAFETY: `uname` fills the struct it is given, and a zeroed
+        // `utsname` is a valid one (all byte arrays).
+        let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+        if unsafe { libc::uname(&mut name) } != 0 {
+            return false;
+        }
+        let release: String = name
+            .release
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8 as char)
+            .collect();
+        let mut parts = release.split(|c: char| !c.is_ascii_digit());
+        let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        (major, minor) >= (6, 3)
+    })
+}
+
 /// A flowtable's devices: one `NFTA_DEVICE_NAME` each, directly in the
 /// `NFTA_FLOWTABLE_HOOK_DEVS` nest (`nf_tables_parse_netdev_hooks`). They
 /// were wrapped in an `NFTA_LIST_ELEM` nest, whose bytes the kernel read as

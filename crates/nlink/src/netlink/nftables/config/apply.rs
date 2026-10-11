@@ -191,8 +191,17 @@ impl NftablesDiff {
         // 2. Set-element removes, for sets that persist (a deleted set takes
         //    its elements). Before any delete: a verdict map's element holds
         //    its chain, an object map's element its object.
+        //    An element of a timeout set can expire between the diff and
+        //    this batch, and deleting it then is ENOENT for the whole batch;
+        //    on a kernel that has it, DESTROYSETELEM takes a gone element as
+        //    deleted (#483).
         for change in &self.set_elements_to_remove {
-            tx = tx.del_set_elements(&change.set, &change.elements);
+            let may_expire = change.set.flags.contains(super::super::SetFlags::TIMEOUT);
+            if may_expire && super::super::connection::kernel_has_destroy() {
+                tx = tx.destroy_set_elements(&change.set, &change.elements);
+            } else {
+                tx = tx.del_set_elements(&change.set, &change.elements);
+            }
         }
 
         // 3. Sets and objects recreated under the same name: deleted here,

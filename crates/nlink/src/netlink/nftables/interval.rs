@@ -161,12 +161,106 @@ pub(crate) fn element_of(range: &Range) -> SetElement {
     SetElement::range(range.0.clone(), range.1.clone())
 }
 
+/// [`canonicalize`], for elements: sort them, and merge ranges that overlap
+/// or touch when their timeouts agree. Each keeps its own timeout, which
+/// rebuilding the elements from bare ranges dropped, so a range declared
+/// with a timeout never timed out (#483). Ranges with different timeouts
+/// stay apart: touching, that is two elements; overlapping, the kernel
+/// refuses it, as it should.
+pub(crate) fn canonicalize_elements(elements: &[SetElement]) -> Vec<SetElement> {
+    let mut ranges: Vec<(Range, Option<std::time::Duration>)> = elements
+        .iter()
+        .map(|e| (range_of(e), e.timeout()))
+        .collect();
+    ranges.sort();
+    let mut out: Vec<(Range, Option<std::time::Duration>)> = Vec::with_capacity(ranges.len());
+    for ((start, end), timeout) in ranges {
+        if let Some(((_, last_end), last_timeout)) = out.last_mut()
+            && *last_timeout == timeout
+            && increment(last_end).is_none_or(|next| start <= next)
+        {
+            if end > *last_end {
+                *last_end = end;
+            }
+            continue;
+        }
+        out.push(((start, end), timeout));
+    }
+    out.into_iter()
+        .map(|(range, timeout)| {
+            let element = element_of(&range);
+            match timeout {
+                Some(t) => element.with_timeout(t),
+                None => element,
+            }
+        })
+        .collect()
+}
+
+/// The parts of `range` that no range in `held` covers. `held` must be
+/// [`canonicalize`]d: sorted, and not overlapping.
+pub(crate) fn subtract(range: &Range, held: &[Range]) -> Vec<Range> {
+    let mut out = Vec::new();
+    let mut from = Some(range.0.clone());
+    for (start, end) in held {
+        let Some(at) = from.clone() else { break };
+        if *end < at || *start > range.1 {
+            continue;
+        }
+        if *start > at
+            && let Some(before) = decrement(start)
+        {
+            out.push((at, before));
+        }
+        from = increment(end);
+    }
+    if let Some(at) = from
+        && at <= range.1
+    {
+        out.push((at, range.1.clone()));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn el(key: &[u8], end: bool) -> SetElement {
         SetElement::from_wire(key.to_vec(), if end { NFT_SET_ELEM_INTERVAL_END } else { 0 })
+    }
+
+    #[test]
+    fn subtract_leaves_the_uncovered_parts() {
+        let r = |a: u8, b: u8| (vec![a], vec![b]);
+        assert_eq!(subtract(&r(10, 50), &[r(20, 30)]), [r(10, 19), r(31, 50)]);
+        assert_eq!(subtract(&r(10, 50), &[r(0, 15), r(40, 60)]), [r(16, 39)]);
+        assert!(subtract(&r(10, 50), &[r(0, 255)]).is_empty());
+        assert_eq!(subtract(&r(10, 50), &[r(60, 70)]), [r(10, 50)]);
+        assert_eq!(subtract(&r(250, 255), &[r(240, 252)]), [r(253, 255)]);
+    }
+
+    #[test]
+    fn canonicalizing_elements_keeps_their_timeouts() {
+        use std::time::Duration;
+        let el = |a: u8, b: u8, t: Option<u64>| {
+            let e = SetElement::range(vec![a], vec![b]);
+            match t {
+                Some(t) => e.with_timeout(Duration::from_secs(t)),
+                None => e,
+            }
+        };
+        let out =
+            canonicalize_elements(&[el(10, 20, Some(60)), el(21, 30, Some(60)), el(31, 40, None)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            (range_of(&out[0]), out[0].timeout()),
+            ((vec![10], vec![30]), Some(Duration::from_secs(60)))
+        );
+        assert_eq!(
+            (range_of(&out[1]), out[1].timeout()),
+            ((vec![31], vec![40]), None)
+        );
     }
 
     #[test]
