@@ -666,24 +666,7 @@ impl Connection<Nl80211> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns"))]
     pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
-        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_SET_WIPHY, NL80211_GENL_VERSION);
-        builder.append(&genl_hdr);
-        builder.append_attr_u32(NL80211_ATTR_WIPHY, wiphy);
-        builder.append_attr_u32(NL80211_ATTR_NETNS_FD, netns_fd as u32);
-
-        let seq = self.socket().next_seq();
-
-        let mut session = self.recv_session(seq).await?;
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        self.wait_ack(&mut session, seq)
+        self.move_wiphy(wiphy, WiphyNetns::Fd(netns_fd))
             .await
             .map_err(|e| e.with_context("set_wiphy_netns"))
     }
@@ -694,26 +677,20 @@ impl Connection<Nl80211> {
     /// a namespace file descriptor.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns_pid"))]
     pub async fn set_wiphy_netns_pid(&self, wiphy: u32, pid: u32) -> Result<()> {
-        let family_id = self.state().family_id;
+        self.move_wiphy(wiphy, WiphyNetns::Pid(pid))
+            .await
+            .map_err(|e| e.with_context("set_wiphy_netns_pid"))
+    }
 
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
-        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_SET_WIPHY, NL80211_GENL_VERSION);
-        builder.append(&genl_hdr);
-        builder.append_attr_u32(NL80211_ATTR_WIPHY, wiphy);
-        builder.append_attr_u32(NL80211_ATTR_PID, pid);
-
+    async fn move_wiphy(&self, wiphy: u32, to: WiphyNetns) -> Result<()> {
+        let mut builder = wiphy_netns_request(self.state().family_id, wiphy, to);
         let seq = self.socket().next_seq();
-
         let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
-
         let msg = builder.finish();
         self.socket().send(&msg).await?;
-
-        self.wait_ack(&mut session, seq)
-            .await
-            .map_err(|e| e.with_context("set_wiphy_netns_pid"))
+        self.wait_ack(&mut session, seq).await
     }
 
     // =========================================================================
@@ -1992,5 +1969,65 @@ mod band_tests {
         assert!(freq.no_80mhz);
         assert!(!freq.no_160mhz);
         assert_eq!(freq.offset_khz, 500);
+    }
+}
+
+/// Where [`Connection::set_wiphy_netns`] and
+/// [`Connection::set_wiphy_netns_pid`] move a wiphy.
+#[derive(Clone, Copy)]
+enum WiphyNetns {
+    Fd(i32),
+    Pid(u32),
+}
+
+/// The request that moves a wiphy. It is `NL80211_CMD_SET_WIPHY_NETNS`, as
+/// `iw phy <phy> set netns` sends: `NL80211_CMD_SET_WIPHY` does not read the
+/// namespace attributes, so the move it was sent as was acked and did
+/// nothing (#604). Unverified on a live kernel: nothing here has a wiphy.
+fn wiphy_netns_request(family_id: u16, wiphy: u32, to: WiphyNetns) -> MessageBuilder {
+    let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+    builder.append(&GenlMsgHdr::new(
+        NL80211_CMD_SET_WIPHY_NETNS,
+        NL80211_GENL_VERSION,
+    ));
+    builder.append_attr_u32(NL80211_ATTR_WIPHY, wiphy);
+    match to {
+        WiphyNetns::Fd(fd) => builder.append_attr_u32(NL80211_ATTR_NETNS_FD, fd as u32),
+        WiphyNetns::Pid(pid) => builder.append_attr_u32(NL80211_ATTR_PID, pid),
+    }
+    builder
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The command byte after the 16-byte nlmsghdr, and the attributes
+    /// after the 4-byte genl header (#604).
+    #[test]
+    fn moving_a_wiphy_sends_set_wiphy_netns() {
+        let attrs = |to| {
+            let msg = wiphy_netns_request(0x1d, 3, to).finish();
+            assert_eq!(msg[16], NL80211_CMD_SET_WIPHY_NETNS, "the command");
+            let mut out = Vec::new();
+            let mut rest = &msg[20..];
+            while rest.len() >= 8 {
+                let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+                let kind = u16::from_ne_bytes([rest[2], rest[3]]);
+                let value = u32::from_ne_bytes([rest[4], rest[5], rest[6], rest[7]]);
+                out.push((kind, value));
+                rest = &rest[len.next_multiple_of(4).min(rest.len())..];
+            }
+            out
+        };
+        assert_eq!(NL80211_CMD_SET_WIPHY_NETNS, 49);
+        assert_eq!(
+            attrs(WiphyNetns::Fd(7)),
+            [(NL80211_ATTR_WIPHY, 3), (NL80211_ATTR_NETNS_FD, 7)]
+        );
+        assert_eq!(
+            attrs(WiphyNetns::Pid(4242)),
+            [(NL80211_ATTR_WIPHY, 3), (NL80211_ATTR_PID, 4242)]
+        );
     }
 }

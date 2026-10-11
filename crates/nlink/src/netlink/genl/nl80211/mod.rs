@@ -50,6 +50,8 @@ pub const NL80211_GENL_VERSION: u8 = 1;
 
 pub const NL80211_CMD_GET_WIPHY: u8 = 1;
 pub const NL80211_CMD_SET_WIPHY: u8 = 2;
+/// Move a wiphy to another network namespace (`iw phy <phy> set netns`).
+pub const NL80211_CMD_SET_WIPHY_NETNS: u8 = 49;
 pub const NL80211_CMD_GET_INTERFACE: u8 = 5;
 pub const NL80211_CMD_GET_KEY: u8 = 9;
 pub const NL80211_CMD_GET_STATION: u8 = 17;
