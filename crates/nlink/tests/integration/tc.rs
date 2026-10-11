@@ -661,6 +661,92 @@ async fn replace_qdisc_handles_whatever_is_in_the_slot() -> Result<()> {
     Ok(())
 }
 
+/// fq_codel and sfq report every flow with packets queued as a class of
+/// their own. The same-kind recreate in `replace_qdisc` refuses to drop
+/// classes, which is right for an HTB tree (below) but meant that a
+/// `flows` change, or any sfq change (sfq can only be recreated), failed
+/// whenever traffic was queued (#596).
+#[tokio::test]
+async fn replace_qdisc_recreates_flow_queues_under_load() -> Result<()> {
+    use std::net::SocketAddr;
+
+    use nlink::Rate;
+    use nlink::netlink::tc::{HtbClassConfig, HtbQdiscConfig, SfqConfig};
+    use nlink::netlink::tc_options::QdiscOptions;
+
+    use crate::common::{
+        topo::NsPair,
+        traffic::{ping, send_udp},
+    };
+    require_root!();
+    nlink::require_modules!("sch_htb", "sch_fq_codel", "sch_sfq", "veth");
+
+    let pair = NsPair::new("flowq", 66).await?;
+    assert!(ping(&pair.a, pair.b_addr.into(), 1), "the pair must route");
+    let conn = pair.a.connection()?;
+    let one = TcHandle::major_only(1);
+    let class = TcHandle::new(1, 1);
+    let leaf = Some(TcHandle::major_only(0x10));
+    conn.add_qdisc_full(
+        pair.a_if,
+        TcHandle::ROOT,
+        Some(one),
+        HtbQdiscConfig::new().default_class(1),
+    )
+    .await?;
+    // 8 kbit drains about 20 small datagrams a second, so a burst of 250
+    // stays queued for the rest of the test.
+    conn.add_class(
+        pair.a_if,
+        one,
+        class,
+        HtbClassConfig::new(Rate::kbit(8)).build(),
+    )
+    .await?;
+
+    let dst = SocketAddr::new(pair.b_addr.into(), 9);
+    let queue_traffic = async || -> Result<usize> {
+        assert_eq!(send_udp(&pair.a, &[dst], 250), 250);
+        let flows = conn
+            .get_classes_by_name(pair.a_if)
+            .await?
+            .iter()
+            .filter(|c| c.handle().major() == 0x10)
+            .count();
+        assert!(flows > 0, "the leaf should hold a queued flow");
+        Ok(flows)
+    };
+    let leaf_options = async || -> Result<Option<QdiscOptions>> {
+        Ok(conn
+            .get_qdiscs_by_name(pair.a_if)
+            .await?
+            .into_iter()
+            .find(|q| q.parent() == class)
+            .and_then(|q| q.options()))
+    };
+
+    conn.add_qdisc_full(pair.a_if, class, leaf, FqCodelConfig::new().flows(1024))
+        .await?;
+    queue_traffic().await?;
+    conn.replace_qdisc_full(pair.a_if, class, leaf, FqCodelConfig::new().flows(2048))
+        .await?;
+    match leaf_options().await? {
+        Some(QdiscOptions::FqCodel(o)) => assert_eq!(o.flows, 2048),
+        other => panic!("expected the fq_codel leaf, got {other:?}"),
+    }
+
+    conn.replace_qdisc_full(pair.a_if, class, leaf, SfqConfig::new())
+        .await?;
+    queue_traffic().await?;
+    conn.replace_qdisc_full(pair.a_if, class, leaf, SfqConfig::new().limit(100))
+        .await?;
+    match leaf_options().await? {
+        Some(QdiscOptions::Sfq(o)) => assert_eq!(o.limit, 100),
+        other => panic!("expected the sfq leaf, got {other:?}"),
+    }
+    Ok(())
+}
+
 /// A same-kind replace of an HTB that has classes would delete them; it is
 /// refused, and the classes stay (#486).
 #[tokio::test]
