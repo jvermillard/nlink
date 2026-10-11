@@ -62,14 +62,15 @@ use super::{
     Connection,
     error::{Error, Result},
     link::IfbLink,
-    messages::TcMessage,
+    messages::{LinkMessage, TcMessage},
     protocol::Route,
     tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig},
     tc_handle::{FilterPriority, TcHandle},
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
         DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_classid,
-        flower_matches, fq_codel_target_matches, htb_class_rates_match, root_conflict,
+        flower_matches, fq_codel_target_matches, htb_class_matches, htb_class_rates_match,
+        root_conflict,
     },
 };
 
@@ -226,22 +227,24 @@ impl RateLimiter {
         self
     }
 
-    /// Apply the rate limits.
+    /// Apply the rate limits: build this limiter's trees from scratch.
     ///
-    /// This configures the TC (Traffic Control) subsystem to enforce the
-    /// specified rate limits.
+    /// Egress replaces the interface's root qdisc. Ingress hangs its
+    /// redirect off the interface's `clsact` or `ingress` hook — adding an
+    /// `ingress` qdisc if there is neither, never deleting one, so the
+    /// programs on a clsact stay (#490) — and shapes on this limiter's IFB
+    /// (see [`remove`](Self::remove) for what makes it this limiter's).
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, egress = self.egress.is_some(), ingress = self.ingress.is_some()))]
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
-        // Apply egress rate limiting
-        if let Some(ref egress) = self.egress {
-            self.apply_egress(conn, egress).await?;
+        let ifindex = self.ifindex(conn).await?;
+        if let Some(egress) = &self.egress {
+            build_htb(conn, ifindex, egress)
+                .await
+                .map_err(|e| e.with_context(format!("RateLimiter::apply({}): egress", self.dev)))?;
         }
-
-        // Apply ingress rate limiting
-        if let Some(ref ingress) = self.ingress {
-            self.apply_ingress(conn, ingress).await?;
+        if let Some(ingress) = &self.ingress {
+            self.apply_ingress(conn, ifindex, ingress).await?;
         }
-
         Ok(())
     }
 
@@ -260,6 +263,12 @@ impl RateLimiter {
     /// helper installs), reconcile errors by default; pass
     /// [`ReconcileOptions::with_fallback_to_apply`]`(true)` to trigger
     /// a destructive rebuild via [`apply()`](Self::apply) instead.
+    ///
+    /// A direction this limiter no longer declares is taken down, if what
+    /// is there is this limiter's (see [`remove`](Self::remove)); it used
+    /// to stay (#490). The burst and the AQM target are compared too: a
+    /// burst or latency dropped from the declaration goes back to the
+    /// default.
     ///
     /// The ingress redirect is checked for what it does: a matchall with a
     /// mirred **egress** redirect to this limiter's IFB. Anything else that
@@ -288,110 +297,126 @@ impl RateLimiter {
         conn: &Connection<Route>,
         opts: ReconcileOptions,
     ) -> Result<ReconcileReport> {
-        let link = conn
-            .get_link_by_name(&self.dev)
-            .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?;
-        let ifindex = link.ifindex();
-
+        let ifindex = self.ifindex(conn).await?;
         let mut report = ReconcileReport {
             dry_run: opts.dry_run,
             ..ReconcileReport::default()
         };
 
         // Egress half: HTB shape directly on the interface.
-        if let Some(egress) = &self.egress {
-            let rebuilt = self
-                .reconcile_htb_shape(conn, ifindex, egress, &opts, &mut report, "egress")
-                .await?;
-            if rebuilt {
-                return Ok(report);
-            }
-        }
-
-        // Ingress half: IFB device + ingress hook + redirect + HTB
-        // shape on the IFB.
-        if let Some(ingress) = &self.ingress {
-            let ifb_name = self.ifb_name();
-            let ifb_ifindex = match conn.get_link_by_name(&ifb_name).await? {
-                Some(l) => {
-                    if !l.is_up() {
-                        if !opts.dry_run {
-                            conn.set_link_up_by_index(l.ifindex()).await?;
-                        }
-                        report.changes_made += 1;
-                    }
-                    Some(l.ifindex())
-                }
-                None => {
-                    if opts.dry_run {
-                        // Whole ingress branch pending: link + up +
-                        // shape (root, 1:1, 1:10, leaf). The hook +
-                        // filter are counted below.
-                        report.changes_made += 6;
-                        report.root_modified = true;
-                        None
-                    } else {
-                        conn.add_link(IfbLink::new(&ifb_name)).await?;
-                        conn.set_link_up(&ifb_name).await?;
-                        report.changes_made += 2;
-                        Some(
-                            conn.get_link_by_name(&ifb_name)
-                                .await?
-                                .ok_or_else(|| {
-                                    Error::InvalidMessage(format!(
-                                        "IFB device vanished after creation: {ifb_name}"
-                                    ))
-                                })?
-                                .ifindex(),
-                        )
-                    }
-                }
-            };
-
-            // Ingress hook qdisc on the main interface.
-            let has_ingress_hook = conn
-                .get_qdiscs_by_index(ifindex)
-                .await?
-                .iter()
-                .any(|q| q.kind() == Some("ingress"));
-            if !has_ingress_hook {
-                if !opts.dry_run {
-                    conn.add_qdisc_full(&self.dev, TcHandle::INGRESS, None, IngressConfig::new())
-                        .await?;
-                }
-                report.changes_made += 1;
-            }
-
-            // The redirect at the ingress hook: the matchall *egress*
-            // redirect to this IFB. Presence alone was checked, so an
-            // ingress-direction redirect — which every release before 0.31
-            // installed, and which drops everything (#458) — read as
-            // converged.
-            let redirect = match ifb_ifindex {
-                Some(ifb) if has_ingress_hook => ifb_redirect_state(conn, ifindex, ifb).await?,
-                _ => IfbRedirect::Replace(Vec::new()),
-            };
-            if let IfbRedirect::Replace(wrong) = redirect {
-                if !opts.dry_run {
-                    for (protocol, priority) in wrong {
-                        conn.del_filter_by_index(ifindex, TcHandle::INGRESS, protocol, priority)
-                            .await?;
-                    }
-                    self.add_ingress_redirect(conn, &ifb_name).await?;
-                }
-                report.changes_made += 1;
-            }
-
-            // HTB shape on the IFB side (skipped in dry-run when the
-            // IFB doesn't exist yet — already counted above).
-            if let Some(ifb_ifindex) = ifb_ifindex {
+        match &self.egress {
+            Some(egress) => {
                 let rebuilt = self
-                    .reconcile_htb_shape(conn, ifb_ifindex, ingress, &opts, &mut report, "ingress")
+                    .reconcile_htb_shape(conn, ifindex, egress, &opts, &mut report, "egress")
                     .await?;
                 if rebuilt {
                     return Ok(report);
                 }
+            }
+            None => {
+                if owns_root(conn, ifindex).await? {
+                    if !opts.dry_run {
+                        gone_is_ok(conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await)?;
+                    }
+                    report.changes_made += 1;
+                    report.root_modified = true;
+                }
+            }
+        }
+
+        let Some(ingress) = &self.ingress else {
+            // The ingress half left the declaration: what of it is this
+            // limiter's goes.
+            if matches!(self.find_ifb(conn).await?, Ifb::Ours(_)) {
+                if !opts.dry_run {
+                    self.remove_ingress(conn).await?;
+                }
+                report.changes_made += 1;
+                report.root_modified = true;
+            }
+            return Ok(report);
+        };
+
+        // Ingress half: this limiter's IFB, the hook, the redirect, and the
+        // HTB shape on the IFB.
+        let tag = self.ifb_tag();
+        let ifb_ifindex = match self.owned_ifb(conn).await? {
+            Some(l) => {
+                if l.alias() != Some(tag.as_str()) {
+                    if !opts.dry_run {
+                        conn.set_link_alias_by_index(l.ifindex(), &tag).await?;
+                    }
+                    report.changes_made += 1;
+                }
+                if !l.is_up() {
+                    if !opts.dry_run {
+                        conn.set_link_up_by_index(l.ifindex()).await?;
+                    }
+                    report.changes_made += 1;
+                }
+                Some(l.ifindex())
+            }
+            None if opts.dry_run => {
+                // Whole ingress branch pending: link + tag + up + shape
+                // (root, 1:1, 1:10, leaf). The hook and filter are counted
+                // below.
+                report.changes_made += 7;
+                report.root_modified = true;
+                None
+            }
+            None => {
+                let ifb = self.create_ifb(conn).await?;
+                report.changes_made += 3;
+                Some(ifb)
+            }
+        };
+
+        // The hook on the main interface: a clsact's ingress if there is
+        // one, else an ingress qdisc, added if missing.
+        let hook = match live_ingress_hook(&conn.get_qdiscs_by_index(ifindex).await?) {
+            Some(hook) => Some(hook),
+            None => {
+                if !opts.dry_run {
+                    conn.add_qdisc_by_index_full(
+                        ifindex,
+                        TcHandle::INGRESS,
+                        None,
+                        IngressConfig::new(),
+                    )
+                    .await?;
+                }
+                report.changes_made += 1;
+                (!opts.dry_run).then_some(TcHandle::INGRESS)
+            }
+        };
+
+        // The redirect at the hook: the matchall *egress* redirect to this
+        // IFB. Presence alone was checked, so an ingress-direction
+        // redirect — which every release before 0.31 installed, and which
+        // drops everything (#458) — read as converged.
+        let redirect = match (ifb_ifindex, hook) {
+            (Some(ifb), Some(hook)) => ifb_redirect_state(conn, ifindex, hook, ifb).await?,
+            _ => IfbRedirect::Replace(Vec::new()),
+        };
+        if let IfbRedirect::Replace(wrong) = redirect {
+            if let (false, Some(ifb), Some(hook)) = (opts.dry_run, ifb_ifindex, hook) {
+                for (protocol, priority) in wrong {
+                    conn.del_filter_by_index(ifindex, hook, protocol, priority)
+                        .await?;
+                }
+                add_ifb_redirect(conn, ifindex, hook, ifb).await?;
+            }
+            report.changes_made += 1;
+        }
+
+        // HTB shape on the IFB side (skipped in dry-run when the IFB
+        // doesn't exist yet — already counted above).
+        if let Some(ifb_ifindex) = ifb_ifindex {
+            let rebuilt = self
+                .reconcile_htb_shape(conn, ifb_ifindex, ingress, &opts, &mut report, "ingress")
+                .await?;
+            if rebuilt {
+                return Ok(report);
             }
         }
 
@@ -418,26 +443,8 @@ impl RateLimiter {
         let class_1_1 = TcHandle::new(1, 1);
         let class_1_10 = TcHandle::new(1, LEAF_CLASS_MINOR);
         let leaf_handle = TcHandle::major_only(LEAF_CLASS_MINOR);
-        let rate = limit.rate;
-        let ceil = limit.ceil.unwrap_or(limit.rate);
-        let rate_bps = rate.as_bytes_per_sec();
-        let ceil_bps = ceil.as_bytes_per_sec();
+        let (outer, leaf_class) = limit_classes(limit);
         let target_us = limit.latency.map(|d| d.as_micros() as u32);
-
-        let class_cfg = || {
-            let mut cfg = HtbClassConfig::new(rate).ceil(ceil);
-            if let Some(burst) = limit.burst {
-                cfg = cfg.burst(burst);
-            }
-            cfg.build()
-        };
-        let leaf_cfg = || {
-            let mut cfg = FqCodelConfig::new();
-            if let Some(latency) = limit.latency {
-                cfg = cfg.target(latency);
-            }
-            cfg.build()
-        };
 
         // Root HTB.
         match tree.configured_root_qdisc() {
@@ -475,11 +482,14 @@ impl RateLimiter {
         }
 
         // Classes 1:1 and 1:10.
-        for (classid, parent) in [(class_1_1, root_handle), (class_1_10, class_1_1)] {
+        for (classid, parent, cfg) in [
+            (class_1_1, root_handle, &outer),
+            (class_1_10, class_1_1, &leaf_class),
+        ] {
             match tree.class(classid) {
                 None => {
                     if !opts.dry_run {
-                        conn.add_class_by_index(ifindex, parent, classid, class_cfg())
+                        conn.add_class_by_index(ifindex, parent, classid, cfg.clone())
                             .await
                             .map_err(|e| {
                                 e.with_context(format!(
@@ -489,9 +499,9 @@ impl RateLimiter {
                     }
                     report.changes_made += 1;
                 }
-                Some(c) if !htb_class_rates_match(c, rate_bps, ceil_bps) => {
+                Some(c) if !htb_class_matches(c, cfg) => {
                     if !opts.dry_run {
-                        conn.change_class_by_index(ifindex, parent, classid, class_cfg())
+                        conn.change_class_by_index(ifindex, parent, classid, cfg.clone())
                             .await
                             .map_err(|e| {
                                 e.with_context(format!(
@@ -509,13 +519,16 @@ impl RateLimiter {
         match tree.leaf_for(class_1_10) {
             None => {
                 if !opts.dry_run {
-                    conn.add_qdisc_by_index_full(ifindex, class_1_10, Some(leaf_handle), leaf_cfg())
-                        .await
-                        .map_err(|e| {
-                            e.with_context(format!(
-                                "RateLimiter::reconcile({ctx}): add fq_codel leaf"
-                            ))
-                        })?;
+                    conn.add_qdisc_by_index_full(
+                        ifindex,
+                        class_1_10,
+                        Some(leaf_handle),
+                        leaf_config(limit),
+                    )
+                    .await
+                    .map_err(|e| {
+                        e.with_context(format!("RateLimiter::reconcile({ctx}): add fq_codel leaf"))
+                    })?;
                 }
                 report.changes_made += 1;
             }
@@ -525,7 +538,7 @@ impl RateLimiter {
                         ifindex,
                         class_1_10,
                         Some(leaf_handle),
-                        leaf_cfg(),
+                        leaf_config(limit),
                     )
                     .await
                     .map_err(|e| {
@@ -542,20 +555,146 @@ impl RateLimiter {
         Ok(false)
     }
 
-    /// Remove all rate limits from the interface.
+    /// Remove this limiter from the interface: [`remove_egress`] and
+    /// [`remove_ingress`].
+    ///
+    /// Only what this limiter built goes: the root qdisc only when it is
+    /// the HTB `1:` with this limiter's default class, the IFB only when it
+    /// is an IFB carrying this limiter's tag as its alias (or, as every
+    /// release before 0.31 left it, untagged), the redirect to it, and the
+    /// `ingress` qdisc once nothing else is on it — never a `clsact`. It
+    /// used to delete whatever root and ingress qdiscs were there,
+    /// another recipe's or a clsact with its BPF programs, and to throw
+    /// every error away (#490). Something already gone is not an error.
+    ///
+    /// [`remove_egress`]: Self::remove_egress
+    /// [`remove_ingress`]: Self::remove_ingress
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
-        // Remove egress qdisc (this removes all egress TC config)
-        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
+        self.remove_egress(conn).await?;
+        self.remove_ingress(conn).await
+    }
 
-        // Remove ingress qdisc
-        let _ = conn.del_qdisc(&self.dev, TcHandle::INGRESS).await;
-
-        // Remove IFB device if it exists
-        let ifb_name = self.ifb_name();
-        let _ = conn.del_link(&ifb_name).await;
-
+    /// Remove the egress half: the interface's root qdisc, if it is this
+    /// limiter's. See [`remove`](Self::remove).
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
+    pub async fn remove_egress(&self, conn: &Connection<Route>) -> Result<()> {
+        let Some(link) = conn.get_link_by_name(&self.dev).await? else {
+            return Ok(());
+        };
+        if owns_root(conn, link.ifindex()).await? {
+            gone_is_ok(
+                conn.del_qdisc_by_index(link.ifindex(), TcHandle::ROOT)
+                    .await,
+            )?;
+        }
         Ok(())
+    }
+
+    /// Remove the ingress half: the redirect to this limiter's IFB, the
+    /// `ingress` qdisc if nothing else is on it, and the IFB. See
+    /// [`remove`](Self::remove).
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
+    pub async fn remove_ingress(&self, conn: &Connection<Route>) -> Result<()> {
+        // A device of the name that is not this limiter's is left alone.
+        let ifb = match self.find_ifb(conn).await? {
+            Ifb::Ours(link) => Some(*link),
+            Ifb::Missing | Ifb::Foreign(_) => None,
+        };
+        if let Some(link) = conn.get_link_by_name(&self.dev).await? {
+            let ifindex = link.ifindex();
+            if let Some(hook) = live_ingress_hook(&conn.get_qdiscs_by_index(ifindex).await?) {
+                if let Some(ifb) = &ifb {
+                    for (protocol, priority) in
+                        redirects_to(conn, ifindex, hook, ifb.ifindex()).await?
+                    {
+                        gone_is_ok(
+                            conn.del_filter_by_index(ifindex, hook, protocol, priority)
+                                .await,
+                        )?;
+                    }
+                }
+                let empty = conn
+                    .get_filters_by_parent_index(ifindex, hook)
+                    .await?
+                    .is_empty();
+                if hook == TcHandle::INGRESS && empty {
+                    gone_is_ok(conn.del_qdisc_by_index(ifindex, TcHandle::INGRESS).await)?;
+                }
+            }
+        }
+        if let Some(ifb) = ifb {
+            gone_is_ok(conn.del_link_by_index(ifb.ifindex()).await)?;
+        }
+        Ok(())
+    }
+
+    async fn ifindex(&self, conn: &Connection<Route>) -> Result<u32> {
+        Ok(conn
+            .get_link_by_name(&self.dev)
+            .await?
+            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?
+            .ifindex())
+    }
+
+    /// The tag that marks this limiter's IFB: its alias.
+    fn ifb_tag(&self) -> String {
+        format!("nlink:ratelimit:{}", self.dev)
+    }
+
+    /// This limiter's IFB, if it exists.
+    ///
+    /// A device of that name that is not an IFB, or an IFB another limiter
+    /// tagged — the name of a long interface is cut and hashed, so two can
+    /// share one — is an error, not something to reuse or delete (#490).
+    /// An untagged IFB of the name, which every release before 0.31 built,
+    /// is taken as this limiter's.
+    async fn owned_ifb(&self, conn: &Connection<Route>) -> Result<Option<LinkMessage>> {
+        match self.find_ifb(conn).await? {
+            Ifb::Missing => Ok(None),
+            Ifb::Ours(link) => Ok(Some(*link)),
+            Ifb::Foreign(why) => Err(Error::InvalidMessage(format!(
+                "RateLimiter({}): {why}; it will not use or delete it",
+                self.dev
+            ))),
+        }
+    }
+
+    /// What goes by this limiter's IFB name.
+    async fn find_ifb(&self, conn: &Connection<Route>) -> Result<Ifb> {
+        let name = self.ifb_name();
+        let Some(link) = conn.get_link_by_name(&name).await? else {
+            return Ok(Ifb::Missing);
+        };
+        if link.kind() != Some("ifb") {
+            let kind = link.kind().unwrap_or("a device without a kind").to_string();
+            return Ok(Ifb::Foreign(format!(
+                "{name} exists and is {kind}, not an IFB"
+            )));
+        }
+        Ok(match link.alias() {
+            Some(tag) if tag != self.ifb_tag() => {
+                Ifb::Foreign(format!("IFB {name} is tagged `{tag}`, not this limiter's"))
+            }
+            _ => Ifb::Ours(Box::new(link)),
+        })
+    }
+
+    /// Create this limiter's IFB, tag it and bring it up; its ifindex.
+    async fn create_ifb(&self, conn: &Connection<Route>) -> Result<u32> {
+        let name = self.ifb_name();
+        conn.add_link(IfbLink::new(&name)).await?;
+        let ifindex = conn
+            .get_link_by_name(&name)
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidMessage(format!("IFB device vanished after creation: {name}"))
+            })?
+            .ifindex();
+        conn.set_link_alias_by_index(ifindex, &self.ifb_tag())
+            .await?;
+        conn.set_link_up_by_index(ifindex).await?;
+        Ok(ifindex)
     }
 
     /// Get the IFB device name for this interface.
@@ -571,7 +710,8 @@ impl RateLimiter {
     ///
     /// Long names now get a hash suffix instead of a bare prefix: the
     /// collision needs the full name to match, not the first eleven
-    /// bytes, and the slice lands on a char boundary by construction.
+    /// bytes, and the slice lands on a char boundary by construction. A
+    /// 16-bit hash can still collide, which the IFB's tag catches (#490).
     fn ifb_name(&self) -> String {
         const IFNAMSIZ: usize = 15; // 16 including the NUL
         const PREFIX: &str = "ifb_";
@@ -606,176 +746,172 @@ impl RateLimiter {
         format!("{PREFIX}{}_{hash:04x}", &self.dev[..cut])
     }
 
-    /// Apply egress rate limiting using HTB.
-    async fn apply_egress(&self, conn: &Connection<Route>, limit: &RateLimit) -> Result<()> {
-        // Remove existing root qdisc (ignore errors if none exists)
-        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
+    /// Build the ingress half from scratch: this limiter's IFB (created or
+    /// adopted, tagged and up), the redirect on the interface's hook, and
+    /// the HTB tree on the IFB.
+    async fn apply_ingress(
+        &self,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        limit: &RateLimit,
+    ) -> Result<()> {
+        let ifb = match self.owned_ifb(conn).await? {
+            Some(l) => {
+                if l.alias() != Some(self.ifb_tag().as_str()) {
+                    conn.set_link_alias_by_index(l.ifindex(), &self.ifb_tag())
+                        .await?;
+                }
+                conn.set_link_up_by_index(l.ifindex()).await?;
+                l.ifindex()
+            }
+            None => self.create_ifb(conn).await?,
+        };
 
-        // Add HTB qdisc at root with handle 1:
-        let htb = HtbQdiscConfig::new().default_class(LEAF_CLASS_MINOR as u32).build();
-        conn.add_qdisc_full(
-            &self.dev,
-            TcHandle::ROOT,
-            Some(TcHandle::major_only(1)),
-            htb,
-        )
-        .await?;
-
-        // Add root class (1:1) for the rate limit
-        let mut class_config = HtbClassConfig::new(limit.rate);
-        if let Some(ceil) = limit.ceil {
-            class_config = class_config.ceil(ceil);
+        // The hook: a clsact's ingress if the interface has one — never
+        // replaced (#490) — else an ingress qdisc, added if missing. The
+        // old code deleted whatever sat at `ffff:` first, and a clsact sits
+        // there too.
+        let hook = match live_ingress_hook(&conn.get_qdiscs_by_index(ifindex).await?) {
+            Some(hook) => hook,
+            None => {
+                conn.add_qdisc_by_index_full(
+                    ifindex,
+                    TcHandle::INGRESS,
+                    None,
+                    IngressConfig::new(),
+                )
+                .await?;
+                TcHandle::INGRESS
+            }
+        };
+        for (protocol, priority) in redirects_to(conn, ifindex, hook, ifb).await? {
+            conn.del_filter_by_index(ifindex, hook, protocol, priority)
+                .await?;
         }
-        if let Some(burst) = limit.burst {
-            class_config = class_config.burst(burst);
-        }
-        conn.add_class(
-            &self.dev,
-            TcHandle::major_only(1),
-            TcHandle::new(1, 1),
-            class_config.build(),
-        )
-        .await?;
-
-        // Add default class (1:10) under the root class
-        let mut default_config = HtbClassConfig::new(limit.rate);
-        if let Some(ceil) = limit.ceil {
-            default_config = default_config.ceil(ceil);
-        }
-        if let Some(burst) = limit.burst {
-            default_config = default_config.burst(burst);
-        }
-        conn.add_class(
-            &self.dev,
-            TcHandle::new(1, 1),
-            TcHandle::new(1, LEAF_CLASS_MINOR),
-            default_config.build(),
-        )
-        .await?;
-
-        // Add fq_codel as leaf qdisc for AQM
-        let mut fq_codel = FqCodelConfig::new();
-        if let Some(latency) = limit.latency {
-            fq_codel = fq_codel.target(latency);
-        }
-        conn.add_qdisc_full(
-            &self.dev,
-            TcHandle::new(1, LEAF_CLASS_MINOR),
-            Some(TcHandle::major_only(LEAF_CLASS_MINOR)),
-            fq_codel.build(),
-        )
-        .await?;
-
-        Ok(())
+        add_ifb_redirect(conn, ifindex, hook, ifb).await?;
+        build_htb(conn, ifb, limit)
+            .await
+            .map_err(|e| e.with_context(format!("RateLimiter::apply({}): ingress", self.dev)))
     }
+}
 
-    /// Apply ingress rate limiting using IFB.
-    async fn apply_ingress(&self, conn: &Connection<Route>, limit: &RateLimit) -> Result<()> {
-        let ifb_name = self.ifb_name();
+/// What goes by a `RateLimiter`'s IFB name.
+enum Ifb {
+    Missing,
+    /// An IFB with this limiter's tag, or none.
+    Ours(Box<LinkMessage>),
+    /// Something else; why it is not this limiter's.
+    Foreign(String),
+}
 
-        // Create IFB device if it doesn't exist
-        if conn.get_link_by_name(&ifb_name).await?.is_none() {
-            conn.add_link(IfbLink::new(&ifb_name)).await?;
-        }
+/// The classes a limit builds. `1:1` sits straight under the qdisc, so it
+/// has no parent to borrow from and can never pass its own rate: with
+/// `rate R, ceil C` there, the leaf's ceiling was out of reach and
+/// [`RateLimiter::burst_to`] did nothing (measured: 1.1 Mbit/s through a
+/// `1mbit`-to-`8mbit` limiter). `1:1` takes the ceiling as its rate; the
+/// leaf `1:10` is guaranteed the rate and borrows up to the ceiling
+/// (#490).
+fn limit_classes(limit: &RateLimit) -> (HtbClassConfig, HtbClassConfig) {
+    let ceil = limit.ceil.unwrap_or(limit.rate);
+    let with_burst = |cfg: HtbClassConfig| match limit.burst {
+        Some(burst) => cfg.burst(burst),
+        None => cfg,
+    };
+    (
+        with_burst(HtbClassConfig::new(ceil).ceil(ceil)).build(),
+        with_burst(HtbClassConfig::new(limit.rate).ceil(ceil)).build(),
+    )
+}
 
-        // Bring IFB device up
-        conn.set_link_up(&ifb_name).await?;
+/// An fq_codel leaf with `latency` as its target, or the kernel's default,
+/// 5 ms, sent explicitly: a replace keeps every attribute it is not sent, so
+/// a latency dropped from a recipe stayed (#490).
+fn fq_codel_leaf(latency: Option<Duration>) -> FqCodelConfig {
+    FqCodelConfig::new().target(latency.unwrap_or(Duration::from_millis(5)))
+}
 
-        // Remove existing ingress qdisc on the main interface
-        let _ = conn.del_qdisc(&self.dev, TcHandle::INGRESS).await;
+/// The fq_codel leaf a limit builds under `1:10`.
+fn leaf_config(limit: &RateLimit) -> FqCodelConfig {
+    fq_codel_leaf(limit.latency).build()
+}
 
-        // Add ingress qdisc to the main interface
-        conn.add_qdisc_full(&self.dev, TcHandle::INGRESS, None, IngressConfig::new())
-            .await?;
-
-        // Add filter to redirect ingress traffic to IFB
-        // We need to use a filter with mirred action
-        self.add_ingress_redirect(conn, &ifb_name).await?;
-
-        // Now configure HTB on the IFB device
-        // Remove existing root qdisc on IFB
-        let _ = conn.del_qdisc(&ifb_name, TcHandle::ROOT).await;
-
-        // Add HTB qdisc at root of IFB with handle 1:
-        let htb = HtbQdiscConfig::new().default_class(LEAF_CLASS_MINOR as u32).build();
-        conn.add_qdisc_full(
-            &ifb_name,
-            TcHandle::ROOT,
-            Some(TcHandle::major_only(1)),
-            htb,
-        )
+/// Build a limit's tree on a device from scratch: HTB `1:` (default class
+/// `0x10`), `1:1`, `1:10`, and the fq_codel leaf `10:`.
+async fn build_htb(conn: &Connection<Route>, ifindex: u32, limit: &RateLimit) -> Result<()> {
+    // Whatever is at the root goes; if it cannot, the add says why.
+    let _ = conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await;
+    let htb = HtbQdiscConfig::new()
+        .default_class(LEAF_CLASS_MINOR as u32)
+        .build();
+    conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
-
-        // Add root class (1:1) for the rate limit
-        let mut class_config = HtbClassConfig::new(limit.rate);
-        if let Some(ceil) = limit.ceil {
-            class_config = class_config.ceil(ceil);
-        }
-        if let Some(burst) = limit.burst {
-            class_config = class_config.burst(burst);
-        }
-        conn.add_class(
-            &ifb_name,
-            TcHandle::major_only(1),
-            TcHandle::new(1, 1),
-            class_config.build(),
-        )
+    let (outer, leaf_class) = limit_classes(limit);
+    conn.add_class_by_index(ifindex, TcHandle::major_only(1), TcHandle::new(1, 1), outer)
         .await?;
+    conn.add_class_by_index(
+        ifindex,
+        TcHandle::new(1, 1),
+        TcHandle::new(1, LEAF_CLASS_MINOR),
+        leaf_class,
+    )
+    .await?;
+    conn.add_qdisc_by_index_full(
+        ifindex,
+        TcHandle::new(1, LEAF_CLASS_MINOR),
+        Some(TcHandle::major_only(LEAF_CLASS_MINOR)),
+        leaf_config(limit),
+    )
+    .await
+}
 
-        // Add default class (1:10) under the root class
-        let mut default_config = HtbClassConfig::new(limit.rate);
-        if let Some(ceil) = limit.ceil {
-            default_config = default_config.ceil(ceil);
-        }
-        if let Some(burst) = limit.burst {
-            default_config = default_config.burst(burst);
-        }
-        conn.add_class(
-            &ifb_name,
-            TcHandle::new(1, 1),
-            TcHandle::new(1, LEAF_CLASS_MINOR),
-            default_config.build(),
-        )
-        .await?;
+/// Whether `ifindex`'s root qdisc is a `RateLimiter`'s: an HTB `1:` with
+/// its default class.
+async fn owns_root(conn: &Connection<Route>, ifindex: u32) -> Result<bool> {
+    let tree = dump_live_tree(conn, ifindex).await?;
+    Ok(tree.configured_root_qdisc().is_some_and(|q| {
+        root_conflict(q, &tree, TcHandle::major_only(1), LEAF_CLASS_MINOR).is_none()
+    }))
+}
 
-        // Add fq_codel as leaf qdisc for AQM
-        let mut fq_codel = FqCodelConfig::new();
-        if let Some(latency) = limit.latency {
-            fq_codel = fq_codel.target(latency);
-        }
-        conn.add_qdisc_full(
-            &ifb_name,
-            TcHandle::new(1, LEAF_CLASS_MINOR),
-            Some(TcHandle::major_only(LEAF_CLASS_MINOR)),
-            fq_codel.build(),
-        )
-        .await?;
-
-        Ok(())
+/// The parent an ingress redirect hangs off on a device with these
+/// qdiscs: a clsact's ingress hook, or the ingress qdisc. `None` when there
+/// is neither.
+fn live_ingress_hook(qdiscs: &[TcMessage]) -> Option<TcHandle> {
+    if qdiscs.iter().any(|q| q.kind() == Some("clsact")) {
+        Some(TcHandle::CLSACT_INGRESS)
+    } else if qdiscs.iter().any(|q| q.kind() == Some("ingress")) {
+        Some(TcHandle::INGRESS)
+    } else {
+        None
     }
+}
 
-    /// Add the filter that sends every packet arriving on the device to
-    /// the IFB: matchall + mirred **egress** redirect.
-    ///
-    /// Egress, because the packet has to be *transmitted* by the IFB to
-    /// pass its root HTB. An ingress redirect hands it to the IFB's receive
-    /// path instead (`netif_receive_skb` with `skb->dev = ifb`): it never
-    /// meets the HTB, and since the IFB is `IFF_NOARP` neither ARP nor
-    /// anything after it gets through — the ingress half of `RateLimiter`
-    /// blackholed the interface (#458).
-    async fn add_ingress_redirect(&self, conn: &Connection<Route>, ifb_name: &str) -> Result<()> {
-        let ifindex = conn
-            .get_link_by_name(&self.dev)
-            .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?
-            .ifindex();
-        let ifb_ifindex = conn
-            .get_link_by_name(ifb_name)
-            .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("IFB device not found: {ifb_name}")))?
-            .ifindex();
-        add_ifb_redirect(conn, ifindex, ifb_ifindex).await
+/// An error that says what was to be deleted is already gone is not one.
+fn gone_is_ok(result: Result<()>) -> Result<()> {
+    match result {
+        Err(e) if e.is_not_found() || e.is_no_device() => Ok(()),
+        other => other,
     }
+}
+
+/// The `(protocol, priority)` of every filter at `hook` on `ifindex` that
+/// redirects to `ifb_ifindex`, whatever its shape.
+async fn redirects_to(
+    conn: &Connection<Route>,
+    ifindex: u32,
+    hook: TcHandle,
+    ifb_ifindex: u32,
+) -> Result<Vec<(u16, u16)>> {
+    let mut out: Vec<(u16, u16)> = Vec::new();
+    for f in conn.get_filters_by_parent_index(ifindex, hook).await? {
+        let to_ifb = mirred_targets(&f)
+            .iter()
+            .any(|(_, target)| *target == ifb_ifindex);
+        if to_ifb && !out.contains(&(f.protocol(), f.priority())) {
+            out.push((f.protocol(), f.priority()));
+        }
+    }
+    Ok(out)
 }
 
 /// The priority of the IFB redirect on a device's ingress hook: the first
@@ -785,9 +921,14 @@ const INGRESS_REDIRECT_PRIORITY: FilterPriority = FilterPriority::recipe(0);
 /// `ETH_P_ALL`: the redirect takes every protocol.
 const ETH_P_ALL: u16 = 0x0003;
 
-/// Install the matchall egress redirect from `ifindex`'s ingress hook to
-/// `ifb_ifindex`.
-async fn add_ifb_redirect(conn: &Connection<Route>, ifindex: u32, ifb_ifindex: u32) -> Result<()> {
+/// Install the matchall egress redirect from `ifindex`'s ingress hook
+/// (`hook`: the ingress qdisc's, or a clsact's ingress) to `ifb_ifindex`.
+async fn add_ifb_redirect(
+    conn: &Connection<Route>,
+    ifindex: u32,
+    hook: TcHandle,
+    ifb_ifindex: u32,
+) -> Result<()> {
     use super::action::{ActionList, MirredAction};
     use super::filter::MatchallFilter;
 
@@ -795,7 +936,7 @@ async fn add_ifb_redirect(conn: &Connection<Route>, ifindex: u32, ifb_ifindex: u
         .actions(ActionList::new().with(MirredAction::redirect_by_index(ifb_ifindex)));
     conn.add_filter_by_index_full(
         ifindex,
-        TcHandle::INGRESS,
+        hook,
         None,
         ETH_P_ALL,
         INGRESS_REDIRECT_PRIORITY.as_u16(),
@@ -815,17 +956,17 @@ enum IfbRedirect {
     Replace(Vec<(u16, u16)>),
 }
 
-/// Read the ingress hook of `ifindex` for the redirect to `ifb_ifindex`.
+/// Read the ingress hook `hook` of `ifindex` for the redirect to
+/// `ifb_ifindex`.
 async fn ifb_redirect_state(
     conn: &Connection<Route>,
     ifindex: u32,
+    hook: TcHandle,
     ifb_ifindex: u32,
 ) -> Result<IfbRedirect> {
     use super::types::tc::action::mirred::TCA_EGRESS_REDIR;
 
-    let filters = conn
-        .get_filters_by_parent_index(ifindex, TcHandle::INGRESS)
-        .await?;
+    let filters = conn.get_filters_by_parent_index(ifindex, hook).await?;
     let mut wrong = Vec::new();
     let mut correct = false;
     for f in &filters {
@@ -1111,10 +1252,7 @@ impl PerHostLimiter {
                 .await?;
 
             // Add fq_codel leaf qdisc
-            let mut fq_codel = FqCodelConfig::new();
-            if let Some(latency) = self.latency {
-                fq_codel = fq_codel.target(latency);
-            }
+            let fq_codel = fq_codel_leaf(self.latency);
             conn.add_qdisc_full(&self.dev, classid, Some(leaf_handle), fq_codel.build())
                 .await?;
 
@@ -1132,10 +1270,7 @@ impl PerHostLimiter {
             .await?;
 
         // Add fq_codel leaf for default class
-        let mut fq_codel = FqCodelConfig::new();
-        if let Some(latency) = self.latency {
-            fq_codel = fq_codel.target(latency);
-        }
+        let fq_codel = fq_codel_leaf(self.latency);
         conn.add_qdisc_full(
             &self.dev,
             default_classid,
@@ -1342,10 +1477,7 @@ impl PerHostLimiter {
             match tree.leaf_for(classid) {
                 None => {
                     if !opts.dry_run {
-                        let mut leaf = FqCodelConfig::new();
-                        if let Some(latency) = self.latency {
-                            leaf = leaf.target(latency);
-                        }
+                        let leaf = fq_codel_leaf(self.latency);
                         conn.add_qdisc_by_index_full(
                             ifindex,
                             classid,
@@ -1367,10 +1499,7 @@ impl PerHostLimiter {
                 Some(q) => {
                     if !fq_codel_target_matches(target_us, q) {
                         if !opts.dry_run {
-                            let mut leaf = FqCodelConfig::new();
-                            if let Some(latency) = self.latency {
-                                leaf = leaf.target(latency);
-                            }
+                            let leaf = fq_codel_leaf(self.latency);
                             conn.replace_qdisc_by_index_full(
                                 ifindex,
                                 classid,
@@ -1455,10 +1584,7 @@ impl PerHostLimiter {
         match tree.leaf_for(default_classid) {
             None => {
                 if !opts.dry_run {
-                    let mut leaf = FqCodelConfig::new();
-                    if let Some(latency) = self.latency {
-                        leaf = leaf.target(latency);
-                    }
+                    let leaf = fq_codel_leaf(self.latency);
                     conn.add_qdisc_by_index_full(
                         ifindex,
                         default_classid,
@@ -1482,10 +1608,7 @@ impl PerHostLimiter {
                         .map_err(|e| {
                             e.with_context("PerHostLimiter::reconcile: remove legacy default leaf")
                         })?;
-                    let mut leaf = FqCodelConfig::new();
-                    if let Some(latency) = self.latency {
-                        leaf = leaf.target(latency);
-                    }
+                    let leaf = fq_codel_leaf(self.latency);
                     conn.add_qdisc_by_index_full(
                         ifindex,
                         default_classid,
@@ -1503,10 +1626,7 @@ impl PerHostLimiter {
             Some(q) => {
                 if !fq_codel_target_matches(target_us, q) {
                     if !opts.dry_run {
-                        let mut leaf = FqCodelConfig::new();
-                        if let Some(latency) = self.latency {
-                            leaf = leaf.target(latency);
-                        }
+                        let leaf = fq_codel_leaf(self.latency);
                         conn.replace_qdisc_by_index_full(
                             ifindex,
                             default_classid,

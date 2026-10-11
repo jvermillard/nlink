@@ -7453,6 +7453,28 @@ impl HtbClassConfig {
     }
 }
 
+impl HtbClassConfig {
+    /// The burst this class reads back as, in bytes: the declared one or
+    /// the default [`write_options`](ClassConfig::write_options) picks,
+    /// through the kernel's tick round trip — what a dump's
+    /// [`HtbClassOptions::burst`](super::tc_options::HtbClassOptions::burst)
+    /// holds for it.
+    /// Rate and ceiling, in bytes per second, as written.
+    pub(crate) fn rates_bps(&self) -> (u64, u64) {
+        let rate = self.rate.as_bytes_per_sec();
+        (rate, self.ceil.map_or(rate, |c| c.as_bytes_per_sec()))
+    }
+
+    pub(crate) fn burst_as_dumped(&self) -> u32 {
+        let rate = self.rate.as_bytes_per_sec();
+        let burst = self
+            .burst
+            .map(|b| b.as_u32_saturating())
+            .unwrap_or_else(|| (rate / psched::hz()) as u32 + self.mtu);
+        psched::tc_calc_xmitsize(rate, psched::tc_calc_xmittime(rate, burst))
+    }
+}
+
 impl ClassConfig for HtbClassConfig {
     fn kind(&self) -> &'static str {
         "htb"

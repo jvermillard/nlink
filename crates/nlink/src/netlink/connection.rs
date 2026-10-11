@@ -3286,6 +3286,30 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("set_link_mtu"))
     }
 
+    /// Set a network interface's alias (`ip link set dev X alias Y`); an
+    /// empty `alias` clears it.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_alias"))]
+    pub async fn set_link_alias(&self, iface: impl Into<InterfaceRef>, alias: &str) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.set_link_alias_by_index(ifindex, alias).await
+    }
+
+    /// Set a network interface's alias by index; an empty `alias` clears it.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_alias_by_index"))]
+    pub async fn set_link_alias_by_index(&self, ifindex: u32, alias: &str) -> Result<()> {
+        use super::types::link::IflaAttr;
+
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&ifinfo);
+        // `IFLA_IFALIAS` is an `NLA_STRING` (no NUL needed), and a
+        // zero-length one clears the alias (`dev_set_alias`).
+        builder.append_attr(IflaAttr::Ifalias as u16, alias.as_bytes());
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_alias"))
+    }
+
     /// Delete a network interface.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
