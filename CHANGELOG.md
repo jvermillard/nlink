@@ -1153,6 +1153,15 @@ All notable changes to this project will be documented in this file.
   Converging them needs the chain deleted and recreated with its rules
   moved, as sets got in #377.
 
+- **CI could pass without running the tests that need 22 kernel modules
+  (#600).** The integration tests gate on modules such as `sch_sfq`,
+  `sch_tbf`, `bonding`, `vxlan`, `nft_nat` and `netkit`. The workflow's
+  guard step and `NLINK_TEST_STRICT_MODULES` named none of them, so on a
+  runner without one, its tests skipped and reported `ok`. Among them was
+  the qdisc transition test from #599. All 22, plus `vrf`, which was
+  only in the guard step, are in both lists now. A local root run with
+  the full strict list passes all 548 tests.
+
 ### Added
 
 - **Every link builder can set master, up, alias and namespace as it
