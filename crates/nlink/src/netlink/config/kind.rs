@@ -1120,6 +1120,91 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
             compare_tunnel(kind, p, &data, names, TunnelIds::IPTUN, &mut d);
         }
         DeclaredLinkType::Vti(p) => compare_tunnel("vti", p, &data, names, TunnelIds::VTI, &mut d),
+        // `ip6_tnl_changelink` rebuilds the whole configuration from the
+        // request, so a change sends every declared parameter.
+        DeclaredLinkType::Ip6tnl(p) => {
+            const LINK: u16 = 1;
+            const LOCAL: u16 = 2;
+            const REMOTE: u16 = 3;
+            const TTL: u16 = 4;
+            const ENCAP_LIMIT: u16 = 6;
+            const PROTO: u16 = 9;
+            let addr = |t| data.ipv6(t).filter(|a| !a.is_unspecified());
+            let have_dev = data
+                .u32(LINK)
+                .filter(|i| *i != 0)
+                .and_then(|i| names.get(&i).copied());
+            let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+            let mut changes = Vec::new();
+            let mut note = |what: &str, have: String, want: String| {
+                if have != want {
+                    changes.push(format!("ip6tnl {what} {have} -> {want}"));
+                }
+            };
+            note("local", show(addr(LOCAL).map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
+            note("remote", show(addr(REMOTE).map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
+            // Unset is the kernel's, not compared.
+            if let Some(want) = p.hoplimit {
+                note("hoplimit", show(data.u8(TTL).map(|v| v.to_string())), want.to_string());
+            }
+            if let Some(want) = p.encap_limit {
+                note("encaplimit", show(data.u8(ENCAP_LIMIT).map(|v| v.to_string())), want.to_string());
+            }
+            let have_mode = data.u8(PROTO).map(|v| {
+                crate::netlink::link::Ip6tnlMode::from_proto(v)
+                    .map_or_else(|| format!("proto {v}"), |m| format!("{m:?}").to_lowercase())
+            });
+            note("mode", show(have_mode), format!("{:?}", p.mode).to_lowercase());
+            note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
+            if !changes.is_empty() {
+                let mut attrs = vec![KindAttr::U8(PROTO, p.mode.proto())];
+                if let Some(a) = p.local {
+                    attrs.push(KindAttr::Bytes(LOCAL, a.octets().to_vec()));
+                }
+                if let Some(a) = p.remote {
+                    attrs.push(KindAttr::Bytes(REMOTE, a.octets().to_vec()));
+                }
+                if let Some(v) = p.hoplimit {
+                    attrs.push(KindAttr::U8(TTL, v));
+                }
+                if let Some(v) = p.encap_limit {
+                    attrs.push(KindAttr::U8(ENCAP_LIMIT, v));
+                }
+                if let Some(dev) = &p.underlay_dev {
+                    attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
+                }
+                let mut changes = changes.into_iter();
+                let mut attrs = attrs.into_iter();
+                d.update("ip6tnl", attrs.next().expect("the mode"), changes.next().expect("not empty"));
+                let u = d.update.as_mut().expect("set above");
+                u.attrs.extend(attrs);
+                u.changes.extend(changes);
+            }
+        }
+        // `xfrmi_change` refuses a new underlay (EINVAL), so that
+        // recreates; the if_id changes in place, sent with the underlay it
+        // has (checked on 6.12).
+        DeclaredLinkType::Xfrm { if_id, underlay_dev } => {
+            const LINK: u16 = 1;
+            const IF_ID: u16 = 2;
+            let have_id = data.u32(IF_ID).unwrap_or(0);
+            let have_dev = data
+                .u32(LINK)
+                .filter(|i| *i != 0)
+                .and_then(|i| names.get(&i).copied());
+            if have_dev != underlay_dev.as_deref() {
+                d.recreate.push(format!(
+                    "xfrm dev {} -> {}",
+                    have_dev.unwrap_or("none"),
+                    underlay_dev.as_deref().unwrap_or("none")
+                ));
+            } else if have_id != *if_id {
+                d.update("xfrm", KindAttr::U32(IF_ID, *if_id), format!("xfrm if_id {have_id} -> {if_id}"));
+                if let Some(dev) = underlay_dev {
+                    d.update.as_mut().expect("set above").attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
+                }
+            }
+        }
         // `geneve_changelink` refuses a VNI, port or address-family change
         // ("not supported"): those recreate. The rest change in place, from
         // the current configuration (checked on 6.12).

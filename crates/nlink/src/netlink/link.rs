@@ -28,6 +28,8 @@
 //! - [`Vti6Link`] - Virtual Tunnel Interface (IPv6 IPsec)
 //! - [`Ip6GreLink`] - IPv6 GRE tunnel
 //! - [`Ip6GretapLink`] - IPv6 GRE TAP tunnel (Layer 2)
+//! - [`Ip6tnlLink`] - IPv6 tunnel (IPv6 or IPv4 over IPv6)
+//! - [`XfrmLink`] - XFRM (IPsec) interface
 //! - [`WireguardLink`] - WireGuard interface
 //! - [`MacsecLink`] - MACsec (IEEE 802.1AE) L2 encryption interface
 //!
@@ -4813,6 +4815,253 @@ impl LinkConfig for GretapLink {
 // ============================================================================
 // IPIP Link
 // ============================================================================
+
+/// What an ip6tnl tunnel carries (`IFLA_IPTUN_PROTO`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Ip6tnlMode {
+    /// Either IPv6 or IPv4 (`any`): the kernel's default, and `ip link`'s.
+    #[default]
+    Any,
+    /// IPv6 in IPv6 (`ip6ip6`).
+    Ip6ip6,
+    /// IPv4 in IPv6 (`ipip6`).
+    Ipip6,
+}
+
+impl Ip6tnlMode {
+    /// The inner protocol number the kernel keeps.
+    pub fn proto(self) -> u8 {
+        match self {
+            Self::Ip6ip6 => libc::IPPROTO_IPV6 as u8,
+            Self::Ipip6 => libc::IPPROTO_IPIP as u8,
+            Self::Any => 0,
+        }
+    }
+
+    /// The mode for an inner protocol number, as the kernel reports it.
+    pub fn from_proto(proto: u8) -> Option<Self> {
+        match i32::from(proto) {
+            0 => Some(Self::Any),
+            libc::IPPROTO_IPV6 => Some(Self::Ip6ip6),
+            libc::IPPROTO_IPIP => Some(Self::Ipip6),
+            _ => None,
+        }
+    }
+}
+
+/// Configuration for an IPv6 tunnel interface (`ip6tnl`): IPv6 or IPv4
+/// over IPv6 (#516).
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::netlink::link::{Ip6tnlLink, Ip6tnlMode};
+/// conn.add_link(
+///     Ip6tnlLink::new("t6")
+///         .local("fd00::1".parse().unwrap())
+///         .remote("fd00::2".parse().unwrap())
+///         .mode(Ip6tnlMode::Any),
+/// )
+/// .await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Ip6tnlLink {
+    name: String,
+    local: Option<std::net::Ipv6Addr>,
+    remote: Option<std::net::Ipv6Addr>,
+    hoplimit: Option<u8>,
+    encap_limit: Option<u8>,
+    mode: Ip6tnlMode,
+    mtu: Option<u32>,
+    link: Option<InterfaceRef>,
+}
+
+impl Ip6tnlLink {
+    /// A new ip6tnl tunnel, carrying either IPv6 or IPv4 by default. With
+    /// no local, remote or underlay device it is the fallback `ip6tnl0`'s
+    /// tunnel, and the kernel refuses it (`EEXIST`).
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None,
+            remote: None,
+            hoplimit: None,
+            encap_limit: None,
+            mode: Ip6tnlMode::default(),
+            mtu: None,
+            link: None,
+        }
+    }
+
+    /// The local end.
+    pub fn local(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// The remote end.
+    pub fn remote(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// The outer hop limit.
+    pub fn hoplimit(mut self, hoplimit: u8) -> Self {
+        self.hoplimit = Some(hoplimit);
+        self
+    }
+
+    /// The tunnel encapsulation limit option (RFC 2473).
+    pub fn encap_limit(mut self, limit: u8) -> Self {
+        self.encap_limit = Some(limit);
+        self
+    }
+
+    /// What it carries.
+    pub fn mode(mut self, mode: Ip6tnlMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// The device its packets leave through.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+}
+
+impl LinkConfig for Ip6tnlLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ip6tnl"
+    }
+
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "ip6tnl");
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_LINK, idx);
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
+        }
+        if let Some(addr) = self.remote {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
+        }
+        if let Some(hl) = self.hoplimit {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, hl);
+        }
+        if let Some(limit) = self.encap_limit {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_ENCAP_LIMIT, limit);
+        }
+        builder.append_attr_u8(iptun_attr::IFLA_IPTUN_PROTO, self.mode.proto());
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+    }
+}
+
+/// `IFLA_XFRM_*` (`linux/if_link.h`).
+mod xfrm_attr {
+    pub const IFLA_XFRM_LINK: u16 = 1;
+    pub const IFLA_XFRM_IF_ID: u16 = 2;
+}
+
+/// Configuration for an XFRM (IPsec) interface (#516): traffic routed to
+/// it is matched against the IPsec policies with its `if_id`.
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::netlink::link::XfrmLink;
+/// conn.add_link(XfrmLink::new("ipsec0", 42).link("eth0")).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct XfrmLink {
+    name: String,
+    if_id: u32,
+    mtu: Option<u32>,
+    link: Option<InterfaceRef>,
+}
+
+impl XfrmLink {
+    /// A new XFRM interface with `if_id`, which must not be 0.
+    pub fn new(name: impl Into<String>, if_id: u32) -> Self {
+        Self {
+            name: name.into(),
+            if_id,
+            mtu: None,
+            link: None,
+        }
+    }
+
+    /// The MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// The device its packets leave through.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+}
+
+impl LinkConfig for XfrmLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "xfrm"
+    }
+
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "xfrm");
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(xfrm_attr::IFLA_XFRM_LINK, idx);
+        }
+        builder.append_attr_u32(xfrm_attr::IFLA_XFRM_IF_ID, self.if_id);
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+    }
+}
 
 /// Configuration for an IPIP (IP-in-IP) tunnel interface.
 ///

@@ -1652,6 +1652,73 @@ async fn ipv4_tunnels_change_in_place() -> nlink::Result<()> {
     .await
 }
 
+/// An ip6tnl tunnel and an XFRM interface A→B→C (#516). Step 2 changes the
+/// tunnel's remote, hop limit, encapsulation limit, mode and underlay, and
+/// the interface's if_id, all in place; `ip6_tnl_changelink` rebuilds the
+/// whole configuration from the request, so each step checks every
+/// parameter through `ip -d link`. Step 3 moves the interface to another
+/// underlay, which `xfrmi_changelink` refuses: it is recreated.
+#[tokio::test]
+async fn ip6tnl_and_xfrm_change_in_place() -> nlink::Result<()> {
+    use nlink::netlink::link::Ip6tnlMode;
+    use std::net::Ipv6Addr;
+    require_root!();
+    nlink::require_modules!("dummy", "ip6_tunnel", "xfrm_interface");
+
+    let a = |h: u16| Ipv6Addr::new(0xfd00, 0x90, 0, 0, 0, 0, 0, h);
+    let tunnel = |b: bool| if b { (3, 32, 2, Ip6tnlMode::Any, "d1") } else { (2, 64, 4, Ip6tnlMode::Ip6ip6, "d0") };
+    let step = |b: bool, id: u32, xdev: &'static str| {
+        let (r, hl, el, mode, dev) = tunnel(b);
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .link("t61", move |l| {
+                l.ip6tnl()
+                    .ip6tnl_local(a(1))
+                    .ip6tnl_remote(a(r))
+                    .ip6tnl_hoplimit(hl)
+                    .ip6tnl_encap_limit(el)
+                    .ip6tnl_mode(mode)
+                    .tunnel_underlay_dev(dev)
+            })
+            .link("xf1", move |l| l.xfrm(id).tunnel_underlay_dev(xdev))
+    };
+    let steps = [step(false, 7, "d0"), step(true, 8, "d0"), step(true, 8, "d1")];
+    let xwant = [("0x7", "d0"), ("0x8", "d0"), ("0x8", "d1")];
+    let ns = TestNamespace::new("tr-ip6tnl")?;
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let (r, hl, el, _, dev) = tunnel(i > 0);
+        let mode = if i > 0 { "any" } else { "ip6ip6" };
+        let (id, xdev) = xwant[i];
+        let t6 = &ip_json(&ns, &["-d", "link", "show", "t61"])?[0];
+        let xf = &ip_json(&ns, &["-d", "link", "show", "xf1"])?[0];
+        let data = &t6["linkinfo"]["info_data"];
+        let checks = [
+            ("t61 local", data["local"].clone(), serde_json::json!(a(1).to_string())),
+            ("t61 remote", data["remote"].clone(), serde_json::json!(a(r).to_string())),
+            ("t61 hoplimit", data["ttl"].clone(), serde_json::json!(hl)),
+            ("t61 encaplimit", data["encap_limit"].clone(), serde_json::json!(el)),
+            ("t61 mode", data["proto"].clone(), serde_json::json!(mode)),
+            ("t61 dev", data["link"].clone(), serde_json::json!(dev)),
+            ("xf1 if_id", xf["linkinfo"]["info_data"]["if_id"].clone(), serde_json::json!(id)),
+            ("xf1 dev", xf["link"].clone(), serde_json::json!(xdev)),
+        ];
+        for (what, have, want) in checks {
+            if have != want {
+                return Err(format!("step {}: {what} is {have}, want {want}", i + 1));
+            }
+        }
+        ifindexes.push((t6["ifindex"].as_u64(), xf["ifindex"].as_u64()));
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "step 2 changes both in place");
+    assert_eq!(ifindexes[1].0, ifindexes[2].0, "the tunnel is not touched");
+    assert_ne!(ifindexes[1].1, ifindexes[2].1, "a new underlay recreates the xfrm interface");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

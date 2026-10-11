@@ -516,6 +516,57 @@ async fn test_gre_tunnel() -> Result<()> {
     Ok(())
 }
 
+/// `Ip6tnlLink` and `XfrmLink` (#516): every parameter reaches the kernel,
+/// each tunnel bound to its underlay through its own link attribute.
+#[tokio::test]
+async fn test_ip6tnl_and_xfrm_links() -> Result<()> {
+    use nlink::netlink::link::{Ip6tnlLink, Ip6tnlMode, XfrmLink};
+    require_root!();
+    nlink::require_modules!("dummy", "ip6_tunnel", "xfrm_interface");
+
+    let ns = TestNamespace::new("ip6tnl")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("under0")).await?;
+    conn.add_link(
+        Ip6tnlLink::new("t61")
+            .local("fd00::1".parse().unwrap())
+            .remote("fd00::2".parse().unwrap())
+            .hoplimit(20)
+            .encap_limit(3)
+            .mode(Ip6tnlMode::Ipip6)
+            .mtu(1400)
+            .link("under0"),
+    )
+    .await?;
+    conn.add_link(XfrmLink::new("xf1", 0x2a).link("under0")).await?;
+
+    let show = |dev: &str| -> serde_json::Value {
+        let out = ns.exec("ip", &["-d", "-j", "link", "show", dev]).expect("ip");
+        serde_json::from_str::<serde_json::Value>(&out).expect("ip -j")[0].clone()
+    };
+    let t6 = show("t61");
+    let data = &t6["linkinfo"]["info_data"];
+    assert_eq!(t6["linkinfo"]["info_kind"], "ip6tnl", "{t6}");
+    assert_eq!(
+        (&data["local"], &data["remote"], &data["ttl"], &data["encap_limit"], &data["proto"], &data["link"]),
+        (
+            &"fd00::1".into(),
+            &"fd00::2".into(),
+            &20.into(),
+            &3.into(),
+            &"ipip6".into(),
+            &"under0".into()
+        ),
+        "{data}"
+    );
+    assert_eq!(t6["mtu"], 1400, "{t6}");
+    let xf = show("xf1");
+    assert_eq!(xf["linkinfo"]["info_kind"], "xfrm", "{xf}");
+    assert_eq!(xf["linkinfo"]["info_data"]["if_id"], "0x2a", "{xf}");
+    assert_eq!(xf["link"], "under0", "{xf}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_gretap_tunnel() -> Result<()> {
     require_root!();
