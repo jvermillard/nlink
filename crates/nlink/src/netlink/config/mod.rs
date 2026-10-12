@@ -65,7 +65,7 @@ mod types;
 pub use apply::{ApplyError, ApplyOptions, ApplyResult, ExecOptions};
 #[allow(deprecated)]
 pub use diff::DiffOptions;
-pub use diff::{ConfigDiff, LinkChanges, PlanOptions, RouteConflict, Snapshot};
+pub use diff::{ConfigDiff, LinkChanges, NexthopConflict, PlanOptions, RouteConflict, Snapshot};
 pub use kind::{
     Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
     RecreatePolicy,

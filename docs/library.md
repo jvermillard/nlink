@@ -701,12 +701,14 @@ kernel-managed state:
 - **Links and qdiscs are never purged** — deleting an interface is too
   blunt for a declarative reconcile; use the imperative `del_link` /
   `del_qdisc` when you mean it.
-- **Neighbours, FDB entries and rules are never purged:** a permanent
-  ARP entry or a static FDB entry is as likely another tool's as stale.
-  One declared with `NetworkConfig::neighbour`, `fdb` or `rule` goes
-  when it leaves the config, through `PlanOptions::previous`. A declared
-  rule carries the config's route protocol, and only a rule with it is
-  the config's: an identical one `ip rule add` made is left alone.
+- **Neighbours, FDB entries, rules and nexthop objects are never
+  purged:** a permanent ARP entry or a static FDB entry is as likely
+  another tool's as stale. One declared with `NetworkConfig::neighbour`,
+  `fdb`, `rule` or `nexthop` goes when it leaves the config, through
+  `PlanOptions::previous`. A declared rule or nexthop carries the
+  config's route protocol, and only one with it is the config's: an
+  identical rule `ip rule add` made is left alone, and a nexthop id
+  another tool holds is refused, not replaced.
 
 Inspect the diff first (`addresses_to_remove` / `routes_to_remove`, or
 the `Display` output) — purge is reachable only through the explicit

@@ -2039,6 +2039,84 @@ async fn a_veth_peer_lives_in_its_declared_namespace() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Declared nexthop objects and the routes through them, A→B→C→D (#516),
+/// each step applied with the one before as the previous config. Step 2
+/// gives a nexthop another gateway and its group other weights, in place.
+/// Step 3 changes the VLAN id of the link they are on, which recreates it:
+/// the kernel deletes the nexthops on it, the group made of them and every
+/// route through any of them, and the apply puts them all back — not
+/// refused over them. Step 4 drops the group, the blackhole and their
+/// routes. `ip -j nexthop` and `ip -j route` show each step.
+#[tokio::test]
+async fn nexthops_change_and_come_back_after_a_recreate() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let gw = |h: u8| v4(10, 96, 0, h);
+    let step = |vlan: u16, gw1: u8, weights: (u16, u16), all: bool| {
+        let c = NetworkConfig::new()
+            .link("lo", |l| l.up())
+            .link("b0", |l| l.dummy().up())
+            .link("d0", move |l| l.vlan("b0", vlan).up())
+            .address("d0", "10.96.0.1/24")
+            .unwrap()
+            .nexthop(1, move |n| n.via(gw(gw1)).dev("d0"))
+            .nexthop(2, move |n| n.via(gw(3)).dev("d0"))
+            .route("10.94.0.0/16", |r| r.nhid(1))
+            .unwrap();
+        if !all {
+            return c;
+        }
+        c.nexthop(3, |n| n.blackhole())
+            .nexthop(10, move |n| n.group(&[(1, weights.0), (2, weights.1)]))
+            .route("10.95.0.0/16", |r| r.nhid(10))
+            .unwrap()
+            .route("10.93.0.0/16", |r| r.nhid(3))
+            .unwrap()
+    };
+    let steps = [
+        step(10, 2, (1, 3), true),
+        step(10, 4, (2, 1), true),
+        step(11, 4, (2, 1), true),
+        step(11, 4, (2, 1), false),
+    ];
+    let ns = TestNamespace::new("tr-nexthop")?;
+    let mut d0 = Vec::new();
+    crate::common::converge::assert_transition_with_previous(&ns, &steps, async |i, _conn| {
+        let nh = ip_json(&ns, &["nexthop", "show"])?;
+        let by_id = |id: u64| nh.as_array().and_then(|a| a.iter().find(|n| n["id"] == id)).cloned();
+        let gw1 = if i == 0 { "10.96.0.2" } else { "10.96.0.4" };
+        if by_id(1).map(|n| n["gateway"].clone()) != Some(serde_json::json!(gw1)) {
+            return Err(format!("step {}: nexthop 1: {nh}", i + 1));
+        }
+        let group = if i == 0 {
+            serde_json::json!([{"id": 1}, {"id": 2, "weight": 3}])
+        } else {
+            serde_json::json!([{"id": 1, "weight": 2}, {"id": 2}])
+        };
+        let want_group = (i < 3).then_some(group);
+        if by_id(10).map(|n| n["group"].clone()) != want_group {
+            return Err(format!("step {}: group 10: {nh}", i + 1));
+        }
+        if by_id(3).is_some() != (i < 3) || by_id(2).is_none() {
+            return Err(format!("step {}: nexthops 2 and 3: {nh}", i + 1));
+        }
+        for (dst, id, present) in [("10.94.0.0/16", 1, true), ("10.95.0.0/16", 10, i < 3), ("10.93.0.0/16", 3, i < 3)] {
+            let routes = ip_json(&ns, &["route", "show", dst])?;
+            let have = routes.as_array().is_some_and(|a| a.iter().any(|r| r["nhid"] == id));
+            if have != present {
+                return Err(format!("step {}: route {dst} nhid {id}: {routes}", i + 1));
+            }
+        }
+        d0.push(link_json(&ns, "d0")?["ifindex"].as_u64());
+        Ok(())
+    })
+    .await?;
+    assert_eq!(d0[0], d0[1], "step 2 changes the nexthops in place");
+    assert_ne!(d0[1], d0[2], "a new VLAN id recreates the link");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

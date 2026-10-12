@@ -19,7 +19,8 @@
 use std::fmt;
 
 use super::{
-    DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredNeighbour, DeclaredQdisc, DeclaredRule, DeclaredRoute, LinkChanges, LinkRecreate,
+    DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredNeighbour, DeclaredNexthop, DeclaredQdisc,
+    DeclaredRule, DeclaredRoute, LinkChanges, LinkRecreate,
     LinkRemoval, RouteConflict,
     diff::route_text,
     tc_tree::DeclaredTc,
@@ -42,6 +43,9 @@ pub enum Step {
     /// A declared route whose place holds a route the config does not own
     /// (#469): the apply fails here rather than replace it.
     RefuseRoute(RouteConflict),
+    /// A declared nexthop whose id another tool's holds, or that would turn
+    /// a nexthop into a group or back (#516): the apply fails here.
+    RefuseNexthop(super::NexthopConflict),
     /// A link the previous config declared, whose deletion would destroy
     /// what no config declares (#512): the apply fails here.
     RefuseRemoval(LinkRemoval),
@@ -138,6 +142,15 @@ pub enum Step {
     DeleteFdb(DeclaredFdb),
     /// Add a rule, with the config's protocol (#516).
     AddRule(DeclaredRule),
+    /// Install a nexthop object with `NLM_F_REPLACE` (#516).
+    SetNexthop {
+        /// The nexthop it overwrites, if one is there.
+        before: Option<DeclaredNexthop>,
+        /// The nexthop installed.
+        after: DeclaredNexthop,
+    },
+    /// Delete a nexthop the previous config declared (#516).
+    DeleteNexthop(DeclaredNexthop),
     /// Delete a rule the previous config declared: the one with the
     /// config's protocol (#516).
     DeleteRule(DeclaredRule),
@@ -171,6 +184,7 @@ impl Step {
             self,
             Self::MissingLink { .. }
                 | Self::RefuseRoute(_)
+                | Self::RefuseNexthop(_)
                 | Self::RefuseRemoval(_)
                 | Self::RefuseRecreate(_)
         )
@@ -234,6 +248,17 @@ impl Step {
                 after: e.clone(),
             },
             Self::AddRule(r) => Self::DeleteRule(r.clone()),
+            Self::SetNexthop { before, after } => match before {
+                Some(before) => Self::SetNexthop {
+                    before: Some(after.clone()),
+                    after: before.clone(),
+                },
+                None => Self::DeleteNexthop(after.clone()),
+            },
+            Self::DeleteNexthop(n) => Self::SetNexthop {
+                before: None,
+                after: n.clone(),
+            },
             Self::DeleteRule(r) => Self::AddRule(r.clone()),
             _ => return None,
         })
@@ -328,6 +353,7 @@ impl fmt::Display for Step {
                 "! link {name} (missing: it does not exist, and the config does not create it)"
             ),
             Self::RefuseRoute(conflict) => write!(f, "{conflict}"),
+            Self::RefuseNexthop(conflict) => write!(f, "{conflict}"),
             Self::RefuseRemoval(removal) => write!(f, "{removal}"),
             Self::RefuseRecreate(recreate) => write!(f, "{recreate}"),
             Self::DeleteForRecreate(recreate) => write!(
@@ -387,6 +413,12 @@ impl fmt::Display for Step {
             }
             Self::DeleteFdb(e) => write!(f, "- {e}"),
             Self::AddRule(r) => write!(f, "+ {r}"),
+            Self::SetNexthop { before, after } => {
+                let replaced: Vec<(DeclaredNexthop, DeclaredNexthop)> =
+                    before.iter().map(|b| (after.clone(), b.clone())).collect();
+                f.write_str(&super::diff::nexthop_line(after, &replaced))
+            }
+            Self::DeleteNexthop(n) => write!(f, "- {n}"),
             Self::DeleteRule(r) => write!(f, "- {r}"),
             Self::DeleteQdisc(q) => write!(
                 f,
@@ -491,6 +523,7 @@ impl super::ConfigDiff {
             name: name.clone(),
         }));
         steps.extend(self.routes_refused.iter().cloned().map(Step::RefuseRoute));
+        steps.extend(self.nexthops_refused.iter().cloned().map(Step::RefuseNexthop));
         steps.extend(
             self.links_to_remove
                 .iter()
@@ -563,6 +596,12 @@ impl super::ConfigDiff {
             steps.push(Step::AddAddress(address.clone()));
         }
         steps.extend(self.addresses_to_change.iter().cloned().map(Step::ChangeAddress));
+        for n in &self.nexthops_to_set {
+            steps.push(Step::SetNexthop {
+                before: self.nexthops_replaced.iter().find(|(d, _)| d == n).map(|(_, b)| b.clone()),
+                after: n.clone(),
+            });
+        }
         for n in &self.neighbours_to_set {
             steps.push(Step::SetNeighbour {
                 before: self
@@ -611,6 +650,7 @@ impl super::ConfigDiff {
             });
         }
         steps.extend(self.routes_to_remove.iter().cloned().map(Step::DeleteRoute));
+        steps.extend(self.nexthops_to_remove.iter().cloned().map(Step::DeleteNexthop));
         steps.extend(
             self.addresses_to_remove
                 .iter()
@@ -709,6 +749,32 @@ mod tests {
         assert!(matches!(
             Step::DeleteFdb(e(false)).inverse(),
             Some(Step::SetFdb { before: None, after }) if after == e(false)
+        ));
+    }
+
+    /// A nexthop's steps invert as a neighbour's do (#516).
+    #[test]
+    fn nexthop_steps_invert_and_print() {
+        let cfg = crate::netlink::config::NetworkConfig::new()
+            .nexthop(1, |n| n.via("10.0.0.2".parse().unwrap()).dev("d0"))
+            .nexthop(9, |n| n.via("10.0.0.3".parse().unwrap()).dev("d0"));
+        let (a, b) = (cfg.nexthops()[0].clone(), {
+            let mut b = cfg.nexthops()[1].clone();
+            b.id = 1;
+            b
+        });
+        let change = Step::SetNexthop { before: Some(a.clone()), after: b.clone() };
+        assert_eq!(change.to_string(), "~ nexthop 1 via 10.0.0.3 dev d0 (replacing via 10.0.0.2 dev d0)");
+        assert!(matches!(
+            change.inverse(),
+            Some(Step::SetNexthop { before: Some(x), after: y }) if x == b && y == a
+        ));
+        let add = Step::SetNexthop { before: None, after: a.clone() };
+        assert_eq!(add.to_string(), "+ nexthop 1 via 10.0.0.2 dev d0");
+        assert!(matches!(add.inverse(), Some(Step::DeleteNexthop(d)) if d == a));
+        assert!(matches!(
+            Step::DeleteNexthop(a.clone()).inverse(),
+            Some(Step::SetNexthop { before: None, after }) if after == a
         ));
     }
 

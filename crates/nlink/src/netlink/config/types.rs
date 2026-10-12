@@ -36,6 +36,9 @@ pub struct NetworkConfig {
     /// Policy routing rules (#516).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) rules: Vec<DeclaredRule>,
+    /// Nexthop objects and groups (#516).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) nexthops: Vec<DeclaredNexthop>,
     /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
     /// yet: a filter's actions have no document form.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -178,6 +181,70 @@ impl NetworkConfig {
             }
             if self.neighbours[..i].iter().any(|o| o.same_entry(n)) {
                 errors.push(ValidationErrorInfo::new(at(), "declared twice"));
+            }
+        }
+        for (i, n) in self.nexthops.iter().enumerate() {
+            let at = || format!("nexthops.{}", n.id);
+            let mut bad = |why: String| errors.push(ValidationErrorInfo::new(at(), why));
+            if n.id == 0 {
+                bad("a nexthop's id is not 0".into());
+            }
+            if self.nexthops[..i].iter().any(|o| o.id == n.id) {
+                bad(format!("nexthop {} is declared twice", n.id));
+            }
+            let via = n.gateway.is_some() || n.dev.is_some();
+            match (via, n.blackhole, n.is_group()) {
+                (true, false, false) | (false, true, false) | (false, false, true) => {}
+                (false, false, false) => bad("a nexthop needs a gateway or device, a blackhole, or a group".into()),
+                _ => bad("a nexthop is one of: a gateway and device, a blackhole, a group".into()),
+            }
+            // `rtm_to_nh_config`: "Device attribute required for
+            // non-blackhole and non-fdb nexthops".
+            if n.gateway.is_some() && n.dev.is_none() {
+                bad("a nexthop with a gateway needs its device".into());
+            }
+            if n.onlink && (n.gateway.is_none() || n.dev.is_none()) {
+                bad("onlink needs a gateway and a device".into());
+            }
+            if n.ipv6 && n.gateway.is_some_and(|g| g.is_ipv4()) {
+                bad("ipv6() with an IPv4 gateway".into());
+            }
+            for (member, weight) in &n.group {
+                if *weight == 0 {
+                    bad(format!("member {member}: a weight is 1 or more"));
+                }
+                match self.nexthops.iter().find(|o| o.id == *member) {
+                    None => bad(format!("member {member} is not a declared nexthop")),
+                    Some(m) if m.is_group() => bad(format!("member {member} is a group; groups do not nest")),
+                    Some(_) => {}
+                }
+            }
+            if n.group.iter().enumerate().any(|(j, (m, _))| n.group[..j].iter().any(|(o, _)| o == m)) {
+                bad("a member is listed twice".into());
+            }
+        }
+        for r in &self.routes {
+            let Some(id) = r.attrs.nhid else { continue };
+            let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
+            if r.gateway.is_some() || r.dev.is_some() {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    "a route through a nexthop object has no gateway or device of its own",
+                ));
+            }
+            // The kernel takes the type from the object.
+            if r.route_type != DeclaredRouteType::Unicast {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    "a route through a nexthop object takes its type from it; declare a blackhole nexthop",
+                ));
+            }
+            if let Some(nh) = self.nexthops.iter().find(|n| n.id == id)
+                && !nh.is_group()
+                && !nh.blackhole
+                && nh.is_ipv6() != r.destination.is_ipv6()
+            {
+                errors.push(ValidationErrorInfo::new(at(), format!("nexthop {id} is of the other family")));
             }
         }
         for (i, r) in self.rules.iter().enumerate() {
@@ -609,8 +676,9 @@ impl NetworkConfig {
     }
 
     /// `true` when the config declares nothing: no links, addresses,
-    /// routes, qdiscs, TC trees, neighbours, FDB entries or rules, and no
-    /// builder mistake waiting for [`validate`](Self::validate) (#531).
+    /// routes, qdiscs, TC trees, neighbours, FDB entries, rules or
+    /// nexthops, and no builder mistake waiting for
+    /// [`validate`](Self::validate) (#531).
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
             && self.addresses.is_empty()
@@ -620,6 +688,7 @@ impl NetworkConfig {
             && self.neighbours.is_empty()
             && self.fdb.is_empty()
             && self.rules.is_empty()
+            && self.nexthops.is_empty()
             && self.invalid.is_empty()
     }
 
@@ -845,6 +914,45 @@ impl NetworkConfig {
         self
     }
 
+    /// Declare nexthop object `id` (#516), as `ip nexthop replace id <id> …`
+    /// does: a gateway and device, a blackhole, or a group of other
+    /// nexthops. A route uses one with [`RouteBuilder::nhid`].
+    ///
+    /// It carries the config's [`route_protocol`](Self::route_protocol), and
+    /// a live nexthop with the id and another protocol is another tool's:
+    /// the apply refuses to replace it. A nexthop on a device that goes
+    /// down or is recreated is deleted by the kernel, with every route
+    /// through it; the apply that does it puts the declared ones back. A
+    /// nexthop goes when it leaves the config, through
+    /// [`PlanOptions::previous`](super::PlanOptions::previous).
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    ///
+    /// let config = NetworkConfig::new()
+    ///     .nexthop(1, |n| n.via("10.0.0.2".parse().unwrap()).dev("eth0"))
+    ///     .nexthop(2, |n| n.via("10.0.0.3".parse().unwrap()).dev("eth0"))
+    ///     .nexthop(10, |n| n.group(&[(1, 1), (2, 3)]))
+    ///     .route("10.1.0.0/16", |r| r.nhid(10))
+    ///     .unwrap();
+    /// config.validate().unwrap();
+    /// ```
+    pub fn nexthop(mut self, id: u32, f: impl FnOnce(NexthopSpecBuilder) -> NexthopSpecBuilder) -> Self {
+        let built = f(NexthopSpecBuilder {
+            nexthop: DeclaredNexthop {
+                id,
+                gateway: None,
+                dev: None,
+                onlink: false,
+                blackhole: false,
+                ipv6: false,
+                group: Vec::new(),
+            },
+        });
+        self.nexthops.push(built.nexthop);
+        self
+    }
+
     /// Declare a policy routing rule at `priority` (#516), as `ip rule add
     /// pref <priority> …` does. Without an action it looks the main table
     /// up.
@@ -1063,6 +1171,11 @@ impl NetworkConfig {
     /// Get the configured policy routing rules.
     pub fn rules(&self) -> &[DeclaredRule] {
         &self.rules
+    }
+
+    /// Get the configured nexthop objects.
+    pub fn nexthops(&self) -> &[DeclaredNexthop] {
+        &self.nexthops
     }
 }
 
@@ -3006,6 +3119,120 @@ impl std::fmt::Display for DeclaredNeighbour {
     }
 }
 
+/// A declared nexthop object (#516). See [`NetworkConfig::nexthop`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredNexthop {
+    /// The id routes name it by; not 0.
+    pub id: u32,
+    /// The gateway.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub gateway: Option<IpAddr>,
+    /// The device.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub dev: Option<String>,
+    /// The gateway is on the link whatever the subnets say.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub onlink: bool,
+    /// Drop what is routed to it.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub blackhole: bool,
+    /// An IPv6 nexthop with no gateway (a blackhole, or a device alone).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub ipv6: bool,
+    /// The members of a group, `[id, weight]`, weight 1 and up.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub group: Vec<(u32, u16)>,
+}
+
+impl DeclaredNexthop {
+    /// Whether it is a group.
+    pub fn is_group(&self) -> bool {
+        !self.group.is_empty()
+    }
+
+    /// Whether it is an IPv6 nexthop.
+    pub fn is_ipv6(&self) -> bool {
+        self.ipv6 || self.gateway.is_some_and(|g| g.is_ipv6())
+    }
+}
+
+impl std::fmt::Display for DeclaredNexthop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "nexthop {}", self.id)?;
+        if self.is_group() {
+            let members: Vec<String> = self
+                .group
+                .iter()
+                .map(|(id, w)| if *w == 1 { id.to_string() } else { format!("{id},{w}") })
+                .collect();
+            return write!(f, " group {}", members.join("/"));
+        }
+        if self.blackhole {
+            return f.write_str(" blackhole");
+        }
+        if let Some(g) = self.gateway {
+            write!(f, " via {g}")?;
+        }
+        if let Some(d) = &self.dev {
+            write!(f, " dev {d}")?;
+        }
+        if self.onlink {
+            f.write_str(" onlink")?;
+        }
+        Ok(())
+    }
+}
+
+/// Builds a declared nexthop object; see [`NetworkConfig::nexthop`].
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct NexthopSpecBuilder {
+    nexthop: DeclaredNexthop,
+}
+
+impl NexthopSpecBuilder {
+    /// The gateway.
+    pub fn via(mut self, gateway: IpAddr) -> Self {
+        self.nexthop.gateway = Some(gateway);
+        self
+    }
+
+    /// The device.
+    pub fn dev(mut self, dev: &str) -> Self {
+        self.nexthop.dev = Some(dev.to_string());
+        self
+    }
+
+    /// The gateway is on the link whatever the subnets say.
+    pub fn onlink(mut self) -> Self {
+        self.nexthop.onlink = true;
+        self
+    }
+
+    /// Drop what is routed to it.
+    pub fn blackhole(mut self) -> Self {
+        self.nexthop.blackhole = true;
+        self
+    }
+
+    /// An IPv6 nexthop, for one with no gateway to say so.
+    pub fn ipv6(mut self) -> Self {
+        self.nexthop.ipv6 = true;
+        self
+    }
+
+    /// A group of the nexthops `members` names, `(id, weight)`, as `ip
+    /// nexthop … group` takes them: weight 1 and up.
+    pub fn group(mut self, members: &[(u32, u16)]) -> Self {
+        self.nexthop.group = members.to_vec();
+        self
+    }
+}
+
 /// A declared policy routing rule (#516). See [`NetworkConfig::rule`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -3787,6 +4014,9 @@ pub(crate) struct RouteAttrs {
     pub(crate) initcwnd: Option<u32>,
     pub(crate) initrwnd: Option<u32>,
     pub(crate) hoplimit: Option<u32>,
+    /// The nexthop object the route goes through (`nhid`, `RTA_NH_ID`),
+    /// in place of a gateway and device.
+    pub(crate) nhid: Option<u32>,
 }
 
 impl RouteAttrs {
@@ -3865,6 +4095,9 @@ struct RouteRepr {
     /// Hop limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hoplimit: Option<u32>,
+    /// The nexthop object it goes through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nhid: Option<u32>,
 }
 
 // Delegate `DeclaredRoute`'s schema to `RouteRepr` so it describes
@@ -3916,6 +4149,7 @@ impl From<DeclaredRoute> for RouteRepr {
             initcwnd: a.initcwnd,
             initrwnd: a.initrwnd,
             hoplimit: a.hoplimit,
+            nhid: a.nhid,
         }
     }
 }
@@ -3991,6 +4225,7 @@ impl TryFrom<RouteRepr> for DeclaredRoute {
                 initcwnd: r.initcwnd,
                 initrwnd: r.initrwnd,
                 hoplimit: r.hoplimit,
+                nhid: r.nhid,
             },
         })
     }
@@ -4242,6 +4477,13 @@ impl RouteBuilder {
     /// Needs a device.
     pub fn onlink(mut self) -> Self {
         self.attrs.onlink = true;
+        self
+    }
+
+    /// Route through nexthop object `id` (`nhid`, #516), declared with
+    /// [`NetworkConfig::nexthop`]: in place of a gateway and device.
+    pub fn nhid(mut self, id: u32) -> Self {
+        self.attrs.nhid = Some(id);
         self
     }
 
@@ -5939,6 +6181,69 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("veth_peer_netns"), "{err}");
+    }
+
+    #[test]
+    fn nexthops_roundtrip_display_and_validate() {
+        let gw = |h: u8| IpAddr::from([10, 0, 0, h]);
+        let cfg = NetworkConfig::new()
+            .nexthop(1, |n| n.via(gw(2)).dev("eth0"))
+            .nexthop(2, |n| n.via(gw(3)).dev("eth0").onlink())
+            .nexthop(3, |n| n.blackhole().ipv6())
+            .nexthop(10, |n| n.group(&[(1, 1), (2, 300)]))
+            .route("10.1.0.0/16", |r| r.nhid(10))
+            .unwrap();
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#"{"id":1,"gateway":"10.0.0.2","dev":"eth0"}"#,
+            r#"{"id":10,"group":[[1,1],[2,300]]}"#,
+            r#""nhid":10"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        let shown: Vec<String> = cfg.nexthops().iter().map(|n| n.to_string()).collect();
+        assert_eq!(
+            shown,
+            [
+                "nexthop 1 via 10.0.0.2 dev eth0",
+                "nexthop 2 via 10.0.0.3 dev eth0 onlink",
+                "nexthop 3 blackhole",
+                "nexthop 10 group 1/2,300",
+            ]
+        );
+        let one = |f: fn(NexthopSpecBuilder) -> NexthopSpecBuilder| NetworkConfig::new().nexthop(1, f);
+        for (cfg, says) in [
+            (NetworkConfig::new().nexthop(0, |n| n.blackhole()), "id is not 0"),
+            (one(|n| n), "needs a gateway or device"),
+            (one(|n| n.blackhole().dev("eth0")), "is one of"),
+            (one(|n| n.via("10.0.0.2".parse().unwrap())), "needs its device"),
+            (one(|n| n.dev("eth0").onlink()), "onlink needs a gateway"),
+            (one(|n| n.group(&[(5, 1)])), "member 5 is not a declared nexthop"),
+            (
+                one(|n| n.blackhole()).nexthop(2, |n| n.group(&[(1, 0)])),
+                "a weight is 1 or more",
+            ),
+            (
+                one(|n| n.blackhole()).nexthop(2, |n| n.group(&[(1, 1)])).nexthop(3, |n| n.group(&[(2, 1)])),
+                "groups do not nest",
+            ),
+            (one(|n| n.blackhole()).nexthop(1, |n| n.blackhole()), "declared twice"),
+            (
+                NetworkConfig::new().route("10.1.0.0/16", |r| r.nhid(1).dev("eth0")).unwrap(),
+                "no gateway or device of its own",
+            ),
+            (
+                one(|n| n.via("fd00::2".parse().unwrap()).dev("eth0"))
+                    .route("10.1.0.0/16", |r| r.nhid(1))
+                    .unwrap(),
+                "of the other family",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
     }
 
     #[test]

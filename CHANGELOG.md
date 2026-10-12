@@ -1218,6 +1218,62 @@ All notable changes to this project will be documented in this file.
     - It fails with the foreign-peer blocker kept (step 2 is refused),
       and with the namespace uncompared (the peer stays in B).
 
+- **Declared nexthop objects, and routes through them (#516, row 11,
+  first part).**
+  - **Builder.**
+    - `NetworkConfig::nexthop(id, |n| …)` declares a nexthop object:
+      `via` and `dev` (with `onlink`), a `blackhole`, or a `group` of
+      `(id, weight)`.
+    - `RouteBuilder::nhid(id)` routes through one, in place of a gateway
+      and device.
+  - **Ownership.** A nexthop carries the config's `route_protocol`. A
+    live nexthop with the id and another protocol is another tool's.
+    - The apply refuses it rather than replacing it:
+      `ConfigDiff::nexthops_refused`, `Step::RefuseNexthop`.
+    - So is a change between a single nexthop and a group, which the
+      kernel will not make.
+  - **Diff and plan.** `ConfigDiff::nexthops_to_set` and
+    `nexthops_to_remove` hold the changes, and the JSON schema gains all
+    three keys.
+    - The plan holds them as `Step::SetNexthop { before, after }` and
+      `Step::DeleteNexthop`, which invert.
+    - Nexthops are set after the addresses, since a gateway has to be
+      reachable, and before the routes. Single nexthops come before the
+      groups made of them.
+    - On removal, groups come before their members.
+  - **Flushes.** The kernel deletes the nexthops on a link that goes
+    down or is deleted, then a group whose members are all gone, then
+    every route through any of them.
+    - Those count as absent, so the apply puts them back, routes
+      included.
+    - A recreate no longer counts declared nexthops among what it would
+      destroy.
+  - **How routes through a nexthop compare.** They compare by `nhid`
+    alone: the kernel dumps the object's gateway, device and type with
+    the route, so a route through a blackhole nexthop is a blackhole
+    route.
+  - **Removal.** A nexthop leaves through `PlanOptions::previous`;
+    `purge` never removes one.
+  - **Validation errors:**
+    - id 0, or a duplicate id;
+    - none or more than one of via, blackhole and group;
+    - a gateway without its device;
+    - `onlink` without a gateway and device;
+    - an undeclared, nested or zero-weight group member;
+    - a route through a nexthop that names its own gateway or device, or
+      a type;
+    - a family mismatch.
+  - **Test harness.** `assert_transition_with_previous` drives the test.
+  - **Tests.**
+    - A transition test changes a nexthop's gateway and its group's
+      weights in place, then recreates the VLAN they are on: the nexthops
+      on it, the group and all three routes come back. It then drops the
+      group, the blackhole and their routes.
+    - It passes on iproute2 6.15 and 6.1.
+    - It fails with declared nexthops counted as blockers (the recreate
+      is refused), and with the routes through lost nexthops taken as
+      present (it does not converge).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
