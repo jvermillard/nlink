@@ -18,12 +18,12 @@ use nlink::netlink::xfrm::{
     IpsecProtocol, PolicyDirection, XfrmMode, XfrmSaBuilder, XfrmSelector, XfrmSpBuilder,
     XfrmUserTmpl,
 };
-use nlink::netlink::{Connection, Xfrm, namespace};
+use nlink::netlink::{Connection, Xfrm};
 
 use crate::common::{TestNamespace, with_timeout};
 
 fn xfrm_in_ns(ns: &TestNamespace) -> Result<Connection<Xfrm>> {
-    namespace::connection_for::<Xfrm>(ns.name())
+    nlink::Connection::<Xfrm>::new_in(ns.name())
 }
 
 /// Build a minimal valid ESP SA with the given src/dst/spi.

@@ -37,21 +37,21 @@ use nlink::netlink::namespace;
 
 // Connect to a named namespace (created via `ip netns add myns`)
 // Functions are generic over protocol type
-let conn: Connection<Route> = namespace::connection_for("myns")?;
+let conn: Connection<Route> = Connection::new_in("myns")?;
 let links = conn.get_links().await?;
 
 // Connect by PID (e.g., container process)
-let conn: Connection<Route> = namespace::connection_for_pid(1234)?;
+let conn: Connection<Route> = Connection::new_in(namespace::NetnsRef::Pid(1234))?;
 
 // Connect by path
-let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
+let conn: Connection<Route> = Connection::new_in(std::path::Path::new("/proc/1234/ns/net"))?;
 
 // Generic connections work too (e.g., for WireGuard in a namespace)
-let genl: Connection<Generic> = namespace::connection_for("myns")?;
+let genl: Connection<Generic> = Connection::new_in("myns")?;
 
 // GENL protocols need async family resolution — use connection_for_async:
 use nlink::netlink::Wireguard;
-let wg: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
+let wg: Connection<Wireguard> = Connection::new_in_async("myns").await?;
 // Also works with: Macsec, Mptcp, Ethtool, Nl80211, Devlink
 
 // List available namespaces
@@ -115,16 +115,16 @@ use nlink::netlink::{Connection, Route, RtnetlinkGroup, namespace};
 use tokio_stream::StreamExt;
 
 // Monitor events in a named namespace
-let mut conn: Connection<Route> = namespace::connection_for("myns")?;
+let mut conn: Connection<Route> = Connection::new_in("myns")?;
 conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 let mut events = conn.events().await;
 
 // Or by PID
-let mut conn: Connection<Route> = namespace::connection_for_pid(1234)?;
+let mut conn: Connection<Route> = Connection::new_in(namespace::NetnsRef::Pid(1234))?;
 conn.subscribe(&[RtnetlinkGroup::Link])?;
 
 // Or by path
-let mut conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;
+let mut conn = Connection::<Route>::new_in(std::path::Path::new("/proc/1234/ns/net"))?;
 conn.subscribe_all()?;
 # Ok(())
 # }
@@ -261,7 +261,7 @@ use nlink::netlink::{Connection, Route, namespace};
 use nlink::netlink::tc::NetemConfig;
 use std::time::Duration;
 
-let conn: Connection<Route> = namespace::connection_for("myns")?;
+let conn: Connection<Route> = Connection::new_in("myns")?;
 
 // Get interface index via netlink (namespace-aware)
 let link = conn.get_link_by_name("eth0").await?.ok_or("no eth0 in myns")?;

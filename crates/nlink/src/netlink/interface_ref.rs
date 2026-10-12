@@ -9,7 +9,7 @@
 //!
 //! # Why This Exists
 //!
-//! When working with network namespaces via [`namespace::connection_for()`],
+//! When working with network namespaces via [`Connection::new_in()`],
 //! interface name resolution must happen through netlink (not sysfs) to query
 //! the correct namespace. By deferring name resolution to the Connection methods,
 //! the library can resolve names in the namespace context of the connection.

@@ -610,7 +610,7 @@ pub struct SampledRates {
 /// let mut sampler = RateSampler::new();
 /// loop {
 ///     for ns in &spaces {
-///         let conn = ns.connection::<nlink::Route>()?;
+///         let conn = nlink::Connection::<nlink::Route>::new_in(ns)?;
 ///         for r in sampler.sample(&StatsSnapshot::capture(&conn).await?) {
 ///             println!("{:?} {}: {:.0} B/s", r.key.netns, r.key.ifindex, r.rates.rx_bytes_per_sec);
 ///         }

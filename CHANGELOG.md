@@ -237,6 +237,36 @@ All notable changes to this project will be documented in this file.
     `Connection::new_in_namespace`'s span is now recorded.
     `docs/observability.md` had always said it was.
 
+- **One way into a namespace (#532).** `Connection::<P>::new_in(ns)` and
+  `new_in_async(ns)` replace seven spellings:
+  - `namespace::connection_for{,_path,_pid}{,_async}`;
+  - `Connection::for_namespace`;
+  - `Connection::new_in_namespace{,_path,_fd}`;
+  - `NamespaceSpec::connection{,_async}`.
+
+  The old spellings are deprecated.
+  - **`ns` is anything `Into<NetnsTarget>`** (new): an `ip netns` name, an
+    open `&Netns` or `&LabNamespace`, a `NetnsRef`, a path, a
+    `NamespaceSpec` or a `BorrowedFd`. A name with a `/` is refused, not
+    taken as a path.
+  - **The facade takes the same:**
+    - `facade::{apply, diff}::*_in` and every `Stack` `*_in` method;
+    - `StackPlan::apply`;
+    - `MultiNsWatch::add`;
+    - the new `facade::watch::*_changes_in`;
+    - the new `ConnectionPool::new_in`, and
+      `ConnectionPoolBuilder::namespace`.
+
+    Their `_in_namespace(&str)` forms and `ConnectionPool::for_namespace`
+    are deprecated.
+  - **Breaking:**
+    - `Netns::connection{,_async}` (new this cycle) are gone; use
+      `Connection::new_in(&netns)`.
+    - `ConnectionPoolBuilder::namespace` takes `impl Into<NetnsTarget>`.
+  - **Test.** A root test reaches one namespace through each kind of
+    target, by its id and a link only it has. It also checks a GENL
+    family, the facade and the pool.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -269,7 +299,8 @@ All notable changes to this project will be documented in this file.
     gives the caller's namespace.
   - **`sibling::<Q>()` and `sibling_async::<Q>()`** make a connection of
     another protocol in the same namespace.
-  - **`Netns::connection()`** makes its sockets on one worker thread per
+  - **A connection from a `Netns`** (`Connection::new_in(&netns)`, under
+    Breaking Changes, #532) makes its sockets on one worker thread per
     handle; `new_in_namespace` spawns and joins a thread per socket.
     Those sockets carry the namespace's marker, so a stream on them ends
     with `NamespaceDeleted` when the name is deleted, like a path-opened
@@ -1972,7 +2003,7 @@ All notable changes to this project will be documented in this file.
     initial one unless the host sets `nf_log_all_netns`. An NFLOG group has
     no such limit, so it is how a lab sees what its firewall logged.
   - **Use.**
-    - `Connection::<Nflog>::new()` (or `netns.connection::<Nflog>()`),
+    - `Connection::<Nflog>::new()` (or `Connection::<Nflog>::new_in(ns)`),
       then `bind_group(group, copy_range)`.
     - `events()` then yields an `NflogPacket` for each packet a `log
       group N` rule (or `-j NFLOG`) sends. It carries the family and

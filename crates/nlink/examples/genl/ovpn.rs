@@ -191,7 +191,7 @@ async fn run_apply() -> nlink::Result<()> {
     #[cfg(feature = "lab")]
     {
         use nlink::lab::LabNamespace;
-        use nlink::netlink::{link::OvpnLink, namespace, Route};
+        use nlink::netlink::{link::OvpnLink, Route};
 
         // SAFETY check.
         if unsafe { libc::geteuid() } != 0 {
@@ -210,7 +210,7 @@ async fn run_apply() -> nlink::Result<()> {
         let ns = LabNamespace::new(&ns_name)?;
 
         // 1. Create the ovpn interface in the namespace.
-        let route: Connection<Route> = namespace::connection_for(ns.name())?;
+        let route: Connection<Route> = nlink::Connection::new_in(ns.name())?;
         route.add_link(OvpnLink::new("ovpn0")).await?;
 
         let link = route
@@ -222,7 +222,7 @@ async fn run_apply() -> nlink::Result<()> {
         println!("Created ovpn0 (ifindex={ifindex}) in namespace {ns_name}");
 
         // 2. Open the OVPN GENL connection in the same namespace.
-        let ovpn: Connection<Ovpn> = namespace::connection_for_async(ns.name()).await?;
+        let ovpn: Connection<Ovpn> = nlink::Connection::new_in_async(ns.name()).await?;
 
         // 3. Declarative apply — one peer, one primary key.
         //

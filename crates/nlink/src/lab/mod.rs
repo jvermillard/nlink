@@ -282,6 +282,14 @@ impl LabNamespace {
     }
 }
 
+/// A lab namespace is a target like its [`Netns`](namespace::Netns):
+/// `Connection::<Route>::new_in(&lab)` (#532).
+impl<'a> From<&'a LabNamespace> for namespace::NetnsTarget<'a> {
+    fn from(lab: &'a LabNamespace) -> Self {
+        Self::Netns(&lab.netns)
+    }
+}
+
 impl Drop for LabNamespace {
     fn drop(&mut self) {
         // Only while the name still names this namespace: one deleted and

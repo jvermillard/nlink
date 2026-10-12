@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, ReconcileOptions};
 use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
-use nlink::netlink::{Nftables, namespace};
+use nlink::netlink::Nftables;
 
 use crate::common::converge::{assert_converges, assert_transition, case};
 use crate::common::{TestNamespace, with_timeout};
@@ -555,7 +555,7 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
             let ns_name = ns_name.clone();
             Arc::new(move || {
                 let ns_name = ns_name.clone();
-                Box::pin(async move { namespace::connection_for(&ns_name) })
+                Box::pin(async move { nlink::Connection::new_in(&ns_name) })
             })
         };
 
@@ -567,7 +567,7 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
         // pattern.
         let mut_ns = ns_name.clone();
         let mutator = tokio::spawn(async move {
-            let nft = namespace::connection_for::<Nftables>(&mut_ns)?;
+            let nft = nlink::Connection::<Nftables>::new_in(&mut_ns)?;
             for i in 0..2_000u32 {
                 use nlink::netlink::nftables::Rule;
                 let rule = Rule::new("flood", "input")
@@ -1832,7 +1832,7 @@ async fn the_nftables_snapshot_holds_objects_and_elements() -> nlink::Result<()>
     let name = ns.name().to_string();
     let factory: ConnectionFactory<Nftables> = Arc::new(move || {
         let name = name.clone();
-        Box::pin(async move { namespace::connection_for::<Nftables>(&name) })
+        Box::pin(async move { nlink::Connection::<Nftables>::new_in(&name) })
     });
     let mut stream = ns
         .connection_for::<Nftables>()?
@@ -2000,7 +2000,7 @@ async fn gap_deltas_report_a_table_deleted_during_an_overflow() -> nlink::Result
         let name = ns.name().to_string();
         let factory: ConnectionFactory<Nftables> = Arc::new(move || {
             let name = name.clone();
-            Box::pin(async move { namespace::connection_for(&name) })
+            Box::pin(async move { nlink::Connection::new_in(&name) })
         });
         let conn = ns.connection_for::<Nftables>()?;
         conn.socket().set_rcvbuf(256)?;

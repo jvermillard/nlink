@@ -3,9 +3,9 @@
 //! This example demonstrates how to list namespaces and query
 //! interfaces within a specific namespace.
 //!
-//! For sync protocols (Route, Nftables, etc.), use `connection_for()`.
+//! For sync protocols (Route, Nftables, etc.), use `Connection::new_in()`.
 //! For GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink),
-//! use `connection_for_async()` which handles async family resolution.
+//! use `Connection::new_in_async()`, which resolves the family there.
 //!
 //! Run with: cargo run -p nlink --example route_namespaces
 //!
@@ -73,7 +73,7 @@ async fn query_namespace(name: &str) -> nlink::netlink::Result<()> {
     println!("Interfaces in namespace '{}':", name);
     println!("{}", "-".repeat(50));
 
-    let conn = match namespace::connection_for(name) {
+    let conn = match Connection::<Route>::new_in(name) {
         Ok(c) => c,
         Err(e) if e.is_not_found() => {
             eprintln!("Namespace '{}' not found", name);
@@ -90,7 +90,7 @@ async fn query_namespace_by_pid(pid: u32) -> nlink::netlink::Result<()> {
     println!("Interfaces in namespace of PID {}:", pid);
     println!("{}", "-".repeat(50));
 
-    let conn = match namespace::connection_for_pid(pid) {
+    let conn = match Connection::<Route>::new_in(namespace::NetnsRef::Pid(pid)) {
         Ok(c) => c,
         Err(e) if e.is_not_found() => {
             eprintln!("Process {} not found or no access to its namespace", pid);

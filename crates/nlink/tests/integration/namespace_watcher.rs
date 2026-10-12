@@ -88,7 +88,7 @@ async fn created_means_the_namespace_is_there() -> Result<()> {
                 break Err("Created for a marker with no namespace".to_string());
             }
             Ok(Some(Ok(NamespaceEvent::Created { name }))) if name == real => {
-                break namespace::connection_for::<Route>(&real)
+                break nlink::Connection::<Route>::new_in(&real)
                     .map(|_| ())
                     .map_err(|e| format!("Created, but not there yet: {e}"));
             }

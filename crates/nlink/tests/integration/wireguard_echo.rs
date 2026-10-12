@@ -252,7 +252,7 @@ async fn a_prefix_on_two_peers_is_refused() -> nlink::Result<()> {
 async fn a_large_peer_set_reaches_the_kernel_whole() -> nlink::Result<()> {
     use nlink::netlink::genl::wireguard::WgPeerBuilder;
     use nlink::netlink::link::WireguardLink;
-    use nlink::netlink::{Wireguard, namespace};
+    use nlink::netlink::Wireguard;
     require_root!();
     nlink::require_host_root!();
     nlink::require_module!("wireguard");
@@ -261,7 +261,7 @@ async fn a_large_peer_set_reaches_the_kernel_whole() -> nlink::Result<()> {
     ns.connection()?
         .add_link(WireguardLink::new("wgm0"))
         .await?;
-    let wg = namespace::connection_for_async::<Wireguard>(ns.name()).await?;
+    let wg = nlink::Connection::<Wireguard>::new_in_async(ns.name()).await?;
     let key = |n: u32| {
         let mut k = [0u8; 32];
         k[..4].copy_from_slice(&n.to_be_bytes());

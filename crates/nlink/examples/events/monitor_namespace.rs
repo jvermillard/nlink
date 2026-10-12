@@ -26,17 +26,16 @@ async fn main() -> nlink::netlink::Result<()> {
                 .expect("invalid PID");
             let path = PathBuf::from(format!("/proc/{}/ns/net", pid));
             println!("Monitoring events in namespace of PID {}...", pid);
-            Connection::<Route>::new_in_namespace_path(&path)?
+            Connection::<Route>::new_in(path.as_path())?
         }
         Some("--path") => {
             let path = args.get(2).expect("usage: --path <path>");
             println!("Monitoring events in namespace at {}...", path);
-            Connection::<Route>::new_in_namespace_path(path)?
+            Connection::<Route>::new_in(std::path::Path::new(path))?
         }
         Some(ns_name) => {
-            let path = PathBuf::from("/var/run/netns").join(ns_name);
             println!("Monitoring events in namespace '{}'...", ns_name);
-            Connection::<Route>::new_in_namespace_path(&path)?
+            Connection::<Route>::new_in(ns_name)?
         }
         None => {
             println!("Monitoring events in default namespace...");

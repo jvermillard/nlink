@@ -81,7 +81,7 @@ use nlink::{ConnectionPool, Route};
 let pools: Vec<Arc<ConnectionPool<Route>>> = {
     let mut ps = Vec::with_capacity(ns_names.len());
     for ns in ns_names {
-        ps.push(Arc::new(ConnectionPool::<Route>::for_namespace(*ns, 4).await?));
+        ps.push(Arc::new(ConnectionPool::<Route>::new_in(*ns, 4).await?));
     }
     ps
 };

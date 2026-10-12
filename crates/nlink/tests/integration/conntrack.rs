@@ -14,7 +14,7 @@
 use std::{net::Ipv4Addr, time::Duration};
 
 use nlink::netlink::{
-    Connection, Netfilter, namespace,
+    Connection, Netfilter,
     netfilter::{
         ConntrackBuilder, ConntrackEvent, ConntrackGroup, ConntrackStatus, ConntrackTuple,
         IpProtocol, TcpConntrackState,
@@ -26,7 +26,7 @@ use crate::common::TestNamespace;
 
 /// Open a namespace-scoped Netfilter connection.
 fn nf_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Netfilter>> {
-    namespace::connection_for(ns.name())
+    nlink::Connection::new_in(ns.name())
 }
 
 #[tokio::test]
@@ -238,8 +238,8 @@ async fn ct_subscribe_observes_new_event() -> nlink::Result<()> {
 
     let ns = TestNamespace::new("ct-events")?;
     // Two namespace-scoped connections: one to mutate, one to subscribe.
-    let nf_mut: Connection<Netfilter> = namespace::connection_for(ns.name())?;
-    let nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
+    let nf_mut: Connection<Netfilter> = nlink::Connection::new_in(ns.name())?;
+    let nf_sub: Connection<Netfilter> = nlink::Connection::new_in(ns.name())?;
 
     nf_sub.subscribe(&[ConntrackGroup::New])?;
     let mut events = nf_sub.events().await;
@@ -334,8 +334,8 @@ async fn ct_subscribe_observes_destroy_event_on_del() -> nlink::Result<()> {
         return Ok(());
     }
 
-    let nf_mut: Connection<Netfilter> = namespace::connection_for(ns.name())?;
-    let nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
+    let nf_mut: Connection<Netfilter> = nlink::Connection::new_in(ns.name())?;
+    let nf_sub: Connection<Netfilter> = nlink::Connection::new_in(ns.name())?;
 
     // Inject first so there's something to destroy.
     let orig = ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))

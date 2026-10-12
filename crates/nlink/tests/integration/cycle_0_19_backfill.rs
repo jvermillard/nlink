@@ -16,13 +16,12 @@ use nlink::Result;
 use nlink::netlink::{
     Connection, Route,
     config::NetworkConfig,
-    namespace,
 };
 
 use crate::common::{TestNamespace, with_timeout};
 
 fn route_in_ns(ns: &TestNamespace) -> Result<Connection<Route>> {
-    namespace::connection_for::<Route>(ns.name())
+    nlink::Connection::<Route>::new_in(ns.name())
 }
 
 // =============================================================================
@@ -100,7 +99,7 @@ async fn plan_188_del_table_if_exists_is_idempotent() -> Result<()> {
         use nlink::netlink::nftables::types::Family;
 
         let ns = TestNamespace::new("p188-del-table")?;
-        let conn = namespace::connection_for::<Nftables>(ns.name())?;
+        let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
 
         // Cold: delete non-existent — must NOT error.
         conn.del_table_if_exists("absent-test", Family::Inet).await?;
@@ -203,11 +202,11 @@ async fn plan_200_facade_apply_network_in_namespace() -> Result<()> {
         let ns = TestNamespace::new("p200-facade")?;
         let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
 
-        let result = nlink::facade::apply::network_in_namespace(ns.name(), &cfg).await?;
+        let result = nlink::facade::apply::network_in(ns.name(), &cfg).await?;
         assert_eq!(result.changes_made, 1);
 
         // Diff via facade should be empty post-apply.
-        let diff = nlink::facade::diff::network_in_namespace(ns.name(), &cfg).await?;
+        let diff = nlink::facade::diff::network_in(ns.name(), &cfg).await?;
         assert!(diff.is_empty(), "post-apply facade diff must be empty");
 
         Ok(())
@@ -226,7 +225,7 @@ async fn plan_200_stack_apply_network_only_layer() -> Result<()> {
         let stack = nlink::facade::Stack::new()
             .network(NetworkConfig::new().link("eth0", |b| b.dummy()));
 
-        let report = stack.apply_in_namespace(ns.name()).await?;
+        let report = stack.apply_in(ns.name()).await?;
         assert!(!report.is_noop(), "Stack with a non-empty layer is not a no-op");
         assert!(
             report.network.as_ref().is_some_and(|r| r.changes_made == 1),
@@ -236,7 +235,7 @@ async fn plan_200_stack_apply_network_only_layer() -> Result<()> {
         assert!(report.wireguard.is_none());
 
         // Re-applying the same Stack must be a no-op.
-        let report2 = stack.apply_in_namespace(ns.name()).await?;
+        let report2 = stack.apply_in(ns.name()).await?;
         assert!(report2.is_noop(), "re-apply must be no-op; got {report2:?}");
 
         Ok(())
@@ -408,7 +407,7 @@ async fn plan_196_wireguard_config_round_trips() -> Result<()> {
         }
 
         // Connect to the WG GENL family inside the ns.
-        let conn = namespace::connection_for_async::<Wireguard>(ns.name()).await?;
+        let conn = nlink::Connection::<Wireguard>::new_in_async(ns.name()).await?;
 
         let private_key = [0xaau8; 32];
         let peer_pk = [0xbbu8; 32];
@@ -485,7 +484,7 @@ async fn plan_199_watcher_first_poll_emits_initial_inventory() -> Result<()> {
             return Ok(());
         }
 
-        let conn = namespace::connection_for_async::<Wireguard>(ns.name()).await?;
+        let conn = nlink::Connection::<Wireguard>::new_in_async(ns.name()).await?;
         let opts = WireguardWatchOptions::default()
             .interval(Duration::from_millis(100))
             .interface("wg0");
@@ -574,7 +573,7 @@ async fn plan_204_c2_xfrm_add_sp_round_trips() -> Result<()> {
         let _route = route_in_ns(&ns)?;
 
         let conn: nlink::netlink::Connection<nlink::netlink::Xfrm> =
-            namespace::connection_for(ns.name())?;
+            nlink::Connection::new_in(ns.name())?;
 
         // Build a minimal SP and just verify list/dump succeeds.
         // Full add_sp wiring still requires builder integration
@@ -774,7 +773,7 @@ async fn plan_204_c1_verdict_jump_round_trips_through_kernel() -> Result<()> {
         use nlink::netlink::nftables::types::{Chain, Family, Hook, Rule};
 
         let ns = TestNamespace::new("p204-c1-jump")?;
-        let conn = namespace::connection_for::<Nftables>(ns.name())?;
+        let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
 
         // Stand up a table with a parent chain (hooks input,
         // base chain) and a child chain (regular, no hook —
@@ -884,7 +883,7 @@ async fn plan_211_m1_inet_ingress_chain_installs_on_correct_hook() -> Result<()>
         use nlink::netlink::nftables::types::{Chain, Family, Hook};
 
         let ns = TestNamespace::new("p211-m1-ingress")?;
-        let conn = namespace::connection_for::<Nftables>(ns.name())?;
+        let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
 
         // Install the Prerouting chain first — always supported.
         let prerouting = Chain::new("t", "pre")?
@@ -987,7 +986,7 @@ async fn plan_191_route_subscribe_with_resync_emits_live_events() -> Result<()> 
         let ns_name = ns.name().to_string();
         let factory: nlink::netlink::resync::ConnectionFactory<Route> = Arc::new(move || {
             let ns = ns_name.clone();
-            Box::pin(async move { namespace::connection_for::<Route>(&ns) })
+            Box::pin(async move { nlink::Connection::<Route>::new_in(&ns) })
         });
 
         let mut stream = conn
@@ -1053,7 +1052,7 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
         use nlink::netlink::nftables::types::{Chain, Family, Hook, Rule};
 
         let ns = TestNamespace::new("p204-c1-goto")?;
-        let conn = namespace::connection_for::<Nftables>(ns.name())?;
+        let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
 
         let parent = Chain::new("t", "parent")?
             .family(Family::Inet)
@@ -1132,7 +1131,7 @@ async fn wg_private_key_readback_round_trips() -> Result<()> {
             ns.name()
         );
 
-        let conn = namespace::connection_for_async::<Wireguard>(ns.name()).await?;
+        let conn = nlink::Connection::<Wireguard>::new_in_async(ns.name()).await?;
 
         let private_key = [0xCDu8; 32];
         conn.set_device("wg0", |b| b.private_key(private_key)).await?;

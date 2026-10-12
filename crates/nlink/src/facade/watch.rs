@@ -47,14 +47,25 @@ pub async fn route_changes() -> Result<RouteResyncStream> {
 }
 
 /// Watch RTNETLINK changes inside a named namespace.
-///
-/// 0.19 Finding B — now `async`.
+#[deprecated(since = "0.32.0", note = "use `route_changes_in(ns)`, which takes a name (#532)")]
+pub async fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
+    route_changes_in(ns).await
+}
+
+/// Watch RTNETLINK changes inside a namespace: anything
+/// [`Into<NetnsTarget>`](namespace::NetnsTarget) — an `ip netns` name, an
+/// open `Netns`, a `NetnsRef`, … (#532).
 ///
 /// The namespace is opened once. Every resync reconnects to that one, and
 /// ends the stream with `NamespaceDeleted` once its name is gone, rather
 /// than connect to a namespace created later under the same name (#520).
-pub async fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
-    let netns = Arc::new(namespace::Netns::open(ns)?);
+pub async fn route_changes_in<'a>(
+    ns: impl Into<namespace::NetnsTarget<'a>>,
+) -> Result<RouteResyncStream> {
+    let Some(netns) = ns.into().open()? else {
+        return route_changes().await;
+    };
+    let netns = Arc::new(netns);
     let conn = netns.connection::<Route>()?;
     let factory: ConnectionFactory<Route> = Arc::new(move || {
         let netns = netns.clone();
@@ -90,13 +101,22 @@ pub async fn nftables_changes() -> Result<NftablesResyncStream> {
 }
 
 /// Watch nftables ruleset mutations inside a named namespace.
-///
-/// 0.19 Finding B — now `async`.
+#[deprecated(since = "0.32.0", note = "use `nftables_changes_in(ns)`, which takes a name (#532)")]
+pub async fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStream> {
+    nftables_changes_in(ns).await
+}
+
+/// Watch nftables ruleset mutations inside a namespace (#532).
 ///
 /// Resyncs reconnect to the namespace the stream started in, as
-/// [`route_changes_in_namespace`] does (#520).
-pub async fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStream> {
-    let netns = Arc::new(namespace::Netns::open(ns)?);
+/// [`route_changes_in`] does (#520).
+pub async fn nftables_changes_in<'a>(
+    ns: impl Into<namespace::NetnsTarget<'a>>,
+) -> Result<NftablesResyncStream> {
+    let Some(netns) = ns.into().open()? else {
+        return nftables_changes().await;
+    };
+    let netns = Arc::new(netns);
     let conn = netns.connection::<Nftables>()?;
     let factory: ConnectionFactory<Nftables> = Arc::new(move || {
         let netns = netns.clone();
@@ -125,13 +145,20 @@ pub async fn wireguard_changes(opts: WireguardWatchOptions) -> Result<WireguardW
 }
 
 /// Same as [`wireguard_changes`] inside a named namespace.
+#[deprecated(since = "0.32.0", note = "use `wireguard_changes_in(ns, opts)`, which takes a name (#532)")]
 pub async fn wireguard_changes_in_namespace(
     ns: &str,
     opts: WireguardWatchOptions,
 ) -> Result<WireguardWatcher> {
-    let conn = namespace::Netns::open(ns)?
-        .connection_async::<Wireguard>()
-        .await?;
+    wireguard_changes_in(ns, opts).await
+}
+
+/// Same as [`wireguard_changes`] inside a namespace (#532).
+pub async fn wireguard_changes_in<'a>(
+    ns: impl Into<namespace::NetnsTarget<'a>>,
+    opts: WireguardWatchOptions,
+) -> Result<WireguardWatcher> {
+    let conn = Connection::<Wireguard>::new_in_async(ns).await?;
     WireguardWatcher::new(conn, opts)
 }
 
@@ -347,11 +374,15 @@ where
         self
     }
 
-    /// Watch `netns` under `key`, replacing whatever `key` watched. The
+    /// Watch `ns` under `key`, replacing whatever `key` watched. `ns` is
+    /// an open `Netns`, an `ip netns` name, a `NetnsRef`, … (#532). The
     /// watch holds its own handle to the namespace, which keeps the
     /// namespace alive until its key is dropped.
-    pub fn add(&mut self, key: K, netns: &namespace::Netns) -> Result<()> {
-        let netns = Arc::new(netns.try_clone()?);
+    pub fn add<'a>(&mut self, key: K, ns: impl Into<namespace::NetnsTarget<'a>>) -> Result<()> {
+        let netns = match ns.into().open()? {
+            Some(netns) => Arc::new(netns),
+            None => Arc::new(namespace::Netns::current()?),
+        };
         let route = self.families.contains(Families::ROUTE).then(|| {
             let netns = netns.clone();
             let factory: ConnectionFactory<Route> = Arc::new(move || {

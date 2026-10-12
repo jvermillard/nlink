@@ -108,7 +108,7 @@ let netns_name = "tenant-a".to_string();
 let factory: ConnectionFactory<Nftables> = Arc::new(move || {
     let ns = netns_name.clone();
     Box::pin(async move {
-        nlink::netlink::namespace::connection_for(&ns)
+        nlink::Connection::new_in(&ns)
     })
 });
 ```

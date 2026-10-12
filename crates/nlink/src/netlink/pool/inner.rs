@@ -98,8 +98,9 @@ impl<P: ProtocolState> ConnectionPool<P> {
         self.inner.acquire_timeout
     }
 
-    /// Namespace name this pool is bound to, if any.
-    /// `None` indicates the default (calling-process) netns.
+    /// The namespace this pool is bound to, if any: its name for a named
+    /// one, else how it was opened (a path, a pid). `None` is the default
+    /// (calling-process) netns.
     pub fn namespace(&self) -> Option<&str> {
         self.inner.namespace.as_deref()
     }
@@ -121,8 +122,21 @@ impl<P: ProtocolState + Default + SyncConstructible + 'static> ConnectionPool<P>
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.32.0", note = "use `ConnectionPool::new_in(ns, size)` (#532)")]
     pub async fn for_namespace(
         ns: impl Into<String>,
+        size: usize,
+    ) -> Result<Self> {
+        Self::new_in(ns.into(), size).await
+    }
+
+    /// A pool of `size` connections in a network namespace: an `ip netns`
+    /// name, an open [`Netns`](namespace::Netns), a
+    /// [`NetnsRef`](namespace::NetnsRef), … (#532). Equivalent to
+    /// [`ConnectionPoolBuilder::namespace`] with
+    /// [`size`](ConnectionPoolBuilder::size).
+    pub async fn new_in<'a>(
+        ns: impl Into<namespace::NetnsTarget<'a>>,
         size: usize,
     ) -> Result<Self> {
         ConnectionPoolBuilder::new()
@@ -143,8 +157,28 @@ impl<P: ProtocolState + Default + SyncConstructible + 'static> ConnectionPool<P>
 pub struct ConnectionPoolBuilder<P: ProtocolState> {
     size: usize,
     acquire_timeout: Duration,
-    namespace: Option<String>,
+    namespace: Option<PoolNamespace>,
     _phantom: PhantomData<fn() -> P>,
+}
+
+/// The builder's namespace: where one is, opened at `build`, or one
+/// already open (or the error opening it gave).
+enum PoolNamespace {
+    Ref(namespace::NetnsRef),
+    Open(Result<Arc<namespace::Netns>>),
+}
+
+impl PoolNamespace {
+    /// The namespace, opened once: every connection, and every
+    /// replacement, is made in that one, never in a namespace created
+    /// later under the same name (#520).
+    fn open(this: Option<Self>) -> Result<Option<Arc<namespace::Netns>>> {
+        match this {
+            None => Ok(None),
+            Some(Self::Ref(r)) => Ok(Some(Arc::new(r.open()?))),
+            Some(Self::Open(netns)) => netns.map(Some),
+        }
+    }
 }
 
 impl<P: ProtocolState> Default for ConnectionPoolBuilder<P> {
@@ -191,10 +225,20 @@ impl<P: ProtocolState> ConnectionPoolBuilder<P> {
         self
     }
 
-    /// Bind the pool to a named network namespace
-    /// (`/var/run/netns/<name>`).
-    pub fn namespace(mut self, name: impl Into<String>) -> Self {
-        self.namespace = Some(name.into());
+    /// Bind the pool to a network namespace: an `ip netns` name, an open
+    /// [`Netns`](namespace::Netns), a [`NetnsRef`](namespace::NetnsRef),
+    /// a path, a namespace fd (#532). A handle or fd is duplicated now; a
+    /// name or path is opened by `build`.
+    pub fn namespace<'a>(mut self, ns: impl Into<namespace::NetnsTarget<'a>>) -> Self {
+        self.namespace = match ns.into() {
+            namespace::NetnsTarget::Ref(r) if r.is_default() => None,
+            namespace::NetnsTarget::Ref(r) => Some(PoolNamespace::Ref(r)),
+            other => match other.open() {
+                Ok(None) => None,
+                Ok(Some(netns)) => Some(PoolNamespace::Open(Ok(Arc::new(netns)))),
+                Err(e) => Some(PoolNamespace::Open(Err(e))),
+            },
+        };
         self
     }
 }
@@ -211,14 +255,8 @@ where
     /// block and gets selected automatically by the trait bound.
     pub async fn build(self) -> Result<ConnectionPool<P>> {
         let (tx, rx) = mpsc::channel(self.size);
-        let namespace = self.namespace.clone();
-        // The namespace is opened once: every connection, and every
-        // replacement, is made in that one, never in a namespace created
-        // later under the same name (#520).
-        let netns = match &namespace {
-            Some(ns) => Some(Arc::new(namespace::Netns::open(ns)?)),
-            None => None,
-        };
+        let netns = PoolNamespace::open(self.namespace)?;
+        let namespace = netns.as_ref().map(|ns| ns.label().to_string());
         for _ in 0..self.size {
             let conn = make_sync::<P>(netns.as_deref())?;
             tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
@@ -283,11 +321,8 @@ where
     /// picks the right overload from the bound.
     pub async fn build_async(self) -> Result<ConnectionPool<P>> {
         let (tx, rx) = mpsc::channel(self.size);
-        let namespace = self.namespace.clone();
-        let netns = match &namespace {
-            Some(ns) => Some(Arc::new(namespace::Netns::open(ns)?)),
-            None => None,
-        };
+        let netns = PoolNamespace::open(self.namespace)?;
+        let namespace = netns.as_ref().map(|ns| ns.label().to_string());
         for _ in 0..self.size {
             let conn = make_async::<P>(netns.clone()).await?;
             tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
@@ -353,7 +388,7 @@ mod tests {
         let b = ConnectionPoolBuilder::<Route>::new();
         assert!(b.size >= 1);
         assert_eq!(b.acquire_timeout, Duration::from_secs(5));
-        assert_eq!(b.namespace, None);
+        assert!(b.namespace.is_none());
     }
 
     #[test]
@@ -365,6 +400,10 @@ mod tests {
     #[test]
     fn builder_namespace_setter() {
         let b = ConnectionPoolBuilder::<Route>::new().namespace("myns");
-        assert_eq!(b.namespace.as_deref(), Some("myns"));
+        assert!(
+            matches!(&b.namespace, Some(PoolNamespace::Ref(namespace::NetnsRef::Named(n))) if n == "myns")
+        );
+        let b = ConnectionPoolBuilder::<Route>::new().namespace(namespace::NetnsRef::Default);
+        assert!(b.namespace.is_none(), "the default namespace needs nothing opened");
     }
 }

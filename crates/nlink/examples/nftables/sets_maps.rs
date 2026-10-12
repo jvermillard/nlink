@@ -124,10 +124,10 @@ async fn run_apply() -> nlink::Result<()> {
 }
 
 async fn demo(ns: &str) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns)?;
+    let route: Connection<Route> = nlink::Connection::new_in(ns)?;
     let lo = route.get_link_by_name("lo").await?.expect("netns has lo");
     route.set_link_up_by_index(lo.ifindex()).await?;
-    let conn: Connection<Nftables> = namespace::connection_for(ns)?;
+    let conn: Connection<Nftables> = nlink::Connection::new_in(ns)?;
 
     let cfg = ruleset()?;
     let diff = cfg.diff(&conn).await?;

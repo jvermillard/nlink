@@ -191,8 +191,12 @@ async fn pool_for_namespace_isolates_per_netns() -> nlink::Result<()> {
         .add_link(DummyLink::new("uniq_b"))
         .await?;
 
-    let pool_a = ConnectionPool::<Route>::for_namespace(ns_a.name().to_string(), 2).await?;
-    let pool_b = ConnectionPool::<Route>::for_namespace(ns_b.name().to_string(), 2).await?;
+    // One by name, one by an open handle (#532).
+    let pool_a = ConnectionPool::<Route>::new_in(ns_a.name(), 2).await?;
+    let b = nlink::netlink::namespace::Netns::open(ns_b.name())?;
+    let pool_b = ConnectionPool::<Route>::new_in(&b, 2).await?;
+    assert_eq!(pool_a.namespace(), Some(ns_a.name()));
+    assert_eq!(pool_b.namespace(), Some(ns_b.name()));
 
     let conn_a = pool_a.acquire().await?;
     let conn_b = pool_b.acquire().await?;

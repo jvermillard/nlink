@@ -5861,7 +5861,7 @@ impl Connection<Route> {
         // A link created in another namespace is looked up — its master,
         // its alias, a pinned MTU — there (#517).
         let elsewhere = match config.netns_fd() {
-            Some(fd) => Some(Connection::<Route>::new_in_namespace(fd)?),
+            Some(fd) => Some(Connection::<Route>::new_in(fd)?),
             None => None,
         };
         let home = elsewhere.as_ref().unwrap_or(self);

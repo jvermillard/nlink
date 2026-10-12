@@ -46,7 +46,7 @@
 //! use nlink::netlink::tc::NetemConfig;
 //! use std::time::Duration;
 //!
-//! let conn: Connection<Route> = namespace::connection_for("lab-mgmt")?;
+//! let conn: Connection<Route> = Connection::new_in("lab-mgmt")?;
 //!
 //! PerPeerImpairer::new("vethA-br")
 //!     .impair_dst_ip(

@@ -62,8 +62,10 @@ RUST_LOG=nlink=trace cargo run
 ### Connection lifecycle (INFO)
 
 - `Connection::<P>::new()` — protocol type name in the `protocol` field.
-- `Connection::<P>::new_in_namespace(ns_fd)` — adds the `ns_fd` field.
-- `Connection::<P>::new_in_namespace_path(ns_path)` — adds the `ns_path` field as a Display.
+- `Connection::<P>::new_in(ns)` and `new_in_async(ns)` — add the `netns` field: the
+  namespace's name, path, pid or fd, as a Display.
+- `Connection::<P>::new_in_namespace(ns_fd)` and `new_in_namespace_path(ns_path)`
+  (deprecated) — add the `ns_fd` field, and the `ns_path` field as a Display.
 - `Connection::<Route>::subscribe(groups)` — lists the multicast `groups` subscribed.
 
 ### Netlink request / ack / dump (TRACE)

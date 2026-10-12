@@ -66,19 +66,19 @@
 //!
 //! // Connect to a named namespace (created via `ip netns add myns`)
 //! // Functions are generic over protocol type
-//! let conn: Connection<Route> = namespace::connection_for("myns")?;
+//! let conn: Connection<Route> = Connection::new_in("myns")?;
 //! let links = conn.get_links().await?;
 //!
 //! // Or connect to a container's namespace
 //! # let container_pid = 1234;
-//! let conn: Connection<Route> = namespace::connection_for_pid(container_pid)?;
+//! let conn: Connection<Route> = Connection::new_in(namespace::NetnsRef::Pid(container_pid))?;
 //! let links = conn.get_links().await?;
 //!
 //! // Or use a path directly
-//! let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
+//! let conn: Connection<Route> = Connection::new_in(std::path::Path::new("/proc/1234/ns/net"))?;
 //!
 //! // Generic connections work too (e.g., for WireGuard in a namespace)
-//! let genl: Connection<Generic> = namespace::connection_for("myns")?;
+//! let genl: Connection<Generic> = Connection::new_in("myns")?;
 //! # Ok(())
 //! # }
 //! ```
@@ -159,7 +159,7 @@
 //! conn1.subscribe_all()?;
 //! streams.insert("default", conn1.into_events().await);
 //!
-//! let conn2: Connection<Route> = namespace::connection_for("ns1")?;
+//! let conn2: Connection<Route> = Connection::new_in("ns1")?;
 //! conn2.subscribe_all()?;
 //! streams.insert("ns1", conn2.into_events().await);
 //!

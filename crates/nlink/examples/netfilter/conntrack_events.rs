@@ -131,9 +131,9 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     //   - sub: subscribed to multicast NEW + DESTROY, owned by the
     //     collector task.
     //   - act: used to inject + delete entries (which trigger events).
-    let sub: Connection<Netfilter> = namespace::connection_for(ns_name)?;
+    let sub: Connection<Netfilter> = nlink::Connection::new_in(ns_name)?;
     sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
-    let act: Connection<Netfilter> = namespace::connection_for(ns_name)?;
+    let act: Connection<Netfilter> = nlink::Connection::new_in(ns_name)?;
 
     println!("  Opened sub + act connections in namespace `{ns_name}`.");
 

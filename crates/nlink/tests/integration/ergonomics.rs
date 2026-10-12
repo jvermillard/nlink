@@ -23,7 +23,7 @@ async fn wait_link_up_returns_when_link_comes_up() -> nlink::Result<()> {
     // should observe operstate change within its 5s deadline.
     let ns_name = ns.name().to_string();
     let wait_task = tokio::spawn(async move {
-        let conn = nlink::netlink::namespace::connection_for::<nlink::Route>(&ns_name)?;
+        let conn = nlink::Connection::<nlink::Route>::new_in(&ns_name)?;
         conn.wait_link_up("d0", Duration::from_secs(5)).await
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -122,7 +122,7 @@ async fn wireguard_diff_reports_missing_device_and_ensure_creates_it() -> nlink:
     let ns = TestNamespace::new("wg-bootstrap")?;
     let conn = ns.connection()?;
     let wg: nlink::Connection<nlink::Wireguard> =
-        nlink::netlink::namespace::connection_for_async(ns.name()).await?;
+        nlink::Connection::new_in_async(ns.name()).await?;
 
     let cfg = WireguardConfig::new().device("wg-boot0", |d| d.listen_port(51999));
 

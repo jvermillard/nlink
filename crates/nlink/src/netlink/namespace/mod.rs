@@ -11,26 +11,31 @@
 //!
 //! # Example
 //!
+//! Every entry point that works in a namespace takes `impl
+//! Into<`[`NetnsTarget`]`>` (#532): an `ip netns` name, an open
+//! [`Netns`], a [`NetnsRef`], a path, a borrowed namespace fd.
+//!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! use nlink::netlink::namespace;
-//! use nlink::netlink::{Connection, Route, Generic};
+//! use std::path::Path;
 //!
-//! // Get a Route connection for a named namespace
-//! let conn: Connection<Route> = namespace::connection_for("myns")?;
+//! use nlink::netlink::namespace::{Netns, NetnsRef};
+//! use nlink::netlink::{Connection, Generic, Route};
+//!
+//! // A Route connection in a named namespace
+//! let conn = Connection::<Route>::new_in("myns")?;
 //! let links = conn.get_links().await?;
 //!
-//! // Or a Generic connection for WireGuard in a namespace
-//! let conn: Connection<Generic> = namespace::connection_for("myns")?;
+//! // Any other protocol the same way; GENL families use `new_in_async`
+//! let genl = Connection::<Generic>::new_in("myns")?;
 //!
-//! // Or use a path directly
-//! let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
+//! // A container's namespace, by path or by pid
+//! let conn = Connection::<Route>::new_in(Path::new("/proc/1234/ns/net"))?;
+//! let conn = Connection::<Route>::new_in(NetnsRef::Pid(1234))?;
 //!
-//! // Or use NamespaceSpec for a unified API
-//! use nlink::netlink::namespace::NamespaceSpec;
-//!
-//! let spec = NamespaceSpec::Named("myns");
-//! let conn: Connection<Route> = spec.connection()?;
+//! // Open it once to be sure every connection is in the same one
+//! let ns = Netns::open("myns")?;
+//! let (a, b) = (Connection::<Route>::new_in(&ns)?, Connection::<Route>::new_in(&ns)?);
 //! # Ok(())
 //! # }
 //! ```
@@ -51,13 +56,12 @@ use super::{
         construction::{AsyncConstructible, SyncConstructible},
         AsyncProtocolInit, ProtocolState,
     },
-    socket::NetlinkSocket,
 };
 
 mod command;
 mod netns;
 
-pub use netns::{Netns, NetnsId, NetnsRef, Sysctl};
+pub use netns::{Netns, NetnsId, NetnsRef, NetnsTarget, Sysctl};
 pub use command::{NetnsCommand, Overlay, etc_overlay_supported};
 
 /// Specification for which network namespace to use.
@@ -81,7 +85,7 @@ pub use command::{NetnsCommand, Overlay, etc_overlay_supported};
 /// let by_pid = NamespaceSpec::Pid(1234);
 ///
 /// // Create connections (generic over protocol type)
-/// let conn: Connection<Route> = named.connection()?;
+/// let conn = Connection::<Route>::new_in(named)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -110,33 +114,25 @@ impl<'a> NamespaceSpec<'a> {
     /// use nlink::netlink::Route;
     ///
     /// let spec = NamespaceSpec::Named("myns");
-    /// let conn: Connection<Route> = spec.connection()?;
+    /// let conn = Connection::<Route>::new_in(spec)?;
     /// let links = conn.get_links().await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.32.0", note = "use `Connection::new_in(spec)` (#532)")]
     pub fn connection<P: ProtocolState + Default + SyncConstructible>(&self) -> Result<Connection<P>> {
-        match self {
-            NamespaceSpec::Default => Connection::<P>::new(),
-            NamespaceSpec::Named(name) => connection_for(name),
-            NamespaceSpec::Path(path) => connection_for_path(path),
-            NamespaceSpec::Pid(pid) => connection_for_pid(*pid),
-        }
+        Connection::<P>::new_in(self)
     }
 
     /// Create an async-initialized connection (GENL families that
     /// need family-ID resolution — WireGuard, MACsec, …) for this
     /// namespace specification. Async counterpart of
     /// [`connection`](Self::connection) (#169).
+    #[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(spec)` (#532)")]
     pub async fn connection_async<P: AsyncProtocolInit + AsyncConstructible>(
         &self,
     ) -> Result<Connection<P>> {
-        match self {
-            NamespaceSpec::Default => Connection::<P>::new_async().await,
-            NamespaceSpec::Named(name) => connection_for_async(name).await,
-            NamespaceSpec::Path(path) => connection_for_path_async(path).await,
-            NamespaceSpec::Pid(pid) => connection_for_pid_async(*pid).await,
-        }
+        Connection::<P>::new_in_async(self).await
     }
 
     /// Check if this refers to the default namespace.
@@ -357,14 +353,14 @@ fn named_path(name: &str) -> Result<PathBuf> {
 /// use nlink::netlink::Route;
 ///
 /// // Create a connection to work in the "production" namespace
-/// let conn: Connection<Route> = namespace::connection_for("production")?;
+/// let conn: Connection<Route> = Connection::new_in("production")?;
 /// let links = conn.get_links().await?;
 /// # Ok(())
 /// # }
 /// ```
+#[deprecated(since = "0.32.0", note = "use `Connection::new_in(name)` (#532)")]
 pub fn connection_for<P: ProtocolState + Default + SyncConstructible>(name: &str) -> Result<Connection<P>> {
-    let path = live_named_path(name)?;
-    connection_for_path(&path)
+    Connection::<P>::new_in(name)
 }
 
 /// Get a connection for a network namespace specified by path.
@@ -383,15 +379,16 @@ pub fn connection_for<P: ProtocolState + Default + SyncConstructible>(name: &str
 /// use nlink::netlink::Route;
 ///
 /// // For a container's namespace
-/// let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
+/// let conn: Connection<Route> = Connection::new_in(std::path::Path::new("/proc/1234/ns/net"))?;
 /// let links = conn.get_links().await?;
 /// # Ok(())
 /// # }
 /// ```
+#[deprecated(since = "0.32.0", note = "use `Connection::new_in(path)` (#532)")]
 pub fn connection_for_path<P: ProtocolState + Default + SyncConstructible, T: AsRef<Path>>(
     path: T,
 ) -> Result<Connection<P>> {
-    Connection::<P>::new_in_namespace_path(path)
+    Connection::<P>::new_in(path.as_ref())
 }
 
 /// Get a connection for a process's network namespace.
@@ -405,14 +402,14 @@ pub fn connection_for_path<P: ProtocolState + Default + SyncConstructible, T: As
 /// use nlink::netlink::Route;
 ///
 /// // Get interfaces visible to process 1234
-/// let conn: Connection<Route> = namespace::connection_for_pid(1234)?;
+/// let conn: Connection<Route> = Connection::new_in(namespace::NetnsRef::Pid(1234))?;
 /// let links = conn.get_links().await?;
 /// # Ok(())
 /// # }
 /// ```
+#[deprecated(since = "0.32.0", note = "use `Connection::new_in(NetnsRef::Pid(pid))` (#532)")]
 pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u32) -> Result<Connection<P>> {
-    let path = format!("/proc/{}/ns/net", pid);
-    connection_for_path(&path)
+    Connection::<P>::new_in(NetnsRef::Pid(pid))
 }
 
 /// Get an async-initialized connection for a named network namespace.
@@ -433,33 +430,32 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, Wireguard, namespace};
 ///
-/// let conn: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
+/// let conn: Connection<Wireguard> = Connection::new_in_async("myns").await?;
 /// let device = conn.get_device("wg0").await?;
 /// # Ok(())
 /// # }
 /// ```
+#[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(name)` (#532)")]
 pub async fn connection_for_async<P: AsyncProtocolInit + AsyncConstructible>(name: &str) -> Result<Connection<P>> {
-    let path = live_named_path(name)?;
-    connection_for_path_async(&path).await
+    Connection::<P>::new_in_async(name).await
 }
 
 /// Get an async-initialized connection for a namespace specified by path.
 ///
 /// See [`connection_for_async`] for details.
+#[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(path)` (#532)")]
 pub async fn connection_for_path_async<P: AsyncProtocolInit + AsyncConstructible, T: AsRef<Path>>(
     path: T,
 ) -> Result<Connection<P>> {
-    let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, path)?;
-    let state = P::resolve_async(&socket).await?;
-    Ok(Connection::from_parts(socket, state))
+    Connection::<P>::new_in_async(path.as_ref()).await
 }
 
 /// Get an async-initialized connection for a process's network namespace.
 ///
 /// See [`connection_for_async`] for details.
+#[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(NetnsRef::Pid(pid))` (#532)")]
 pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>(pid: u32) -> Result<Connection<P>> {
-    let path = format!("/proc/{}/ns/net", pid);
-    connection_for_path_async(&path).await
+    Connection::<P>::new_in_async(NetnsRef::Pid(pid)).await
 }
 
 /// Open a namespace file and return its file descriptor.
@@ -548,10 +544,10 @@ impl AsRawFd for NamespaceFd {
     }
 }
 
-/// I/O-safe borrow of the namespace fd (#186). Pass to
-/// [`NetlinkSocket::new_in_namespace_fd`] or
-/// [`Connection::new_in_namespace_fd`] instead of the `RawFd` form, and
-/// the borrow checker keeps the fd alive for the call.
+/// I/O-safe borrow of the namespace fd (#186). Pass it to
+/// [`Connection::new_in`] (as `fd.as_fd()`), or to any parameter that
+/// takes `impl AsFd`, and the borrow checker keeps the fd alive for the
+/// call.
 impl AsFd for NamespaceFd {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.file.as_fd()
@@ -712,7 +708,7 @@ impl Drop for NamespaceGuard {
 /// use nlink::netlink::{Connection, Route, namespace};
 ///
 /// if namespace::exists("myns") {
-///     let conn: Connection<Route> = namespace::connection_for("myns")?;
+///     let conn: Connection<Route> = Connection::new_in("myns")?;
 ///     // ...
 /// }
 /// # Ok(())
@@ -893,7 +889,7 @@ fn live_path_in(run_dir: &Path, ns_name: &str) -> Result<PathBuf> {
 ///
 /// namespace::create("myns")?;
 /// // Now "myns" exists and can be used
-/// let conn: nlink::Connection<nlink::Route> = namespace::connection_for("myns")?;
+/// let conn = nlink::Connection::<nlink::Route>::new_in("myns")?;
 /// # Ok(())
 /// # }
 /// ```
@@ -2479,7 +2475,7 @@ mod tests {
 
     #[test]
     fn connection_for_missing_name_is_not_found() {
-        let Err(err) = connection_for::<crate::Route>("definitely_does_not_exist_12345") else {
+        let Err(err) = Connection::<crate::Route>::new_in("definitely_does_not_exist_12345") else {
             panic!("missing namespace must fail");
         };
         assert!(err.is_not_found(), "got unclassifiable error: {err}");
