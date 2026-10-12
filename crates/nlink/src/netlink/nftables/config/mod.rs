@@ -56,7 +56,10 @@
 mod apply;
 mod diff;
 mod rules;
+mod snapshot;
 mod types;
+
+pub use snapshot::RulesetSnapshot;
 
 // The one reconcile vocabulary every layer shares (#532).
 pub use crate::netlink::reconcile::{ReconcileOptions, ReconcileReport};

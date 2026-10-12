@@ -1415,33 +1415,31 @@ impl NftablesConfig {
         options: &NftDiffOptions,
     ) -> Result<NftablesDiff> {
         self.validate()?;
-        // A diff is 3 + 2N dumps. One that a commit lands in the middle of
-        // can mix two rulesets; a few tries is plenty unless something is
-        // committing in a loop, and then the last diff's apply is refused
-        // (its generation is stale) rather than applied against a torn view.
-        const ATTEMPTS: usize = 3;
-        let mut attempt = 0;
-        loop {
-            let before = conn.generation().await?;
-            let mut diff = self.diff_once(conn, options).await?;
-            diff.generation = Some(before);
-            attempt += 1;
-            if attempt == ATTEMPTS || conn.generation().await? == before {
-                return Ok(diff);
-            }
-            tracing::debug!(
-                attempt,
-                "nftables diff: the ruleset changed under it; again"
-            );
-        }
+        // A snapshot is 3 + 2N dumps, taken again if a commit landed in the
+        // middle of them; if something commits in a loop the last one's
+        // apply is refused (its generation is stale) rather than applied
+        // against a torn view.
+        let snapshot = self.snapshot(conn).await?;
+        self.diff_snapshot(&snapshot, options)
     }
 
-    async fn diff_once(
+    /// The diff against `snapshot` (#527): what [`diff_with_options`]
+    /// computes from the kernel, as a pure function of what it read — from
+    /// [`snapshot`](Self::snapshot), or simulated with
+    /// [`RulesetSnapshot::from_config`](super::RulesetSnapshot::from_config).
+    /// It commits only at the snapshot's generation, if it has one.
+    ///
+    /// [`diff_with_options`]: Self::diff_with_options
+    pub fn diff_snapshot(
         &self,
-        conn: &Connection<Nftables>,
+        snapshot: &super::RulesetSnapshot,
         options: &NftDiffOptions,
     ) -> Result<NftablesDiff> {
-        let mut diff = NftablesDiff::default();
+        self.validate()?;
+        let mut diff = NftablesDiff {
+            generation: snapshot.generation,
+            ..Default::default()
+        };
         // Order in which rule inserts (new and moved) are sent; see
         // `RuleAdd::seq`.
         let mut seq = 0usize;
@@ -1454,7 +1452,7 @@ impl NftablesConfig {
             .collect();
 
         // Current kernel state.
-        let current_tables = conn.list_tables().await?;
+        let current_tables = snapshot.tables.clone();
 
         // Pass 1: tables to add (declared but not current), and tables whose
         // flags drifted.
@@ -1541,7 +1539,7 @@ impl NftablesConfig {
         // them out once, index by (family, table_name) for O(1)
         // lookups inside the loop. list_rules stays inside (it's
         // server-side table-scoped — N round-trips is optimal).
-        let all_chains_for_diff = conn.list_chains().await?;
+        let all_chains_for_diff = snapshot.chains.clone();
         let chains_by_table: std::collections::HashMap<
             (super::super::types::Family, String),
             Vec<&super::super::types::ChainInfo>,
@@ -1553,7 +1551,7 @@ impl NftablesConfig {
                     .push(c);
                 acc
             });
-        let all_flowtables_for_diff = conn.list_flowtables().await?;
+        let all_flowtables_for_diff = snapshot.flowtables.clone();
         let flowtables_by_table: std::collections::HashMap<
             (super::super::types::Family, String),
             Vec<&super::super::types::Flowtable>,
@@ -1748,9 +1746,7 @@ impl NftablesConfig {
             // Stateful objects: identity is (name, type). Only their
             // configuration is compared — a counter's counts and a quota's
             // consumption are live state.
-            let current_objects = conn
-                .list_objects_in(declared.name(), declared.family())
-                .await?;
+            let current_objects = snapshot.objects_in(declared.name(), declared.family());
             let mut recreated_objects: Vec<(String, ObjectType)> = Vec::new();
             for o in declared.objects() {
                 let ty = o.config().object_type();
@@ -1809,9 +1805,8 @@ impl NftablesConfig {
             // created them: the kernel creates and frees them with it, `nft`
             // never lists them, and the diff must not delete one either. A
             // DELSET for one is EBUSY while its rule exists (#459).
-            let current_sets: Vec<SetInfo> = conn
-                .list_sets_in(declared.name(), declared.family())
-                .await?
+            let current_sets: Vec<SetInfo> = snapshot
+                .sets_in(declared.name(), declared.family())
                 .into_iter()
                 .filter(|s| !s.flags.contains(SetFlags::ANONYMOUS))
                 .collect();
@@ -1881,9 +1876,8 @@ impl NftablesConfig {
                     // Set exists on both sides → element-level diff.
                     // Read the kernel's current elements and compute
                     // the symmetric difference on raw key bytes.
-                    let current_elems = conn
-                        .list_set_elements(declared.name(), s.name(), declared.family())
-                        .await?;
+                    let current_elems =
+                        snapshot.elements_of(declared.family(), declared.name(), s.name())?;
                     let (mut to_add, mut to_remove) = element_changes(s, &current_elems);
                     // A constant set cannot take element changes while a
                     // rule is bound to it (EBUSY): recreate it, its rules
@@ -1971,9 +1965,7 @@ impl NftablesConfig {
             // moving as few rules as possible (`plan_chain`). After the
             // sets, because a rule bound to a set this diff recreates has
             // to move out of its way: DELSET on a bound set is EBUSY.
-            let current_rules = conn
-                .list_rules(declared.name(), declared.family())
-                .await?;
+            let current_rules = snapshot.rules_in(declared.name(), declared.family());
             let effective = super::rules::effective_rules(declared.rules());
             let mut chain_names: Vec<&str> =
                 declared.chains().iter().map(|c| c.name()).collect();
