@@ -106,7 +106,7 @@ use crate::netlink::{
 /// the config declares on it — addresses, routes, qdiscs, ports, links
 /// stacked on it — in the other `*_to_add` / `links_to_modify` lists, since
 /// deleting the link deletes them.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -486,7 +486,7 @@ impl Owned {
 /// same name another actor made since. Deleting it would also destroy what
 /// it carries; what no config declared there refuses the removal, as it
 /// refuses a recreate.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -538,7 +538,7 @@ impl std::fmt::Display for LinkRemoval {
 /// One reason a link cannot be recreated (#513): something deleting it
 /// would destroy that the config does not declare, or a link that cannot
 /// be recreated at all.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(
     feature = "serde",
@@ -579,7 +579,10 @@ pub enum Blocker {
         /// Who added it (`ip route`'s `proto`): a routing daemon re-learns
         /// its own routes, so a [`RecreatePolicy`] may let those go.
         #[cfg_attr(feature = "schemars", schemars(with = "u8"))]
-        #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_protocol"))]
+        #[cfg_attr(
+            feature = "serde",
+            serde(serialize_with = "serialize_protocol", deserialize_with = "deserialize_protocol")
+        )]
         protocol: RouteProtocol,
     },
     /// A qdisc the config does not declare, or one under a class, which
@@ -817,17 +820,23 @@ impl std::fmt::Display for LinkRecreate {
 }
 
 /// An in-place change of a live link's kind parameters.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub(crate) struct KindUpdate {
     /// `IFLA_INFO_KIND` — the kernel matches it against the live link.
-    pub(crate) kind: &'static str,
+    pub(crate) kind: String,
     /// The `IFLA_INFO_DATA` attributes to send: only the ones that change.
     pub(crate) attrs: Vec<KindAttr>,
     /// One `name old -> new` line per changed parameter.
     pub(crate) changes: Vec<String>,
 }
 
-/// One `IFLA_INFO_DATA` attribute of a [`KindUpdate`].
+/// One `IFLA_INFO_DATA` attribute of a [`KindUpdate`]: the attribute's id
+/// and its value, as the kernel's UAPI numbers it, so a plan read back
+/// sends the same (#649).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub(crate) enum KindAttr {
     U8(u16, u8),
@@ -853,7 +862,7 @@ struct KindDiff {
 impl KindDiff {
     fn update(&mut self, kind: &'static str, attr: KindAttr, change: String) {
         let u = self.update.get_or_insert_with(|| KindUpdate {
-            kind,
+            kind: kind.to_string(),
             attrs: Vec::new(),
             changes: Vec::new(),
         });
@@ -1951,6 +1960,13 @@ fn route_label(r: &RouteMessage, name: &str, how: &str) -> Blocker {
         through: (!how.is_empty()).then(|| how.to_string()),
         protocol: r.protocol(),
     }
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_protocol<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<RouteProtocol, D::Error> {
+    <u8 as serde::Deserialize>::deserialize(d).map(RouteProtocol::from)
 }
 
 #[cfg(feature = "serde")]

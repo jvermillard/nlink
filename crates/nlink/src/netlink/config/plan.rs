@@ -28,7 +28,7 @@ use super::{
 use crate::netlink::types::route::RouteProtocol;
 
 /// One kernel change of an apply, or a refusal that stops it (#518).
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", tag = "step"))]
 #[derive(Debug, Clone)]
@@ -180,7 +180,9 @@ pub enum Step {
     /// Add a declared qdisc.
     AddQdisc(DeclaredQdisc),
     /// Diff a declared TC tree again, against the device as the steps
-    /// before left it, and apply the difference (#514).
+    /// before left it, and apply the difference (#514). Not read back from
+    /// a serialized plan yet: its tree has no serialized form (#645).
+    #[cfg_attr(feature = "serde", serde(skip_deserializing))]
     TcTree {
         /// The device.
         dev: String,
@@ -478,7 +480,7 @@ impl fmt::Display for Step {
 /// An apply's steps, in the order it runs them (#518). From
 /// [`ConfigDiff::plan`](super::ConfigDiff::plan); run with
 /// [`Plan::apply`].
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
@@ -487,13 +489,16 @@ impl fmt::Display for Step {
 pub struct Plan {
     /// The steps, in order.
     pub steps: Vec<Step>,
-    /// The protocol routes are installed with (#512).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
+    /// The protocol routes are installed with (#512), by number. Serialized
+    /// so a plan read back installs them the same way (#649).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
     pub(crate) routes_protocol: Option<RouteProtocol>,
     /// The owner tag a created link gets as its alias (#512).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) owner: Option<String>,
 }
 
@@ -748,6 +753,83 @@ mod tests {
         }
     }
 
+    /// #649: a plan reads back as it was written, everything an apply and
+    /// an undo use included: a kind update's attributes, a port's options,
+    /// what a link had, the reasons, the owner tag and route protocol.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_plan_reads_back_as_written() {
+        use crate::netlink::config::kind::{KindAttr, KindUpdate};
+        use crate::netlink::link::BridgePortConfig;
+        let changes = LinkChanges {
+            set_mtu: Some(1400),
+            set_kind_params: vec!["vxlan ttl 0 -> 1".into()],
+            kind_update: Some(KindUpdate {
+                kind: "vxlan".into(),
+                attrs: vec![
+                    KindAttr::U8(5, 1),
+                    KindAttr::Bytes(6, vec![10, 0, 0, 1]),
+                    KindAttr::Ifindex(1, "d0".into()),
+                ],
+                changes: vec!["vxlan ttl 0 -> 1".into()],
+            }),
+            port_update: Some(BridgePortConfig::new().cost(5)),
+            was: Some(LinkWas {
+                up: true,
+                mtu: Some(1500),
+                ..LinkWas::default()
+            }),
+            ..LinkChanges::default()
+        };
+        let mut plan = Plan::new(vec![
+            Step::ModifyLink {
+                name: "vx0".into(),
+                changes,
+                mtu_already_set: false,
+            },
+            Step::AddAddress {
+                address: addr("d0", "fd00::1", 64),
+                reason: Some("re-add: flushed when d0 goes down".into()),
+            },
+            Step::ReplaceRoute {
+                before: None,
+                after: route("10.1.0.0", 16, "10.0.0.2"),
+                reason: Some("re-add: flushed when d0 goes down".into()),
+            },
+            Step::SetVrfStrictMode { on: true },
+        ]);
+        plan.owner = Some("lab".into());
+        plan.routes_protocol = Some(RouteProtocol::Static);
+        let json = serde_json::to_string(&plan).unwrap();
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        assert_eq!(back.to_string(), plan.to_string());
+        assert_eq!((back.owner.as_deref(), back.routes_protocol), (Some("lab"), Some(RouteProtocol::Static)));
+        let Some(Step::ModifyLink { changes, .. }) = back.steps.first() else {
+            panic!("{back}");
+        };
+        let update = changes.kind_update.as_ref().expect("the kind update reads back");
+        assert_eq!(update.attrs.len(), 3);
+        assert_eq!(changes.port_update.as_ref().and_then(|p| p.cost), Some(5));
+        assert_eq!(
+            back.steps[0].inverse().map(|s| s.to_string()),
+            plan.steps[0].inverse().map(|s| s.to_string()),
+            "the undo needs what the link had"
+        );
+        assert_eq!(back.steps[1].reason(), plan.steps[1].reason());
+
+        // A TC tree step has no serialized tree yet (#645): refused, not
+        // read back empty.
+        let tree = Plan::new(vec![Step::TcTree {
+            dev: "d0".into(),
+            planned: vec![],
+            tree: Box::default(),
+            previous: None,
+        }]);
+        let json = serde_json::to_string(&tree).unwrap();
+        assert!(serde_json::from_str::<Plan>(&json).is_err(), "{json}");
+    }
+
     /// A neighbour set over another is undone by setting the other back;
     /// one added, by deleting it; one deleted, by adding it (#516).
     #[test]
@@ -955,5 +1037,25 @@ mod tests {
             .inverse()
             .is_none());
         assert!(Step::MissingLink { name: "x".into() }.inverse().is_none());
+    }
+}
+
+/// [`Plan::routes_protocol`] as its number.
+#[cfg(feature = "serde")]
+mod opt_protocol {
+    use crate::netlink::types::route::RouteProtocol;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        p: &Option<RouteProtocol>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&p.map(|p| p.number()), s)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<RouteProtocol>, D::Error> {
+        let n: Option<u8> = serde::Deserialize::deserialize(d)?;
+        Ok(n.map(RouteProtocol::from))
     }
 }
