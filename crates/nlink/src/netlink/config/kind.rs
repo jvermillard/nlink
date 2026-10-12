@@ -1183,6 +1183,82 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 u.changes.extend(changes);
             }
         }
+        // `ip6gre_netlink_parms` rebuilds the whole configuration from the
+        // request, as ip6tnl's does: a change sends every declared
+        // parameter (#516).
+        DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) => {
+            let kind = if matches!(declared.link_type, DeclaredLinkType::Ip6gre(_)) { "ip6gre" } else { "ip6gretap" };
+            const LINK: u16 = 1;
+            const IFLAGS: u16 = 2;
+            const OFLAGS: u16 = 3;
+            const IKEY: u16 = 4;
+            const OKEY: u16 = 5;
+            const LOCAL: u16 = 6;
+            const REMOTE: u16 = 7;
+            const TTL: u16 = 8;
+            const ENCAP_LIMIT: u16 = 11;
+            const GRE_KEY: u16 = 0x2000;
+            let addr = |t| data.ipv6(t).filter(|a| !a.is_unspecified());
+            let have_dev = data.u32(LINK).filter(|i| *i != 0).and_then(|i| names.get(&i).copied());
+            let keyed = data
+                .0
+                .get(&IFLAGS)
+                .and_then(|f| f.get(..2))
+                .is_some_and(|f| u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0);
+            let have_key = keyed.then(|| data.u32_be(IKEY)).flatten();
+            let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+            let mut changes = Vec::new();
+            let mut note = |what: &str, have: String, want: String| {
+                if have != want {
+                    changes.push(format!("{kind} {what} {have} -> {want}"));
+                }
+            };
+            note("local", show(addr(LOCAL).map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
+            note("remote", show(addr(REMOTE).map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
+            if let Some(want) = p.hoplimit {
+                note("hoplimit", show(data.u8(TTL).map(|v| v.to_string())), want.to_string());
+            }
+            if let Some(want) = p.encap_limit {
+                note("encaplimit", show(data.u8(ENCAP_LIMIT).map(|v| v.to_string())), want.to_string());
+            }
+            note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+            note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
+            if !changes.is_empty() {
+                let mut attrs = Vec::new();
+                if let Some(a) = p.local {
+                    attrs.push(KindAttr::Bytes(LOCAL, a.octets().to_vec()));
+                }
+                if let Some(a) = p.remote {
+                    attrs.push(KindAttr::Bytes(REMOTE, a.octets().to_vec()));
+                }
+                if let Some(v) = p.hoplimit {
+                    attrs.push(KindAttr::U8(TTL, v));
+                }
+                if let Some(v) = p.encap_limit {
+                    attrs.push(KindAttr::U8(ENCAP_LIMIT, v));
+                }
+                if let Some(k) = p.key {
+                    attrs.push(KindAttr::Bytes(IFLAGS, GRE_KEY.to_be_bytes().to_vec()));
+                    attrs.push(KindAttr::Bytes(OFLAGS, GRE_KEY.to_be_bytes().to_vec()));
+                    attrs.push(KindAttr::Bytes(IKEY, k.to_be_bytes().to_vec()));
+                    attrs.push(KindAttr::Bytes(OKEY, k.to_be_bytes().to_vec()));
+                }
+                if let Some(dev) = &p.underlay_dev {
+                    attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
+                }
+                let mut changes = changes.into_iter();
+                let first = changes.next().expect("not empty");
+                let mut attrs = attrs.into_iter();
+                match attrs.next() {
+                    Some(attr) => d.update(kind, attr, first),
+                    // Everything back to the kernel's defaults.
+                    None => d.update(kind, KindAttr::Bytes(0, Vec::new()), first),
+                }
+                let u = d.update.as_mut().expect("set above");
+                u.attrs.extend(attrs);
+                u.changes.extend(changes);
+            }
+        }
         // `xfrmi_change` refuses a new underlay (EINVAL), so that
         // recreates; the if_id changes in place, sent with the underlay it
         // has (checked on 6.12).

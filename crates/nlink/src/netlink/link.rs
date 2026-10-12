@@ -3330,6 +3330,8 @@ pub struct Ip6GreLink {
     ttl: Option<u8>,
     encap_limit: Option<u8>,
     flowinfo: Option<u32>,
+    key: Option<u32>,
+    mtu: Option<u32>,
     flags: Option<u32>,
     link: Option<InterfaceRef>,
 }
@@ -3401,6 +3403,8 @@ impl Ip6GreLink {
             ttl: None,
             encap_limit: None,
             flowinfo: None,
+            key: None,
+            mtu: None,
             flags: None,
             link: None,
         }
@@ -3421,6 +3425,20 @@ impl Ip6GreLink {
     /// Set the TTL (hop limit).
     pub fn ttl(mut self, ttl: u8) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the encapsulation limit.
+    /// The GRE key, both ways (#516): sent big-endian, with the `GRE_KEY`
+    /// flag.
+    pub fn key(mut self, key: u32) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// The MTU (#516).
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
         self
     }
 
@@ -3473,6 +3491,10 @@ impl LinkConfig for Ip6GreLink {
         // Add interface name
         write_ifname(builder, &self.name);
 
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
         // IFLA_LINKINFO
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "ip6gre");
@@ -3497,6 +3519,12 @@ impl LinkConfig for Ip6GreLink {
         }
         if let Some(flowinfo) = self.flowinfo {
             builder.append_attr_u32_be(gre_attr::IFLA_GRE_FLOWINFO, flowinfo);
+        }
+        if let Some(key) = self.key {
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_IKEY, key);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_OKEY, key);
         }
         if let Some(flags) = self.flags {
             builder.append_attr_u32(gre_attr::IFLA_GRE_FLAGS, flags);
@@ -3542,6 +3570,8 @@ pub struct Ip6GretapLink {
     ttl: Option<u8>,
     encap_limit: Option<u8>,
     flowinfo: Option<u32>,
+    key: Option<u32>,
+    mtu: Option<u32>,
     link: Option<InterfaceRef>,
 }
 
@@ -3555,6 +3585,8 @@ impl Ip6GretapLink {
             ttl: None,
             encap_limit: None,
             flowinfo: None,
+            key: None,
+            mtu: None,
             link: None,
         }
     }
@@ -3574,6 +3606,20 @@ impl Ip6GretapLink {
     /// Set the TTL (hop limit).
     pub fn ttl(mut self, ttl: u8) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the encapsulation limit.
+    /// The GRE key, both ways (#516): sent big-endian, with the `GRE_KEY`
+    /// flag.
+    pub fn key(mut self, key: u32) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// The MTU (#516).
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
         self
     }
 
@@ -3626,6 +3672,10 @@ impl LinkConfig for Ip6GretapLink {
         // Add interface name
         write_ifname(builder, &self.name);
 
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
         // IFLA_LINKINFO
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "ip6gretap");
@@ -3650,6 +3700,12 @@ impl LinkConfig for Ip6GretapLink {
         }
         if let Some(flowinfo) = self.flowinfo {
             builder.append_attr_u32_be(gre_attr::IFLA_GRE_FLOWINFO, flowinfo);
+        }
+        if let Some(key) = self.key {
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u16_be(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_IKEY, key);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_OKEY, key);
         }
 
         builder.nest_end(data);

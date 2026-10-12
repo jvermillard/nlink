@@ -2255,6 +2255,67 @@ async fn routes_via_ipv6_and_with_mpls_encap_change() -> nlink::Result<()> {
     .await
 }
 
+/// ip6gre and ip6gretap tunnels changed in place (#516): ends, hop limit,
+/// encapsulation limit, key and underlay. `ip6gre_netlink_parms` rebuilds
+/// the whole configuration from the request, so each step checks every
+/// parameter through `ip -d link`, and both keep their ifindexes.
+#[tokio::test]
+async fn ip6gre_tunnels_change_in_place() -> nlink::Result<()> {
+    use std::net::Ipv6Addr;
+    require_root!();
+    nlink::require_modules!("dummy", "ip6_gre");
+
+    let a = |n: u16, h: u16| Ipv6Addr::new(0xfd00, 0x95, n, 0, 0, 0, 0, h);
+    let params = |b: bool| if b { (3, 32, 2, 8, "d1") } else { (2, 64, 4, 7, "d0") };
+    let step = |b: bool| {
+        let (r, hl, el, key, dev) = params(b);
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .link("g61", move |l| {
+                l.ip6gre()
+                    .ip6tnl_local(a(0, 1))
+                    .ip6tnl_remote(a(0, r))
+                    .ip6tnl_hoplimit(hl)
+                    .ip6tnl_encap_limit(el)
+                    .tunnel_key(key)
+                    .tunnel_underlay_dev(dev)
+            })
+            .link("g62", move |l| {
+                l.ip6gretap().ip6tnl_local(a(1, 1)).ip6tnl_remote(a(1, r)).tunnel_key(key + 10)
+            })
+    };
+    let ns = TestNamespace::new("tr-ip6gre")?;
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &[step(false), step(true)], false, async |i, _conn| {
+        let (r, hl, el, key, dev) = params(i == 1);
+        let dotted = |k: u32| std::net::Ipv4Addr::from(k).to_string();
+        let g61 = link_json(&ns, "g61")?;
+        let g62 = link_json(&ns, "g62")?;
+        let (d61, d62) = (&g61["linkinfo"]["info_data"], &g62["linkinfo"]["info_data"]);
+        let checks = [
+            ("g61 local", d61["local"].clone(), serde_json::json!(a(0, 1).to_string())),
+            ("g61 remote", d61["remote"].clone(), serde_json::json!(a(0, r).to_string())),
+            ("g61 hoplimit", d61["ttl"].clone(), serde_json::json!(hl)),
+            ("g61 encaplimit", d61["encap_limit"].clone(), serde_json::json!(el)),
+            ("g61 key", d61["ikey"].clone(), serde_json::json!(dotted(key))),
+            ("g61 dev", d61["link"].clone(), serde_json::json!(dev)),
+            ("g62 remote", d62["remote"].clone(), serde_json::json!(a(1, r).to_string())),
+            ("g62 key", d62["okey"].clone(), serde_json::json!(dotted(key + 10))),
+        ];
+        for (what, have, want) in checks {
+            if have != want {
+                return Err(format!("step {}: {what} is {have}, want {want}", i + 1));
+            }
+        }
+        ifindexes.push((g61["ifindex"].as_u64(), g62["ifindex"].as_u64()));
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "both change in place");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

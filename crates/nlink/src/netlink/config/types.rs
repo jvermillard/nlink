@@ -430,7 +430,7 @@ impl NetworkConfig {
             // The kernel gives every namespace a fallback device per tunnel
             // module, which nothing can configure (`ip_tunnel_changelink`
             // refuses it, EINVAL).
-            const FALLBACK: [(&str, &str); 7] = [
+            const FALLBACK: [(&str, &str); 8] = [
                 ("gre0", "gre"),
                 ("gretap0", "gretap"),
                 ("erspan0", "erspan"),
@@ -438,6 +438,7 @@ impl NetworkConfig {
                 ("sit0", "sit"),
                 ("ip_vti0", "vti"),
                 ("ip6tnl0", "ip6tnl"),
+                ("ip6gre0", "ip6gre"),
             ];
             if let Some((_, kind)) = FALLBACK
                 .iter()
@@ -463,6 +464,24 @@ impl NetworkConfig {
                         "an ip6tnl tunnel with no local end, remote end or underlay device is the \
                          fallback ip6tnl0's, and the kernel refuses it",
                     ));
+                }
+                // `ip6gre_tunnel_find`: the ends, the underlay and the key.
+                DeclaredLinkType::Ip6gre(p)
+                    if p.local.is_none() && p.remote.is_none() && p.underlay_dev.is_none() && p.key.is_none() =>
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        "an ip6gre tunnel with no end, underlay device or key is the fallback ip6gre0's, \
+                         and the kernel refuses it",
+                    ));
+                }
+                DeclaredLinkType::Ip6tnl(p) if p.key.is_some() => {
+                    errors.push(ValidationErrorInfo::new(at(), "an ip6tnl tunnel has no key; ip6gre has"));
+                }
+                DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p)
+                    if p.mode != crate::netlink::link::Ip6tnlMode::default() =>
+                {
+                    errors.push(ValidationErrorInfo::new(at(), "a GRE tunnel has no mode; ip6tnl has"));
                 }
                 DeclaredLinkType::Xfrm { if_id: 0, .. } => {
                     errors.push(ValidationErrorInfo::new(at(), "an xfrm interface's if_id is not 0"));
@@ -1596,6 +1615,7 @@ impl DeclaredLink {
             | DeclaredLinkType::Sit(_)
             | DeclaredLinkType::Vti(_)
             | DeclaredLinkType::Ip6tnl(_)
+            | DeclaredLinkType::Ip6gre(_)
             | DeclaredLinkType::Xfrm { .. }
             | DeclaredLinkType::Bareudp { .. } => Some(
                 "a MAC address is declared, but an L3 tunnel has no hardware address (gretap has one)",
@@ -1807,6 +1827,10 @@ pub enum DeclaredLinkType {
     Vti(TunnelParams),
     /// IPv6 tunnel, IPv6 or IPv4 over IPv6 (#516).
     Ip6tnl(Ip6tnlParams),
+    /// GRE over IPv6 (#516); its `mode` is unused.
+    Ip6gre(Ip6tnlParams),
+    /// GRE over IPv6 carrying Ethernet (#516); its `mode` is unused.
+    Ip6gretap(Ip6tnlParams),
     /// XFRM (IPsec) interface (#516): routed traffic meets the IPsec
     /// policies with its `if_id`. The if_id changes in place; a new
     /// underlay, which `xfrmi_changelink` refuses, recreates it.
@@ -1923,6 +1947,8 @@ impl DeclaredLinkType {
             Self::Sit(_) => Some("sit"),
             Self::Vti(_) => Some("vti"),
             Self::Ip6tnl(_) => Some("ip6tnl"),
+            Self::Ip6gre(_) => Some("ip6gre"),
+            Self::Ip6gretap(_) => Some("ip6gretap"),
             Self::Xfrm { .. } => Some("xfrm"),
             Self::Geneve { .. } => Some("geneve"),
             Self::Bareudp { .. } => Some("bareudp"),
@@ -2029,9 +2055,12 @@ pub struct Ip6tnlParams {
     /// The tunnel encapsulation limit (RFC 2473).
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub encap_limit: Option<u8>,
-    /// What it carries; either by default.
+    /// What it carries; either by default. An ip6tnl's only.
     #[cfg_attr(feature = "serde", serde(default))]
     pub mode: crate::netlink::link::Ip6tnlMode,
+    /// The GRE key, both ways: an ip6gre's or ip6gretap's only.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub key: Option<u32>,
     /// The device the tunnel's packets leave through.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub underlay_dev: Option<String>,
@@ -2390,10 +2419,15 @@ impl LinkBuilder {
         self
     }
 
-    /// A tunnel's key, both ways (gre, gretap, vti).
+    /// A tunnel's key, both ways (gre, gretap, vti, ip6gre, ip6gretap).
     pub fn tunnel_key(mut self, key: u32) -> Self {
-        if matches!(self.link_type, DeclaredLinkType::Ipip(_) | DeclaredLinkType::Sit(_)) {
-            self.wrong_kind("tunnel_key", "gre, gretap or vti");
+        if let DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) = &mut self.link_type {
+            p.key = Some(key);
+        } else if matches!(
+            self.link_type,
+            DeclaredLinkType::Ipip(_) | DeclaredLinkType::Sit(_) | DeclaredLinkType::Ip6tnl(_)
+        ) {
+            self.wrong_kind("tunnel_key", "gre, gretap, vti, ip6gre or ip6gretap");
         } else if let Some(p) = self.tunnel_params("tunnel_key") {
             p.key = Some(key);
         }
@@ -2401,10 +2435,12 @@ impl LinkBuilder {
     }
 
     /// The device a tunnel's packets leave through: a gre, gretap, ipip,
-    /// sit, vti, ip6tnl or xfrm link's.
+    /// sit, vti, ip6tnl, ip6gre, ip6gretap or xfrm link's.
     pub fn tunnel_underlay_dev(mut self, dev: &str) -> Self {
         match &mut self.link_type {
-            DeclaredLinkType::Ip6tnl(p) => p.underlay_dev = Some(dev.to_string()),
+            DeclaredLinkType::Ip6tnl(p) | DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) => {
+                p.underlay_dev = Some(dev.to_string())
+            }
             DeclaredLinkType::Xfrm { underlay_dev, .. } => *underlay_dev = Some(dev.to_string()),
             _ => {
                 if let Some(p) = self.tunnel_params("tunnel_underlay_dev") {
@@ -2422,11 +2458,25 @@ impl LinkBuilder {
     }
 
     fn ip6tnl_params(mut self, setter: &str, set: impl FnOnce(&mut Ip6tnlParams)) -> Self {
-        if let DeclaredLinkType::Ip6tnl(p) = &mut self.link_type {
-            set(p);
-        } else {
-            self.wrong_kind(setter, "ip6tnl");
+        match &mut self.link_type {
+            DeclaredLinkType::Ip6tnl(p) | DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) => {
+                set(p)
+            }
+            _ => self.wrong_kind(setter, "ip6tnl, ip6gre or ip6gretap"),
         }
+        self
+    }
+
+    /// Create a GRE tunnel over IPv6 (#516); set it with the `ip6tnl_*`
+    /// setters and [`tunnel_key`](Self::tunnel_key).
+    pub fn ip6gre(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Ip6gre(Ip6tnlParams::default());
+        self
+    }
+
+    /// Create a GRE tunnel over IPv6 carrying Ethernet (#516).
+    pub fn ip6gretap(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Ip6gretap(Ip6tnlParams::default());
         self
     }
 
@@ -6653,6 +6703,40 @@ mod serde_roundtrip_tests {
             .proxy_neighbour("d0", Ipv4Addr::new(10, 0, 0, 2))
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn ip6gre_roundtrips_and_validates() {
+        use std::net::Ipv6Addr;
+        let cfg = NetworkConfig::new()
+            .link("g61", |l| l.ip6gre().ip6tnl_remote(Ipv6Addr::LOCALHOST).tunnel_key(7))
+            .link("g62", |l| l.ip6gretap().ip6tnl_local(Ipv6Addr::LOCALHOST));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""ip6gre":{"remote":"::1","mode":"any","key":7}"#), "{json}");
+        for (cfg, says) in [
+            (NetworkConfig::new().link("g61", |l| l.ip6gre()), "fallback ip6gre0's"),
+            (
+                NetworkConfig::new().link("ip6gre0", |l| l.ip6gre().tunnel_key(1)),
+                "the kernel's fallback ip6gre device",
+            ),
+            (
+                NetworkConfig::new().link("t61", |l| {
+                    l.ip6tnl().ip6tnl_remote(Ipv6Addr::LOCALHOST).tunnel_key(1)
+                }),
+                "`.tunnel_key()` sets a gre, gretap, vti, ip6gre or ip6gretap parameter",
+            ),
+            (
+                NetworkConfig::new().link("g61", |l| {
+                    l.ip6gre().tunnel_key(1).ip6tnl_mode(crate::netlink::link::Ip6tnlMode::Ipip6)
+                }),
+                "a GRE tunnel has no mode",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
     }
 
     #[test]
