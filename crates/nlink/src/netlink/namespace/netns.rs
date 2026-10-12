@@ -225,6 +225,13 @@ impl Netns {
         Self::open(name)
     }
 
+    /// [`create`](Self::create) with an owner tag and stale marker
+    /// reclaim (#522); see [`create_with`](super::create_with).
+    pub fn create_with(name: &str, opts: super::CreateOptions) -> Result<Self> {
+        super::create_with(name, opts)?;
+        Self::open(name)
+    }
+
     /// Delete this namespace's `ip netns` name, as `ip netns delete` does.
     ///
     /// Only a namespace opened or created by name has one. The name is

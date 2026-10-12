@@ -264,3 +264,63 @@ async fn nsids_are_set_and_read() -> nlink::Result<()> {
     assert_eq!(got?, 7);
     Ok(())
 }
+
+/// Deletes a named namespace, and its owner tag, when the test is done
+/// with it, however it ends.
+struct Cleanup(String);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = namespace::delete(&self.0);
+        let _ = namespace::remove_owner_tag(&self.0);
+        let _ = std::fs::remove_file(format!("/var/run/netns/{}", self.0));
+    }
+}
+
+/// `create_with` tags a namespace with its owner, `owner_of` and
+/// `list_owned` read the tag, and `delete` removes it with the namespace
+/// (#522).
+#[tokio::test]
+async fn an_owner_tag_goes_with_its_namespace() -> nlink::Result<()> {
+    use namespace::CreateOptions;
+    nlink::require_root!();
+
+    let name = format!("nlink-owned-{}", std::process::id());
+    let owner = format!("nlink-test-{}", std::process::id());
+    let _cleanup = Cleanup(name.clone());
+    let netns = Netns::create_with(&name, CreateOptions::new().owner(&owner))?;
+    assert_eq!(netns.name(), Some(name.as_str()));
+    assert_eq!(namespace::owner_of(&name)?.as_deref(), Some(owner.as_str()));
+    assert_eq!(namespace::list_owned(&owner)?, std::slice::from_ref(&name));
+    assert!(namespace::list_owned("someone-else")?.iter().all(|n| *n != name));
+
+    netns.delete()?;
+    assert_eq!(namespace::owner_of(&name)?, None);
+    assert!(namespace::list_owned(&owner)?.is_empty());
+    Ok(())
+}
+
+/// A stale marker — a `/run/netns` file nothing is mounted on, left by a
+/// crash — is reclaimed with `reclaim_stale`, where `create` refuses it; a
+/// live namespace never is, and a create that fails leaves no tag (#522).
+#[tokio::test]
+async fn reclaim_stale_takes_a_dead_marker_and_never_a_live_namespace() -> nlink::Result<()> {
+    use namespace::CreateOptions;
+    nlink::require_root!();
+
+    let name = format!("nlink-stale-{}", std::process::id());
+    let _cleanup = Cleanup(name.clone());
+    std::fs::create_dir_all("/var/run/netns")?;
+    std::fs::write(format!("/var/run/netns/{name}"), b"")?;
+    assert!(namespace::create(&name).expect_err("a marker is there").is_already_exists());
+
+    namespace::create_with(&name, CreateOptions::new().reclaim_stale(true))?;
+    assert!(namespace::is_namespace(&name));
+
+    let err = namespace::create_with(&name, CreateOptions::new().reclaim_stale(true).owner("late"))
+        .expect_err("a live namespace is not reclaimed");
+    assert!(err.is_already_exists(), "{err}");
+    assert!(namespace::is_namespace(&name));
+    assert_eq!(namespace::owner_of(&name)?, None, "the failed create removed its tag");
+    Ok(())
+}
