@@ -176,7 +176,13 @@ pub enum Step {
     /// comes back (#512).
     DeleteQdisc(DeclaredQdisc),
     /// Replace a qdisc with the declared one.
-    ReplaceQdisc(DeclaredQdisc),
+    ReplaceQdisc {
+        /// The live qdisc it replaces, as a declaration, where its kind
+        /// can be read back (#649): what the inverse puts back.
+        before: Option<DeclaredQdisc>,
+        /// The qdisc installed.
+        after: DeclaredQdisc,
+    },
     /// Add a declared qdisc.
     AddQdisc(DeclaredQdisc),
     /// Diff a declared TC tree again, against the device as the steps
@@ -249,6 +255,23 @@ impl Step {
                 reason: None,
             },
             Self::AddQdisc(q) => Self::DeleteQdisc(q.clone()),
+            // Removing what a kernel-default declaration replaced, whose kind
+            // did not read back: nothing to put back.
+            Self::DeleteQdisc(q) if q.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault => {
+                return None;
+            }
+            // The qdisc it replaced; the kernel's default root comes back
+            // when the declared one goes (#649).
+            Self::ReplaceQdisc { before: Some(before), after } => {
+                if before.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault {
+                    Self::DeleteQdisc(after.clone())
+                } else {
+                    Self::ReplaceQdisc {
+                        before: Some(after.clone()),
+                        after: before.clone(),
+                    }
+                }
+            }
             Self::DeleteQdisc(q) => Self::AddQdisc(q.clone()),
             Self::SetNeighbour { before, after } => match before {
                 Some(before) => Self::SetNeighbour {
@@ -286,6 +309,20 @@ impl Step {
             },
             Self::DeleteRule(r) => Self::AddRule(r.clone()),
             Self::SetVrfStrictMode { on } => Self::SetVrfStrictMode { on: !on },
+            // The previous config's tree, with this one's to remove what it
+            // added (#649). Without a previous tree the state before is not
+            // known: what the step changed in place cannot be put back.
+            Self::TcTree {
+                dev,
+                tree,
+                previous: Some(previous),
+                ..
+            } => Self::TcTree {
+                dev: dev.clone(),
+                planned: Vec::new(),
+                tree: previous.clone(),
+                previous: Some(tree.clone()),
+            },
             Self::ModifyVethPeer(c) => Self::ModifyVethPeer(super::VethPeerChange {
                 changes: invert_link_changes(&c.changes)?,
                 ..c.clone()
@@ -335,10 +372,21 @@ impl Step {
 /// The inverse of a link change, from what the link had; `None` for a
 /// kind-parameter change, or a link this apply creates.
 fn invert_link_changes(changes: &LinkChanges) -> Option<LinkChanges> {
-    if changes.kind_update.is_some() || changes.port_update.is_some() || changes.port_vlans.is_some() {
+    if changes.port_update.is_some() || changes.port_vlans.is_some() {
         return None;
     }
     let was = changes.was.as_ref()?;
+    // A kind change goes back to the attributes it replaced, where they
+    // could be read (#649).
+    let kind_update = match &changes.kind_update {
+        Some(u) => Some(super::kind::KindUpdate {
+            kind: u.kind.clone(),
+            attrs: u.was.clone()?,
+            changes: u.changes.iter().map(|c| format!("undo {c}")).collect(),
+            was: Some(u.attrs.clone()),
+        }),
+        None => None,
+    };
     let master_moved = changes.set_master.is_some() || changes.unset_master;
     Some(LinkChanges {
         set_up: changes.set_down && was.up,
@@ -375,6 +423,8 @@ fn invert_link_changes(changes: &LinkChanges) -> Option<LinkChanges> {
         set_ipv6_token: changes
             .set_ipv6_token
             .map(|_| was.ipv6_token.unwrap_or(std::net::Ipv6Addr::UNSPECIFIED)),
+        set_kind_params: kind_update.as_ref().map_or_else(Vec::new, |u| u.changes.clone()),
+        kind_update,
         ..LinkChanges::default()
     })
 }
@@ -463,8 +513,12 @@ impl fmt::Display for Step {
                 q.dev,
                 q.effective_parent()
             ),
-            Self::ReplaceQdisc(q) => {
-                write!(f, "~ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)
+            Self::ReplaceQdisc { after: q, before } => {
+                write!(f, "~ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)?;
+                match before {
+                    Some(b) => write!(f, " (replacing {})", b.qdisc_type.kind()),
+                    None => Ok(()),
+                }
             }
             Self::AddQdisc(q) => {
                 write!(f, "+ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)
@@ -693,7 +747,12 @@ impl super::ConfigDiff {
         // steers there finds them.
         steps.extend(self.rules_to_add.iter().cloned().map(Step::AddRule));
         steps.extend(self.qdiscs_to_remove.iter().cloned().map(Step::DeleteQdisc));
-        steps.extend(self.qdiscs_to_replace.iter().cloned().map(Step::ReplaceQdisc));
+        for q in &self.qdiscs_to_replace {
+            steps.push(Step::ReplaceQdisc {
+                before: self.qdiscs_replaced.iter().find(|(d, _)| d == q).map(|(_, b)| b.clone()),
+                after: q.clone(),
+            });
+        }
         steps.extend(self.qdiscs_to_add.iter().cloned().map(Step::AddQdisc));
         for (tree, previous) in &self.tc_declared {
             let planned = self
@@ -772,6 +831,7 @@ mod tests {
                     KindAttr::Ifindex(1, "d0".into()),
                 ],
                 changes: vec!["vxlan ttl 0 -> 1".into()],
+                was: Some(vec![KindAttr::Bytes(5, vec![0])]),
             }),
             port_update: Some(BridgePortConfig::new().cost(5)),
             was: Some(LinkWas {

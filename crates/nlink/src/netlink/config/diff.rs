@@ -425,6 +425,12 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) routes_readded: Vec<(DeclaredRoute, String)>,
+    /// The live qdisc each one in `qdiscs_to_replace` replaces, as a
+    /// declaration, where its kind reads back (#649): `(declared, live)`.
+    /// Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) qdiscs_replaced: Vec<(DeclaredQdisc, DeclaredQdisc)>,
     /// The protocol the apply installs declared routes with: the config's
     /// [`routes_protocol`](super::NetworkConfig::routes_protocol) (#512).
     /// Not shown or serialized.
@@ -3377,11 +3383,21 @@ fn diff_qdiscs(
         // The kernel's own root: whatever is installed goes (#514). The
         // kernel's default root has handle 0:.
         if declared.qdisc_type == QdiscSpec::KernelDefault {
-            if current_map
-                .get(declared.dev.as_str())
-                .is_some_and(|q| q.handle().major() != 0)
+            if let Some(live) = current_map.get(declared.dev.as_str())
+                && live.handle().major() != 0
             {
-                diff.qdiscs_to_remove.push(declared.clone());
+                // The live qdisc, where its kind reads back: what an undo
+                // adds again (#649).
+                let removed = QdiscSpec::from_live(live).map_or_else(
+                    || declared.clone(),
+                    |spec| DeclaredQdisc {
+                        dev: declared.dev.clone(),
+                        parent: declared.effective_parent(),
+                        qdisc_type: spec,
+                        handle: Some(live.handle()),
+                    },
+                );
+                diff.qdiscs_to_remove.push(removed);
             }
             continue;
         }
@@ -3390,13 +3406,31 @@ fn diff_qdiscs(
             // Qdisc exists, check if it matches
             let existing_kind = existing.kind().unwrap_or("");
             let desired_kind = declared.qdisc_type.kind();
+            // What a replace puts back on undo (#649).
+            let replaced = |diff: &mut ConfigDiff| {
+                let live = crate::netlink::tc_spec::QdiscSpec::from_live(existing)?;
+                let handle = (live != crate::netlink::tc_spec::QdiscSpec::KernelDefault)
+                    .then(|| existing.handle());
+                diff.qdiscs_replaced.push((
+                    declared.clone(),
+                    DeclaredQdisc {
+                        dev: declared.dev.clone(),
+                        parent: declared.effective_parent(),
+                        qdisc_type: live,
+                        handle,
+                    },
+                ));
+                Some(())
+            };
 
             if existing_kind != desired_kind {
                 // Different type, need to replace.
                 diff.qdiscs_to_replace.push(declared.clone());
+                replaced(diff);
             } else if !declared.qdisc_type.matches(existing) {
                 // Same kind, different parameters — replace.
                 diff.qdiscs_to_replace.push(declared.clone());
+                replaced(diff);
             } else if declared
                 .effective_handle()
                 .is_some_and(|h| h != existing.handle())
@@ -3404,6 +3438,7 @@ fn diff_qdiscs(
                 // At another handle than the one declared, or than `1:`
                 // for a classful kind, which its classes name (#514).
                 diff.qdiscs_to_replace.push(declared.clone());
+                replaced(diff);
             }
         } else {
             // No qdisc at this position, need to add.

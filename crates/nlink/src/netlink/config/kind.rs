@@ -830,6 +830,11 @@ pub(crate) struct KindUpdate {
     pub(crate) attrs: Vec<KindAttr>,
     /// One `name old -> new` line per changed parameter.
     pub(crate) changes: Vec<String>,
+    /// The live values the change replaces, as attributes, for its inverse
+    /// (#649): `None` where one cannot be sent back (it was the kernel's
+    /// default, which no attribute expresses).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub(crate) was: Option<Vec<KindAttr>>,
 }
 
 /// One `IFLA_INFO_DATA` attribute of a [`KindUpdate`]: the attribute's id
@@ -859,12 +864,61 @@ struct KindDiff {
     update: Option<KindUpdate>,
 }
 
+impl KindAttr {
+    /// Its `IFLA_INFO_DATA` attribute id.
+    pub(crate) fn id(&self) -> u16 {
+        match self {
+            Self::U8(t, _) | Self::U16(t, _) | Self::U32(t, _) | Self::Bytes(t, _) | Self::Ifindex(t, _) => *t,
+        }
+    }
+}
+
+/// The live value of attribute `id` as a [`KindAttr`] of the same shape as
+/// `like`, for an inverse (#649): an ifindex as the link's name.
+fn live_attr(like: &KindAttr, id: u16, data: &InfoData<'_>, names: &HashMap<u32, &str>) -> Option<KindAttr> {
+    let raw = data.0.get(&id)?;
+    Some(match like {
+        KindAttr::Ifindex(..) => {
+            let idx = u32::from_ne_bytes(raw.get(..4)?.try_into().ok()?);
+            KindAttr::Ifindex(id, names.get(&idx)?.to_string())
+        }
+        _ => KindAttr::Bytes(id, raw.to_vec()),
+    })
+}
+
+/// The live values of the attributes an incremental change sends (#649):
+/// its inverse sends them back. `None` when one is absent.
+fn was_attrs(attrs: &[KindAttr], data: &InfoData<'_>, names: &HashMap<u32, &str>) -> Option<Vec<KindAttr>> {
+    attrs
+        .iter()
+        .map(|a| match a.id() {
+            0 => None,
+            id => live_attr(a, id, data, names),
+        })
+        .collect()
+}
+
+/// The live values of a set a kind rebuilds its configuration from (#649):
+/// each of `ids` present in the dump, the link `link` by name. Sending
+/// them back puts the configuration back.
+fn live_set(data: &InfoData<'_>, ids: &[u16], link: Option<u16>, names: &HashMap<u32, &str>) -> Vec<KindAttr> {
+    let mut set: Vec<KindAttr> = ids
+        .iter()
+        .filter_map(|&id| live_attr(&KindAttr::Bytes(id, Vec::new()), id, data, names))
+        .collect();
+    if let Some(id) = link {
+        set.extend(live_attr(&KindAttr::Ifindex(id, String::new()), id, data, names));
+    }
+    set
+}
+
 impl KindDiff {
     fn update(&mut self, kind: &'static str, attr: KindAttr, change: String) {
         let u = self.update.get_or_insert_with(|| KindUpdate {
             kind: kind.to_string(),
             attrs: Vec::new(),
             changes: Vec::new(),
+            was: None,
         });
         u.attrs.push(attr);
         u.changes.push(change);
@@ -1190,6 +1244,7 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 let u = d.update.as_mut().expect("set above");
                 u.attrs.extend(attrs);
                 u.changes.extend(changes);
+                u.was = Some(live_set(&data, &[LOCAL, REMOTE, TTL, ENCAP_LIMIT, PROTO], Some(LINK), names));
             }
         }
         // `ip6gre_netlink_parms` rebuilds the whole configuration from the
@@ -1266,6 +1321,12 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 let u = d.update.as_mut().expect("set above");
                 u.attrs.extend(attrs);
                 u.changes.extend(changes);
+                u.was = Some(live_set(
+                    &data,
+                    &[LOCAL, REMOTE, TTL, ENCAP_LIMIT, IFLAGS, OFLAGS, IKEY, OKEY],
+                    Some(LINK),
+                    names,
+                ));
             }
         }
         DeclaredLinkType::Vti6(p) => compare_vti6(p, &data, names, &mut d),
@@ -1722,8 +1783,24 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
         | DeclaredLinkType::Ovpn
         | DeclaredLinkType::Physical => {}
     }
+    // What a change replaces, for its inverse (#649). A kind whose parms
+    // rebuild the configuration from the request has recorded its whole
+    // live set already; the others change the attributes they are sent.
+    if let Some(update) = d.update.as_mut()
+        && update.was.is_none()
+        && !REBUILDS.contains(&update.kind.as_str())
+    {
+        update.was = was_attrs(&update.attrs, &data, names);
+    }
     d
 }
+
+/// The kinds whose `changelink` rebuilds the configuration from the
+/// request, zeroing what it is not sent: their diffs send the whole
+/// declared set, and their inverses the whole live one.
+const REBUILDS: [&str; 11] = [
+    "gre", "gretap", "ipip", "sit", "vti", "ip6tnl", "ip6gre", "ip6gretap", "vti6", "erspan", "ip6erspan",
+];
 
 /// What the kind parameters of a config ask of the live links.
 #[derive(Debug, Default)]
@@ -2727,6 +2804,9 @@ fn compare_vti6(
         attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
     }
     update_all(d, "vti6", attrs, changes);
+    if let Some(u) = d.update.as_mut() {
+        u.was = Some(live_set(data, &[IKEY, OKEY, LOCAL, REMOTE], Some(LINK), names));
+    }
 }
 
 /// An erspan's or ip6erspan's declared parameters against the live link's
@@ -2830,6 +2910,10 @@ fn compare_erspan(
         attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
     }
     update_all(d, kind, attrs, changes);
+    if let Some(u) = d.update.as_mut() {
+        let set = [IFLAGS, OFLAGS, IKEY, OKEY, LOCAL, REMOTE, TTL, ERSPAN_INDEX, ERSPAN_VER, ERSPAN_DIR, ERSPAN_HWID];
+        u.was = Some(live_set(data, &set, Some(LINK), names));
+    }
 }
 
 /// Where an IPv4 tunnel family keeps each parameter in `IFLA_INFO_DATA`.
@@ -2886,6 +2970,7 @@ fn compare_tunnel(
     d: &mut KindDiff,
 ) {
     const GRE_KEY: u16 = 0x2000;
+    let (ids_ttl, ids_keys, ids_link) = (ids.ttl, ids.keys, ids.link);
     let have_local = data.ipv4(ids.local).filter(|a| !a.is_unspecified());
     let have_remote = data.ipv4(ids.remote).filter(|a| !a.is_unspecified());
     let have_ttl = ids.ttl.and_then(|t| data.u8(t)).filter(|t| *t != 0);
@@ -2958,6 +3043,14 @@ fn compare_tunnel(
     }
     if let Some(u) = d.update.as_mut() {
         u.changes.extend(changes);
+        // The whole live set, for the inverse (#649).
+        let mut ids = vec![ids.local, ids.remote];
+        ids.extend(ids_ttl);
+        if let Some((ikey, okey, flags)) = ids_keys {
+            ids.extend([ikey, okey]);
+            ids.extend(flags.into_iter().flat_map(|(i, o)| [i, o]));
+        }
+        u.was = Some(live_set(data, &ids, Some(ids_link), names));
     }
 }
 
