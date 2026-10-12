@@ -1505,10 +1505,12 @@ All notable changes to this project will be documented in this file.
 
 - **An event stream that restarts instead of ending (#523, third part;
   the backoff half of #257).**
-  - **The call.** `Connection::<Route>::events_restarting(factory,
-    backoff)` returns a `RestartingStream`. It runs every rtnetlink
-    group, resynced after an overflow as `into_events_with_resync` is, on
-    a connection from `factory`.
+  - **The call.** `Connection::<P>::events_restarting(factory, backoff)`
+    returns a `RestartingStream<P>`, for `Route` and `Nftables` (the
+    sealed `resync::Restartable`). It runs every group of the protocol,
+    resynced after an overflow as `into_events_with_resync` is, on a
+    connection from `factory`. `.rcvbuf(bytes)` sizes each run's event
+    socket.
   - **When it ends or fails.**
     - The error is yielded, and the stream starts again after the wait.
     - Each restart begins with an initial snapshot (`InitialSyncStart` …
@@ -1565,6 +1567,33 @@ All notable changes to this project will be documented in this file.
     - Both tests fail when the adapter yields no removals.
     - Unit tests cover the order of the output and a snapshot cut short
       by an error.
+
+- **`MultiNsWatch`: many namespaces in one stream (#523, fifth part).**
+  - **Why.** nlink-lab's `watch` ran two sockets, two resync factories
+    and two tasks per lab node.
+  - **The type.** `nlink::facade::watch::MultiNsWatch<K>` is one
+    `Stream<Item = (K, NsEvent)>`:
+    - `MultiNsWatch::new(Families::ROUTE | Families::NFTABLES)` starts
+      it, configured with `.backoff(..)`, `.rcvbuf(..)` and
+      `.gap_deltas(true)`;
+    - `add(key, &netns)` and `remove(&key)` change what it watches.
+  - **Per namespace.**
+    - Each family runs on a restarting stream, from an initial snapshot.
+    - `NsEvent::Route`/`Nftables` carry its events, snapshot items and
+      markers.
+    - `NsEvent::Error` reports a failure the family restarts after.
+  - **When a namespace goes.**
+    - A deleted namespace yields `NsEvent::Gone` and leaves the watch
+      while the others go on. So does one whose families all gave up
+      after `max_attempts`.
+    - The watch holds its own handle to each namespace, and every
+      reconnect checks that the name still names it.
+  - **Test.** A root test watches two namespaces and both families. It
+    checks a link under one key and a table under the other. It then
+    deletes one namespace and checks its `Gone`, that its key was
+    dropped, and that the other namespace still delivers. It fails if a
+    deleted namespace is treated as an ordinary error: the watch then
+    reports giving up rather than the deletion.
 
 ## [0.31.0] - 2026-10-11
 

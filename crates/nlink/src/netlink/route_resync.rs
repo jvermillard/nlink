@@ -53,7 +53,7 @@ use tokio_stream::Stream;
 
 use super::events::NetworkEvent;
 use crate::netlink::protocol::Route;
-use crate::netlink::resync::{Backoff, ConnectionFactory, ResyncStream, ResyncedEvent, events_with_resync};
+use crate::netlink::resync::{ConnectionFactory, ResyncStream, events_with_resync};
 use crate::netlink::stream::{EventSubscription, OwnedEventStream};
 use crate::{Connection, Result};
 
@@ -245,140 +245,6 @@ impl Connection<Route> {
     }
 }
 
-impl Connection<Route> {
-    /// An event stream that does not end (#523): every rtnetlink group,
-    /// resynced after an overflow as
-    /// [`into_events_with_resync`](Self::into_events_with_resync) is, on
-    /// a connection from `factory` — and when that stream ends or fails,
-    /// the error is yielded and a new one is made after `backoff`.
-    ///
-    /// Each run begins with an initial snapshot
-    /// ([`ResyncMarker::InitialSyncStart`](crate::netlink::resync::ResyncMarker::InitialSyncStart)),
-    /// so a mirror rebuilds itself after a restart. A namespace deleted
-    /// under it, or one the factory cannot find, ends the stream: no
-    /// restart can bring it back. So does [`Backoff::max_attempts`]
-    /// restarts in a row without an event.
-    ///
-    /// ```no_run
-    /// # async fn example() -> nlink::Result<()> {
-    /// use std::sync::Arc;
-    /// use nlink::netlink::{Connection, Route};
-    /// use nlink::netlink::resync::{Backoff, ConnectionFactory};
-    /// use tokio_stream::StreamExt;
-    ///
-    /// let factory: ConnectionFactory<Route> =
-    ///     Arc::new(|| Box::pin(async { nlink::netlink::namespace::connection_for("lab-r1") }));
-    /// let mut events = Connection::<Route>::events_restarting(factory, Backoff::default());
-    /// while let Some(item) = events.next().await {
-    ///     match item {
-    ///         Ok(event) => println!("{event:?}"),
-    ///         // Reported, and the stream goes on.
-    ///         Err(e) => eprintln!("watch restarting: {e}"),
-    ///     }
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn events_restarting(factory: ConnectionFactory<Route>, backoff: Backoff) -> RestartingStream {
-        let mut stream = RestartingStream {
-            factory,
-            backoff,
-            state: RestartState::Done,
-            attempts: 0,
-        };
-        stream.state = RestartState::Starting(stream.start());
-        stream
-    }
-}
-
-type StartFuture = Pin<Box<dyn Future<Output = Result<OwnedResyncStream>> + Send>>;
-
-enum RestartState {
-    Starting(StartFuture),
-    Running(Pin<Box<OwnedResyncStream>>),
-    Waiting(Pin<Box<tokio::time::Sleep>>),
-    Done,
-}
-
-/// The stream of [`Connection::events_restarting`] (#523).
-pub struct RestartingStream {
-    factory: ConnectionFactory<Route>,
-    backoff: Backoff,
-    state: RestartState,
-    /// Restarts since an event was last delivered.
-    attempts: u32,
-}
-
-impl RestartingStream {
-    fn start(&self) -> StartFuture {
-        let factory = self.factory.clone();
-        Box::pin(async move {
-            let conn = (factory)().await?;
-            conn.into_events_with_resync(factory).await
-        })
-    }
-
-    /// After a failure: wait and start again, or end.
-    fn restart_or_end(&mut self, e: &crate::Error) {
-        self.attempts += 1;
-        let gone = e.is_namespace_deleted() || matches!(e, crate::Error::NamespaceNotFound { .. });
-        let spent = self.backoff.max_attempts.is_some_and(|max| self.attempts > max);
-        self.state = if gone || spent {
-            tracing::info!(error = %e, "restarting event stream: giving up");
-            RestartState::Done
-        } else {
-            let delay = self.backoff.delay(self.attempts);
-            tracing::warn!(error = %e, ?delay, attempt = self.attempts, "restarting event stream");
-            RestartState::Waiting(Box::pin(tokio::time::sleep(delay)))
-        };
-    }
-}
-
-impl Stream for RestartingStream {
-    type Item = Result<ResyncedEvent<NetworkEvent>>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
-        use std::task::Poll;
-        let this = self.get_mut();
-        loop {
-            match &mut this.state {
-                RestartState::Done => return Poll::Ready(None),
-                RestartState::Waiting(sleep) => {
-                    if sleep.as_mut().poll(cx).is_pending() {
-                        return Poll::Pending;
-                    }
-                    this.state = RestartState::Starting(this.start());
-                }
-                RestartState::Starting(fut) => match fut.as_mut().poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(stream)) => this.state = RestartState::Running(Box::pin(stream)),
-                    Poll::Ready(Err(e)) => {
-                        this.restart_or_end(&e);
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                },
-                RestartState::Running(stream) => match stream.as_mut().poll_next(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Some(Ok(item))) => {
-                        if matches!(item, ResyncedEvent::Event(_)) {
-                            this.attempts = 0;
-                        }
-                        return Poll::Ready(Some(Ok(item)));
-                    }
-                    Poll::Ready(Some(Err(e))) => {
-                        this.restart_or_end(&e);
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    Poll::Ready(None) => {
-                        let e = crate::Error::InvalidMessage("the event stream ended".into());
-                        this.restart_or_end(&e);
-                    }
-                },
-            }
-        }
-    }
-}
-
 // Anchor `Stream`-trait users without leaking `tokio_stream` —
 // `ResyncStream` implements `Stream`; `OwnedResyncStream` /
 // `BorrowedResyncStream` inherit it through the alias.
@@ -418,39 +284,5 @@ mod tests {
         // events_with_resync needs. Cannot exercise without a
         // socket; this is purely a compile-time check.
         let _fn = make_snapshot_fn(factory);
-    }
-
-    #[test]
-    fn restarting_stream_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<RestartingStream>();
-    }
-
-    /// A factory that never succeeds: an error per attempt, the waits
-    /// growing, then the end after `max_attempts` restarts.
-    #[tokio::test]
-    async fn a_restarting_stream_gives_up_after_max_attempts() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        use std::time::Duration;
-        use tokio_stream::StreamExt;
-
-        let calls = Arc::new(AtomicU32::new(0));
-        let counted = calls.clone();
-        let factory: ConnectionFactory<Route> = Arc::new(move || {
-            counted.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Err(crate::Error::InvalidMessage("not yet".into())) })
-        });
-        let backoff = Backoff::new(Duration::from_millis(5), Duration::from_millis(20)).max_attempts(2);
-        let mut stream = Connection::<Route>::events_restarting(factory, backoff);
-        let mut errors = 0;
-        while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
-            .await
-            .expect("the stream ends")
-        {
-            assert!(item.is_err(), "{item:?}");
-            errors += 1;
-        }
-        assert_eq!(errors, 3, "the first attempt and two restarts");
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 }
