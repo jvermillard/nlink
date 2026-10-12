@@ -1932,6 +1932,32 @@ All notable changes to this project will be documented in this file.
     - A 128-byte comment fails.
     - With the comment writer a no-op, the test fails at `nft list`.
 
+- **An NFLOG reader: `Connection<Nflog>` (#528, eighth part).**
+  - **Why.** A syslog `log` writes nothing in any namespace but the
+    initial one unless the host sets `nf_log_all_netns`. An NFLOG group has
+    no such limit, so it is how a lab sees what its firewall logged.
+  - **Use.**
+    - `Connection::<Nflog>::new()` (or `netns.connection::<Nflog>()`),
+      then `bind_group(group, copy_range)`.
+    - `events()` then yields an `NflogPacket` for each packet a `log
+      group N` rule (or `-j NFLOG`) sends. It carries the family and
+      group, the ethertype and hook, the rule's prefix, the mark, the
+      timestamp, the input and output interfaces (bridge ports included),
+      the hardware address, the sending socket's uid and gid, and the
+      packet from its network header.
+    - `unbind_group` stops it.
+  - **Audit and CI.** The `nfnetlink_log` constants are named as in the
+    kernel header, so the UAPI audit checks every one. `nfnetlink_log`
+    joins the CI module guard and the strict list.
+  - **Tests.**
+    - A root test installs a `log group 5 prefix "lab: "` rule and binds
+      group 5 in that namespace. It sends one datagram and reads it back:
+      the prefix, the family, the group and the input interface, then
+      the IPv4 header and UDP port in the payload. It fails with no
+      packet when the bind is skipped.
+    - Unit tests decode a packet laid out as the kernel builds one, and
+      check the bind's `res_id`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

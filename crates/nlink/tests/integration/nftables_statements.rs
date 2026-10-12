@@ -1208,3 +1208,51 @@ async fn ct_keys_act_on_traffic() -> nlink::Result<()> {
     assert_eq!(deliver(7904, 7904), 0, "a second flow is over the count");
     Ok(())
 }
+
+/// #528: a `log group` rule's packets reach a `Connection<Nflog>` bound to
+/// the group in that namespace — with the rule's prefix, the input
+/// interface, and the packet itself — where a syslog `log` would write
+/// nothing outside the initial namespace.
+#[tokio::test]
+async fn nflog_reads_what_a_log_group_rule_sends() -> nlink::Result<()> {
+    use nlink::netlink::Nflog;
+    use nlink::netlink::nftables::LogExpr;
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_log", "nfnetlink_log", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nflog", 98).await?;
+    let b = NftablesConfig::new().table("f", Family::Inet, |t| {
+        t.chain("in", |c| {
+            c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+        })
+        .rule_keyed("in", "log", |r| {
+            r.match_udp_dport(7990).expr(LogExpr::new().group(5).prefix("lab: "))
+        })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+
+    let nflog = pair.b.connection_for::<Nflog>()?;
+    nflog.bind_group(5, 0xffff).await?;
+    let mut packets = nflog.events().await;
+    let delivered = crate::common::traffic::deliver_udp(&pair.a, &pair.b, SocketAddr::from((pair.b_addr, 7990)), 1);
+    assert_eq!(delivered, 1);
+
+    let packet = crate::common::events::expect_event(
+        &mut packets,
+        Duration::from_secs(5),
+        "the logged datagram",
+        |p: &nlink::netlink::nflog::NflogPacket| p.prefix.as_deref() == Some("lab: "),
+    )
+    .await?;
+    assert_eq!((packet.family, packet.group), (2, 5), "NFPROTO_IPV4, group 5");
+    assert_eq!(packet.indev, Some(pair.b_ifindex));
+    let ip = &packet.payload;
+    assert_eq!(ip[0] >> 4, 4, "an IPv4 packet");
+    assert_eq!(ip[9], 17, "UDP");
+    assert_eq!(ip[16..20], pair.b_addr.octets());
+    let udp = usize::from(ip[0] & 0xf) * 4;
+    assert_eq!(u16::from_be_bytes([ip[udp + 2], ip[udp + 3]]), 7990);
+    Ok(())
+}

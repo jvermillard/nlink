@@ -953,6 +953,21 @@ impl EventSource for Netfilter {
     }
 }
 
+// NFLOG: the packets a bound `log group` sends (#528).
+impl private::Sealed for super::protocol::Nflog {}
+
+impl EventSource for super::protocol::Nflog {
+    type Event = super::nflog::NflogPacket;
+
+    fn parse_events(data: &[u8]) -> Vec<super::nflog::NflogPacket> {
+        MessageIter::new(data)
+            .flatten()
+            .filter(|(header, _)| super::nflog::is_packet(header.nlmsg_type))
+            .filter_map(|(_, payload)| super::nflog::NflogPacket::parse(payload))
+            .collect()
+    }
+}
+
 // Nftables protocol events (NFNLGRP_NFTABLES multicast — table /
 // chain / rule / flowtable mutations).
 impl private::Sealed for super::protocol::Nftables {}

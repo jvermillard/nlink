@@ -118,6 +118,7 @@ pub mod namespace_watcher;
 pub mod neigh;
 pub mod netconf;
 pub mod netfilter;
+pub mod nflog;
 pub mod nexthop;
 pub mod nftables;
 pub mod parse;
@@ -199,7 +200,7 @@ pub use parse::{FromNetlink, ToNetlink};
 pub use protocol::__macro_seal;
 pub use protocol::{
     AsyncProtocolInit, Audit, Connector, Devlink, Ethtool, FibLookup, Generic, KobjectUevent,
-    Macsec, Mptcp, Netfilter, Nftables, Nl80211, ProtocolState, Route, SELinux, SockDiag,
+    Macsec, Mptcp, Netfilter, Nflog, Nftables, Nl80211, ProtocolState, Route, SELinux, SockDiag,
     Wireguard, Xfrm, construction,
 };
 // Internal-use re-export so callers outside `netlink/` (e.g.
