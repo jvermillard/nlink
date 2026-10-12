@@ -597,3 +597,32 @@ async fn delete_and_wait_tells_a_held_namespace_from_a_going_one() -> nlink::Res
     }
     Ok(())
 }
+
+/// #520: a `LabNamespace` is its namespace, not its name. Its helpers and
+/// connections reach the namespace it made, and dropping it leaves alone
+/// a namespace recreated under the name since.
+#[tokio::test]
+async fn a_lab_namespace_is_the_namespace_it_made() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("dummy");
+    let name = format!("nlink-lab-ident-{}", std::process::id());
+    let lab = nlink::lab::LabNamespace::named(&name)?;
+    lab.add_dummy("d0")?;
+    lab.add_addr("d0", "10.77.0.1/24")?;
+    lab.link_up("d0")?;
+    assert_eq!(lab.netns().id(), Netns::open(&name)?.id());
+
+    namespace::delete(&name)?;
+    let other = Netns::create(&name)?;
+    // The lab's connection still reaches its own namespace, d0 and all.
+    let conn = lab.connection()?;
+    assert!(conn.get_link_by_name("d0").await?.is_some(), "the lab's d0");
+    assert!(other.connection::<Route>()?.get_link_by_name("d0").await?.is_none());
+    drop(conn);
+
+    drop(lab);
+    let still = Netns::open(&name).expect("dropping the lab left the new namespace alone");
+    assert_eq!(still.id(), other.id());
+    other.delete()?;
+    Ok(())
+}

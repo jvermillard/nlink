@@ -1677,6 +1677,33 @@ All notable changes to this project will be documented in this file.
       its veth's far end follows). It fails if the call does not wait:
       the held namespace then returns `Ok`.
 
+- **`LabNamespace` is built on `Netns` (#520, fourth part).**
+  - **The handle.** It holds a `Netns` to the namespace it created, and
+    `netns()` returns it.
+    - Connections, spawned processes and `exec` go there through the
+      handle's fd, without looking the name up again.
+    - All of its connections share the handle's one worker thread.
+    - `Drop` deletes the name only while it still names that namespace.
+      A namespace recreated under the name since is someone else's.
+  - **Netlink helpers.** `add_dummy`, `link_up`, `add_addr` and
+    `connect_to` are now netlink calls rather than `ip` commands. They
+    run on a thread of their own, so they are still callable from inside
+    a runtime. Only `exec` needs a program in `PATH` now.
+  - **Behaviour change.** Like any handle, a `LabNamespace` holds its
+    namespace open. A namespace whose name is deleted elsewhere lives on,
+    unnamed, until the `LabNamespace` drops. One test relied on the old
+    behaviour, and now drops its handle first.
+  - **Test.** A root test builds a namespace with the helpers, then
+    deletes its name and recreates the name as another namespace:
+    - the lab's connection still reaches its own `d0`;
+    - dropping the lab leaves the new namespace alone.
+
+    It fails with the by-name `Drop` this replaces: the new namespace is
+    deleted.
+  - **Coverage.** The whole root suite runs on `LabNamespace`, as
+    `TestNamespace`, and the 68 helper calls in it go through the new
+    paths.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
