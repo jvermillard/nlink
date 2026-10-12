@@ -576,6 +576,21 @@ All notable changes to this project will be documented in this file.
     batch operation failed: kernel error: File exists (errno 17)`, and the
     test failed.
 
+- **`is_not_found()` missed a delete's "not there" (#526).** The kernel
+  answers a route delete that matches nothing with `ESRCH`, and an address
+  delete with `EADDRNOTAVAIL`. `kind()` read the errno alone, so neither
+  was `NotFound`. Three `del_*_if_exists` methods special-cased one errno
+  each, and every other caller had to as well.
+  - A kernel error now records the `nlmsg_type` of the request it refused
+    (`ErrorDetail::Kernel::request_type`, `Error::request_type()`).
+  - `kind()` reads the errno against the request type, and
+    `is_not_found()` follows it.
+  - The special cases are gone.
+  - **Test.** A unit test builds the kernel's refusals from `NLMSG_ERROR`
+    payloads: `ESRCH` to `RTM_DELROUTE` and `EADDRNOTAVAIL` to
+    `RTM_DELADDR` are not-found, and `ESRCH` to `RTM_NEWROUTE` is not.
+    With the errno read alone, the test fails.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

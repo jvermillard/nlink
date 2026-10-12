@@ -523,7 +523,7 @@ impl NlMsgError {
     /// family's bare `EINVAL` says what was missing.
     pub fn to_error(&self, flags: u16, payload: &[u8]) -> Error {
         let ext = self.ext_ack(flags, payload);
-        Error::from_errno_ext_ack(self.error, ext.describe(), ext.offset)
+        Error::from_kernel_reply(self.error, Some(self.msg.nlmsg_type), ext.describe(), ext.offset)
     }
 
     /// This ACK's value, for the generic-netlink families that put one
@@ -582,7 +582,7 @@ impl NlMsgError {
     /// [`Self::to_error`], which reads the header's flags.
     pub fn into_error(&self, payload: &[u8]) -> Error {
         let ext = self.parsed_ext_ack(payload);
-        Error::from_errno_ext_ack(self.error, ext.describe(), ext.offset)
+        Error::from_kernel_reply(self.error, Some(self.msg.nlmsg_type), ext.describe(), ext.offset)
     }
 
     /// Parse the extended-ack TLVs from an error-response payload,
@@ -832,6 +832,29 @@ mod nlmsgerr_tests {
             described.as_deref(),
             Some("integer out of range; policy: value in 1..=4096")
         );
+    }
+
+    /// #526: an errno is read against the request it refused. ESRCH to a
+    /// route delete and EADDRNOTAVAIL to an address delete mean "not
+    /// there"; to anything else they do not.
+    #[test]
+    fn an_errno_is_read_against_its_request() {
+        use crate::netlink::ErrorKind;
+        let refusal = |request_type: u16, errno: i32| {
+            let mut req = request();
+            req[4..6].copy_from_slice(&request_type.to_ne_bytes());
+            let payload = error_payload(-errno, &req, false, &[]);
+            NlMsgError::from_bytes(&payload).unwrap().to_error(0, &payload)
+        };
+        let gone_route = refusal(NlMsgType::RTM_DELROUTE, libc::ESRCH);
+        assert!(gone_route.is_not_found(), "{gone_route}");
+        assert_eq!(gone_route.kind(), ErrorKind::NotFound);
+        assert_eq!(gone_route.request_type(), Some(NlMsgType::RTM_DELROUTE));
+        let gone_addr = refusal(NlMsgType::RTM_DELADDR, libc::EADDRNOTAVAIL);
+        assert!(gone_addr.is_not_found(), "{gone_addr}");
+        let other = refusal(NlMsgType::RTM_NEWROUTE, libc::ESRCH);
+        assert!(!other.is_not_found(), "ESRCH to an add is not \"not there\"");
+        assert_eq!(other.kind(), ErrorKind::Other);
     }
 
     /// #530: a positive value in an ACK is that value, not an errno; a

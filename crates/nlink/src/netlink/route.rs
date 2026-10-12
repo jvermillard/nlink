@@ -1647,7 +1647,9 @@ impl Connection<Route> {
     pub async fn del_route_if_exists<R: RouteConfig>(&self, config: R) -> Result<bool> {
         match self.del_route(config).await {
             Ok(()) => Ok(true),
-            Err(e) if e.is_not_found() || e.errno() == Some(libc::ESRCH) => Ok(false),
+            // A delete that matches nothing is ESRCH, which `is_not_found()`
+            // reads as such for a route delete (#526).
+            Err(e) if e.is_not_found() => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -1684,7 +1686,9 @@ impl Connection<Route> {
     pub async fn del_route_v4_if_exists(&self, destination: &str, prefix_len: u8) -> Result<bool> {
         match self.del_route_v4(destination, prefix_len).await {
             Ok(()) => Ok(true),
-            Err(e) if e.is_not_found() || e.errno() == Some(libc::ESRCH) => Ok(false),
+            // A delete that matches nothing is ESRCH, which `is_not_found()`
+            // reads as such for a route delete (#526).
+            Err(e) if e.is_not_found() => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -1695,7 +1699,9 @@ impl Connection<Route> {
     pub async fn del_route_v6_if_exists(&self, destination: &str, prefix_len: u8) -> Result<bool> {
         match self.del_route_v6(destination, prefix_len).await {
             Ok(()) => Ok(true),
-            Err(e) if e.is_not_found() || e.errno() == Some(libc::ESRCH) => Ok(false),
+            // A delete that matches nothing is ESRCH, which `is_not_found()`
+            // reads as such for a route delete (#526).
+            Err(e) if e.is_not_found() => Ok(false),
             Err(e) => Err(e),
         }
     }
