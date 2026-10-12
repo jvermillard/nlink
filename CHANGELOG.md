@@ -1343,6 +1343,25 @@ All notable changes to this project will be documented in this file.
     - It fails with `RTA_VIA` uncompared (no convergence), and with the
       labels uncompared (they stay).
 
+- **Declared ip6gre and ip6gretap links (#516, row 7, completed).**
+  - **Builder.** `LinkBuilder::ip6gre()` and `ip6gretap()` take the
+    `ip6tnl_*` setters (ends, hop limit, encapsulation limit),
+    `tunnel_key` and `tunnel_underlay_dev`. `Ip6tnlParams` gains `key`.
+  - **Changes.** Any difference sends the whole declared set, because
+    `ip6gre_netlink_parms` rebuilds the configuration from the request.
+  - **Imperative.** `Ip6GreLink` and `Ip6GretapLink` gain `key` (sent
+    big-endian, with `GRE_KEY`) and `mtu`.
+  - **Validation errors:**
+    - an ip6gre with no end, underlay or key, which is the fallback
+      `ip6gre0`'s tunnel;
+    - a link named `ip6gre0`;
+    - a key on an ip6tnl;
+    - a mode on a GRE tunnel.
+  - **CI.** `ip6_gre` joins CI's module lists.
+  - **Test.** A transition test changes every parameter in place (same
+    ifindexes), checked through `ip -d -j link`. It passes on iproute2
+    6.15 and 6.1. It fails if the change sends only one attribute.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

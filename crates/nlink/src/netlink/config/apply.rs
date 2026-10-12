@@ -1159,6 +1159,56 @@ pub(crate) fn link_config(
             }
             Box::new(c)
         }
+        DeclaredLinkType::Ip6gre(p) => {
+            let mut c = crate::netlink::link::Ip6GreLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.hoplimit {
+                c = c.ttl(v);
+            }
+            if let Some(v) = p.encap_limit {
+                c = c.encap_limit(v);
+            }
+            if let Some(v) = p.key {
+                c = c.key(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Ip6gretap(p) => {
+            let mut c = crate::netlink::link::Ip6GretapLink::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.hoplimit {
+                c = c.ttl(v);
+            }
+            if let Some(v) = p.encap_limit {
+                c = c.encap_limit(v);
+            }
+            if let Some(v) = p.key {
+                c = c.key(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
         DeclaredLinkType::Xfrm { if_id, underlay_dev } => {
             let mut c = crate::netlink::link::XfrmLink::new(&link.name, *if_id);
             if let Some(v) = underlay_dev {
