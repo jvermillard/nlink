@@ -117,6 +117,9 @@ mod fdb;
 #[path = "integration/rule.rs"]
 mod rule;
 
+#[path = "integration/blocking.rs"]
+mod blocking;
+
 // Plan 166 backfill — root-gated tests for the headline 0.16 features.
 // Each module gates on `require_root!()` so this all early-returns
 // when run as a regular user.

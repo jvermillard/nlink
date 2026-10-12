@@ -181,6 +181,7 @@
 extern crate self as nlink;
 
 // Core modules (always available)
+pub mod blocking;
 pub mod facade;
 pub mod macros;
 pub mod netlink;
