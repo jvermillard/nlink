@@ -201,7 +201,7 @@ impl EventMeta {
 /// Created by [`Connection::events()`]. In the default mutex mode the
 /// stream holds the connection's request lock until it is dropped, and a
 /// request on the connection meanwhile fails at once with
-/// [`Error::EventStreamActive`](crate::Error::EventStreamActive) (#505).
+/// [`Error::event_stream_active()`](crate::Error::event_stream_active()) (#505).
 /// Send requests on a second connection, or build this one with
 /// [`Connection::with_dispatcher`], where events and requests share the
 /// socket.
@@ -281,9 +281,9 @@ impl NetnsWatch {
                     path = %self.marker.path().display(),
                     "event stream: its network namespace was deleted; ending"
                 );
-                return Some(crate::Error::NamespaceDeleted {
+                return Some(crate::Error::from(crate::ErrorDetail::NamespaceDeleted {
                     path: self.marker.path().to_path_buf(),
-                });
+                }));
             }
         }
         None
@@ -338,16 +338,19 @@ fn poll_event_backend<P: EventSource>(
                 // A notification past the receive cap was dropped: an
                 // event lost, like an overflow, not a dead socket. Report
                 // it as one so a resync wrapper re-dumps (#505).
-                Poll::Ready(Err(crate::Error::FrameTruncated {
-                    received,
-                    buffer_size,
-                })) => {
-                    tracing::warn!(
+                Poll::Ready(Err(e)) if e.is_truncated() => {
+                    if let crate::ErrorDetail::FrameTruncated {
                         received,
                         buffer_size,
-                        "event stream: dropped a notification larger than the receive cap"
-                    );
-                    return Poll::Ready(Some(Err(crate::Error::Io(
+                    } = e.detail()
+                    {
+                        tracing::warn!(
+                            received,
+                            buffer_size,
+                            "event stream: dropped a notification larger than the receive cap"
+                        );
+                    }
+                    return Poll::Ready(Some(Err(crate::Error::from(
                         std::io::Error::from_raw_os_error(libc::ENOBUFS),
                     ))));
                 }
@@ -364,7 +367,7 @@ fn poll_event_backend<P: EventSource>(
                 // kernel overflowed the socket. Say so as the socket would
                 // in mutex mode, so a resync wrapper re-dumps (#466).
                 if guard.take_overrun() {
-                    return Poll::Ready(Some(Err(crate::Error::Io(
+                    return Poll::Ready(Some(Err(crate::Error::from(
                         std::io::Error::from_raw_os_error(libc::ENOBUFS),
                     ))));
                 }
@@ -586,7 +589,7 @@ impl<P: EventSource> Connection<P> {
     /// `dump_stream()`) do not race on `poll_recv` and steal each other's
     /// frames. A request or dump on the connection while the stream is
     /// alive fails at once with
-    /// [`Error::EventStreamActive`](crate::Error::EventStreamActive) (#505;
+    /// [`Error::event_stream_active()`](crate::Error::event_stream_active()) (#505;
     /// it used to wait out the operation timeout), and a second `events()`
     /// waits until the first stream is dropped. Use a second connection,
     /// or [`with_dispatcher()`](Connection::with_dispatcher), where none of
@@ -599,7 +602,7 @@ impl<P: EventSource> Connection<P> {
     /// [`Connection::new_in_namespace_path`], `LabNamespace::connection` —
     /// checks once a second that the path still names its namespace. Once
     /// the namespace is deleted it yields
-    /// [`Error::NamespaceDeleted`](crate::Error::NamespaceDeleted) and ends;
+    /// [`ErrorDetail::NamespaceDeleted`](crate::ErrorDetail::NamespaceDeleted) and ends;
     /// drop it, and the connection, to let the kernel free the namespace.
     /// The resync wrappers pass that on and end too. A connection opened
     /// from a file descriptor or a `/proc/<pid>/ns/net` path is not

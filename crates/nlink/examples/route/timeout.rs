@@ -3,7 +3,7 @@
 //! As of 0.17, every `Connection<P>` starts with a 30-second
 //! default timeout on every netlink round-trip — a "hidden hang"
 //! safety net so a kernel that never responds surfaces as
-//! `Error::Timeout` instead of blocking forever. This example
+//! `Error::timeout()` instead of blocking forever. This example
 //! covers the three knobs:
 //!
 //! 1. Default-30s (no opt-in needed).

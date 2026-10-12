@@ -79,7 +79,7 @@ impl SrCmd {
                     serde_json::to_string(&value)
                 }
                 .map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!(
+                    nlink::netlink::Error::invalid_message(format!(
                         "JSON serialization failed: {e}"
                     ))
                 })?;
@@ -98,7 +98,7 @@ impl SrCmd {
         // This requires root privileges
         let path = "/proc/sys/net/ipv6/conf/all/seg6_src";
         std::fs::write(path, format!("{}\n", address)).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!(
+            nlink::netlink::Error::invalid_message(format!(
                 "failed to set tunsrc: {} (requires root)",
                 e
             ))

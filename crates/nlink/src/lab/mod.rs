@@ -192,7 +192,7 @@ impl LabNamespace {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(crate::Error::InvalidMessage(format!(
+            return Err(crate::Error::invalid_message(format!(
                 "command failed: {cmd} {args:?}: {stderr}"
             )));
         }
@@ -223,7 +223,7 @@ impl LabNamespace {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
-                        .map_err(crate::Error::Io)?;
+                        .map_err(crate::Error::from)?;
                     let conn = {
                         let _entered = rt.enter();
                         self.connection()?
@@ -232,7 +232,7 @@ impl LabNamespace {
                 })
                 .join()
                 .unwrap_or_else(|_| {
-                    Err(crate::Error::InvalidMessage(format!(
+                    Err(crate::Error::invalid_message(format!(
                         "namespace {}: a lab helper panicked",
                         self.name
                     )))

@@ -72,13 +72,13 @@ pub(crate) fn encode_rule_userdata(
 /// One NUL-terminated rule TLV, refused past libnftnl's 127 bytes.
 fn rule_tlv(kind: u8, what: &str, text: &str) -> crate::netlink::error::Result<Vec<u8>> {
     if text.contains('\0') {
-        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+        return Err(crate::netlink::error::Error::invalid_message(format!(
             "{what} contains a NUL byte"
         )));
     }
     let len = text.len() + 1;
     if len > NFTNL_UDATA_COMMENT_MAXLEN {
-        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+        return Err(crate::netlink::error::Error::invalid_message(format!(
             "{what} `{text}` is {} bytes; the kernel keeps at most {}",
             text.len(),
             NFTNL_UDATA_COMMENT_MAXLEN - 1,
@@ -203,13 +203,13 @@ pub(crate) const NFTNL_UDATA_SET_COMMENT: u8 = 7;
 /// a NUL in it or longer than 127 bytes, which libnftnl would refuse.
 pub(crate) fn encode_comment(kind: u8, comment: &str) -> crate::netlink::error::Result<Vec<u8>> {
     if comment.as_bytes().contains(&0) {
-        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+        return Err(crate::netlink::error::Error::invalid_message(format!(
             "nftables comment {comment:?} has a NUL in it"
         )));
     }
     let len = comment.len() + 1;
     if len > NFTNL_UDATA_COMMENT_MAXLEN {
-        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+        return Err(crate::netlink::error::Error::invalid_message(format!(
             "nftables comment is {} bytes; at most {} fit",
             comment.len(),
             NFTNL_UDATA_COMMENT_MAXLEN - 1

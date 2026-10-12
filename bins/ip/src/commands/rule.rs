@@ -241,7 +241,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(s).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", e))
+                    nlink::netlink::Error::invalid_message(format!("invalid source: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -254,7 +254,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(d).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                    nlink::netlink::Error::invalid_message(format!("invalid destination: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -326,14 +326,14 @@ impl RuleCmd {
                 // unreachable / prohibit. Accepting `nop`/`goto` and silently
                 // falling back to a table lookup would send a different rule
                 // than asked — reject instead (CLAUDE.md strict-parse contract).
-                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                return Err(nlink::netlink::Error::invalid_message(format!(
                     "rule action `{}` is not modelled by the ip rule builder \
                      (supported: lookup/table, blackhole, unreachable, prohibit)",
                     action_type.to_lowercase()
                 )));
             }
             _ => {
-                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                return Err(nlink::netlink::Error::invalid_message(format!(
                     "unknown action: {}",
                     action_type
                 )));
@@ -383,7 +383,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(s).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", e))
+                    nlink::netlink::Error::invalid_message(format!("invalid source: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -396,7 +396,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(d).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                    nlink::netlink::Error::invalid_message(format!("invalid destination: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -681,7 +681,7 @@ fn parse_u32(s: &str) -> Result<u32> {
     } else {
         s.parse()
     }
-    .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("invalid number: {}", s)))
+    .map_err(|_| nlink::netlink::Error::invalid_message(format!("invalid number: {}", s)))
 }
 
 /// Parse port or port range like "80" or "80-443".
@@ -690,17 +690,17 @@ fn parse_port_range(s: &str) -> Result<(u16, u16)> {
         let start: u16 = start_str
             .trim()
             .parse()
-            .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
+            .map_err(|_| nlink::netlink::Error::invalid_message(format!("invalid port: {}", s)))?;
         let end: u16 = end_str
             .trim()
             .parse()
-            .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
+            .map_err(|_| nlink::netlink::Error::invalid_message(format!("invalid port: {}", s)))?;
         Ok((start, end))
     } else {
         let port: u16 = s
             .trim()
             .parse()
-            .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
+            .map_err(|_| nlink::netlink::Error::invalid_message(format!("invalid port: {}", s)))?;
         Ok((port, port))
     }
 }
@@ -718,7 +718,7 @@ fn parse_ip_proto(s: &str) -> Result<u8> {
         "sctp" => Ok(132),
         _ => s
             .parse()
-            .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("unknown protocol: {}", s))),
+            .map_err(|_| nlink::netlink::Error::invalid_message(format!("unknown protocol: {}", s))),
     }
 }
 

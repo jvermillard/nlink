@@ -16,8 +16,8 @@ use crate::output::base64_encode;
 
 pub async fn run(interfaces: Vec<String>, interval_secs: u64) -> Result<()> {
     if interfaces.is_empty() {
-        return Err(Error::InvalidMessage(
-            "wg watch: specify at least one interface to watch".into(),
+        return Err(Error::invalid_message(
+            "wg watch: specify at least one interface to watch",
         ));
     }
 

@@ -306,7 +306,7 @@ impl Restartable for crate::netlink::Nftables {
 
 /// Whether no restart can get past `e`: the namespace is gone.
 pub(crate) fn ends_restarting(e: &crate::Error) -> bool {
-    e.is_namespace_deleted() || matches!(e, crate::Error::NamespaceNotFound { .. })
+    e.is_namespace_deleted() || matches!(e.detail(), crate::ErrorDetail::NamespaceNotFound { .. })
 }
 
 impl<P: Restartable> crate::Connection<P> {
@@ -449,7 +449,7 @@ impl<P: Restartable> Stream for RestartingStream<P> {
                         return Poll::Ready(Some(Err(e)));
                     }
                     Poll::Ready(None) => {
-                        let e = crate::Error::InvalidMessage("the event stream ended".into());
+                        let e = crate::Error::invalid_message("the event stream ended");
                         this.restart_or_end(&e);
                     }
                 },
@@ -885,7 +885,7 @@ mod tests {
         let counted = calls.clone();
         let factory: ConnectionFactory<Route> = Arc::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Err(crate::Error::InvalidMessage("not yet".into())) })
+            Box::pin(async { Err(crate::Error::invalid_message("not yet")) })
         });
         let backoff = Backoff::new(Duration::from_millis(5), Duration::from_millis(20)).max_attempts(2);
         let mut stream = crate::Connection::<Route>::events_restarting(factory, backoff);
@@ -1060,7 +1060,7 @@ mod tests {
             Box::pin(async move {
                 // Torn twice, then a clean snapshot.
                 if a.fetch_add(1, Ordering::SeqCst) < 2 {
-                    Err(crate::Error::DumpInterrupted)
+                    Err(crate::Error::dump_interrupted())
                 } else {
                     Ok::<Vec<u32>, crate::Error>(vec![7])
                 }
@@ -1091,7 +1091,7 @@ mod tests {
             let a = a.clone();
             Box::pin(async move {
                 a.fetch_add(1, Ordering::SeqCst);
-                Err::<Vec<u32>, crate::Error>(crate::Error::DumpInterrupted)
+                Err::<Vec<u32>, crate::Error>(crate::Error::dump_interrupted())
             })
         });
         let first = stream.next().await.expect("an item");

@@ -223,7 +223,7 @@ impl Connection<Route> {
     /// While the stream is alive the connection serves requests only in
     /// dispatcher mode ([`Connection::with_dispatcher`]). In the default
     /// mutex mode the stream holds its request lock, and a request fails
-    /// at once with [`Error::EventStreamActive`](crate::Error::EventStreamActive)
+    /// at once with [`Error::event_stream_active()`](crate::Error::event_stream_active())
     /// (#505). The snapshot itself never uses this connection: it runs on
     /// one from the factory.
     ///

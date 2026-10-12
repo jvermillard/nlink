@@ -89,7 +89,7 @@ pub async fn run_addconf(interface: &str, file: &Path) -> Result<()> {
 /// Read and parse a config file into a [`WireguardConfig`]. The parse runs
 /// before any kernel connection, so a malformed file fails fast.
 fn load(interface: &str, file: &Path) -> Result<WireguardConfig> {
-    let contents = fs::read_to_string(file).map_err(Error::Io)?;
+    let contents = fs::read_to_string(file).map_err(Error::from)?;
     parse(&contents, interface)
 }
 
@@ -226,7 +226,7 @@ pub fn parse(contents: &str, ifname: &str) -> Result<WireguardConfig> {
     let mut finalized: Vec<Peer> = Vec::with_capacity(peers.len());
     for (idx, peer) in peers.into_iter().enumerate() {
         if peer.public_key.is_none() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "wg conf: [Peer] #{} is missing a PublicKey",
                 idx + 1
             )));
@@ -269,7 +269,7 @@ pub fn parse(contents: &str, ifname: &str) -> Result<WireguardConfig> {
 }
 
 fn err(lineno: usize, msg: String) -> Error {
-    Error::InvalidMessage(format!("wg conf: line {lineno}: {msg}"))
+    Error::invalid_message(format!("wg conf: line {lineno}: {msg}"))
 }
 
 /// Decode a base64 WireGuard key into a 32-byte array.

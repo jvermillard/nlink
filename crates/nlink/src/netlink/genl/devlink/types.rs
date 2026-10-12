@@ -21,7 +21,7 @@ impl TryFrom<u16> for PortType {
             1 => Ok(Self::Auto),
             2 => Ok(Self::Eth),
             3 => Ok(Self::Ib),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown devlink port type: {value}"
             ))),
         }
@@ -60,7 +60,7 @@ impl TryFrom<u16> for PortFlavour {
             5 => Ok(Self::Virtual),
             6 => Ok(Self::Unused),
             7 => Ok(Self::PciSf),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown devlink port flavour: {value}"
             ))),
         }
@@ -82,7 +82,7 @@ impl TryFrom<u8> for HealthState {
         match value {
             0 => Ok(Self::Healthy),
             1 => Ok(Self::Error),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown health state: {value}"
             ))),
         }
@@ -106,7 +106,7 @@ impl TryFrom<u8> for ConfigMode {
             0 => Ok(Self::Runtime),
             1 => Ok(Self::Driverinit),
             2 => Ok(Self::Permanent),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown config mode: {value}"
             ))),
         }

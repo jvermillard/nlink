@@ -104,7 +104,7 @@
 //! let conn = Connection::<Route>::new()?;
 //! // One name resolution at startup, then ifindex everywhere:
 //! let eth0_idx = conn.get_link_by_name("eth0").await?
-//!     .ok_or(nlink::Error::InterfaceNotFound { name: "eth0".into() })?
+//!     .ok_or(nlink::Error::from(nlink::ErrorDetail::InterfaceNotFound { name: "eth0".into() }))?
 //!     .ifindex();
 //! conn.set_link_mtu_by_index(eth0_idx, 9000).await?;
 //! # Ok(())
@@ -250,7 +250,7 @@ pub use netlink::reconcile::{
     ExecOptions, ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject,
 };
 pub use netlink::{
-    Connection, Error, ErrorKind, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result,
+    Connection, Error, ErrorDetail, ErrorKind, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result,
     ResultExt, RtnetlinkGroup,
     // `Error::validation` takes `impl IntoIterator<Item = ValidationErrorInfo>`
     // and this lived in a private module, so the public constructor was

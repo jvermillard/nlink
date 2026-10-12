@@ -160,11 +160,11 @@ impl NeighborCmd {
         use nlink::util::addr::{parse_addr, parse_mac};
 
         let addr: IpAddr = parse_addr(address).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+            nlink::netlink::Error::invalid_message(format!("invalid address: {}", e))
         })?;
 
         let mac = parse_mac(lladdr)
-            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid MAC: {}", e)))?;
+            .map_err(|e| nlink::netlink::Error::invalid_message(format!("invalid MAC: {}", e)))?;
 
         // Parse NUD state
         let state = if permanent {
@@ -197,7 +197,7 @@ impl NeighborCmd {
         use nlink::util::addr::parse_addr;
 
         let addr: IpAddr = parse_addr(address).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+            nlink::netlink::Error::invalid_message(format!("invalid address: {}", e))
         })?;
 
         let neigh = Neighbor::new(dev, addr);
@@ -261,7 +261,7 @@ async fn neighbors_for_dev(
                 .get_link_by_name(name)
                 .await?
                 .ok_or_else(|| {
-                    nlink::netlink::Error::InvalidMessage(format!("device `{name}` not found"))
+                    nlink::netlink::Error::invalid_message(format!("device `{name}` not found"))
                 })?
                 .ifindex();
             conn.get_neighbors_by_index(ifindex).await

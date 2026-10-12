@@ -115,7 +115,7 @@ impl Connection<NetShaper> {
     pub async fn group_shapers(&self, req: NetShaperGroupRequest) -> Result<NetShaperHandle> {
         let reply: NetShaperReply = self.send_typed(req).await?;
         reply.handle.ok_or_else(|| {
-            Error::InvalidMessage("net_shaper group reply missing node handle".into())
+            Error::invalid_message("net_shaper group reply missing node handle")
         })
     }
 

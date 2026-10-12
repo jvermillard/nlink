@@ -120,7 +120,7 @@ impl FromStr for EthProto {
         };
         parsed
             .map(Self)
-            .map_err(|_| Error::InvalidMessage(format!("unknown ethernet protocol `{s}`")))
+            .map_err(|_| Error::invalid_message(format!("unknown ethernet protocol `{s}`")))
     }
 }
 

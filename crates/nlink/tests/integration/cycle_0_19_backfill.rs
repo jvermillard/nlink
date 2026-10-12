@@ -615,7 +615,7 @@ async fn plan_207a_diff_reads_iff_up_from_admin_flags() -> Result<()> {
         let idx = conn
             .get_link_by_name("d0")
             .await?
-            .ok_or_else(|| nlink::Error::InvalidMessage("d0 not found".into()))?
+            .ok_or_else(|| nlink::Error::invalid_message("d0 not found"))?
             .ifindex();
         conn.set_link_up(idx).await?;
 
@@ -659,12 +659,12 @@ async fn plan_207b_diff_resolves_master_ifindex_to_name() -> Result<()> {
         let br_idx = conn
             .get_link_by_name("br0")
             .await?
-            .ok_or_else(|| nlink::Error::InvalidMessage("br0 not found".into()))?
+            .ok_or_else(|| nlink::Error::invalid_message("br0 not found"))?
             .ifindex();
         let slave_idx = conn
             .get_link_by_name("slave0")
             .await?
-            .ok_or_else(|| nlink::Error::InvalidMessage("slave0 not found".into()))?
+            .ok_or_else(|| nlink::Error::invalid_message("slave0 not found"))?
             .ifindex();
         conn.set_link_master(slave_idx, br_idx).await?;
 
@@ -713,7 +713,7 @@ async fn plan_207f_replace_qdisc_is_atomic() -> Result<()> {
         let idx = conn
             .get_link_by_name("d0")
             .await?
-            .ok_or_else(|| nlink::Error::InvalidMessage("d0 not found".into()))?
+            .ok_or_else(|| nlink::Error::invalid_message("d0 not found"))?
             .ifindex();
         conn.set_link_up(idx).await?;
 

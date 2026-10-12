@@ -3758,7 +3758,7 @@ impl TryFrom<u8> for BondMode {
             4 => Ok(Self::Lacp),
             5 => Ok(Self::BalanceTlb),
             6 => Ok(Self::BalanceAlb),
-            _ => Err(super::Error::InvalidAttribute(format!(
+            _ => Err(super::Error::invalid_attribute(format!(
                 "unknown bond mode: {value}"
             ))),
         }
@@ -3797,7 +3797,7 @@ impl TryFrom<u8> for XmitHashPolicy {
             3 => Ok(Self::Encap23),
             4 => Ok(Self::Encap34),
             5 => Ok(Self::VlanSrcMac),
-            _ => Err(super::Error::InvalidAttribute(format!(
+            _ => Err(super::Error::invalid_attribute(format!(
                 "unknown xmit hash policy: {value}"
             ))),
         }
@@ -5840,9 +5840,9 @@ impl Connection<Route> {
         use super::message::{NLM_F_ACK, NLM_F_REQUEST};
 
         // Validate interface name(s) before sending to kernel
-        crate::util::ifname::validate(config.name()).map_err(super::error::Error::Interface)?;
+        crate::util::ifname::validate(config.name()).map_err(super::error::Error::from)?;
         if let Some(peer) = config.peer_name() {
-            crate::util::ifname::validate(peer).map_err(super::error::Error::Interface)?;
+            crate::util::ifname::validate(peer).map_err(super::error::Error::from)?;
         }
 
         // Resolve parent interface if needed
@@ -5852,7 +5852,7 @@ impl Connection<Route> {
         };
 
         if let Some(why) = config.creation_error() {
-            return Err(super::error::Error::InvalidMessage(format!(
+            return Err(super::error::Error::invalid_message(format!(
                 "add_link({}): {why}",
                 config.name()
             )));
@@ -6129,7 +6129,7 @@ impl Connection<Route> {
         use super::connection::ack_request;
 
         if config.is_empty() {
-            return Err(super::error::Error::InvalidMessage(
+            return Err(super::error::Error::invalid_message(
                 "set_bridge_port: no options set (nothing to change)".to_string(),
             ));
         }
@@ -6179,7 +6179,7 @@ impl Connection<Route> {
         use super::connection::ack_request;
 
         // Validate the new name before sending to kernel
-        crate::util::ifname::validate(new_name).map_err(super::error::Error::Interface)?;
+        crate::util::ifname::validate(new_name).map_err(super::error::Error::from)?;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 

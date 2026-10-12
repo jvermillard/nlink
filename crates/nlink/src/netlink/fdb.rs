@@ -330,7 +330,7 @@ impl FdbEntryBuilder {
     /// ```
     pub fn parse_mac(mac_str: &str) -> Result<[u8; 6]> {
         crate::util::addr::parse_mac(mac_str)
-            .map_err(|e| Error::InvalidMessage(format!("invalid MAC: {}", e)))
+            .map_err(|e| Error::invalid_message(format!("invalid MAC: {}", e)))
     }
 
     /// Set the device name (bridge port interface).
@@ -670,8 +670,8 @@ impl Connection<Route> {
         let ifindex = match entry.device_ref() {
             Some(iface) => self.resolve_interface(iface).await?,
             None => {
-                return Err(Error::InvalidMessage(
-                    "device name or ifindex required".into(),
+                return Err(Error::invalid_message(
+                    "device name or ifindex required",
                 ));
             }
         };

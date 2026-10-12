@@ -396,7 +396,7 @@ impl<'a> Batch<'a> {
         let results = self.execute().await?;
         for result in &results.results {
             if let Err(e) = result {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "batch operation failed: {e}"
                 )));
             }
@@ -425,7 +425,7 @@ impl<'a> Batch<'a> {
         // Collect ACKs matched by sequence number. The recv loop runs
         // under the connection's configured timeout (Plan 171: 30s
         // default) so a kernel that drops one of the ACKs for a
-        // batched op surfaces as `Error::Timeout` rather than an
+        // batched op surfaces as `Error::timeout()` rather than an
         // indefinite hang. Pre-0.19 this loop ran without any timeout
         // wrap, so a chunk where any op silently lost its ACK would
         // block forever.
@@ -651,7 +651,7 @@ mod tests {
         // The contract `errors()` documents.
         let r = make_results(vec![
             Ok(()),
-            Err(Error::InvalidMessage("bad".into())),
+            Err(Error::invalid_message("bad")),
             Ok(()),
         ]);
         assert_eq!(r.len(), 3);

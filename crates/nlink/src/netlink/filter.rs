@@ -500,7 +500,7 @@ impl U32Filter {
     /// Stricter than the legacy `add_u32_options` parser (which
     /// silently dropped unknown tokens via a default `_ => i += 1`
     /// arm): unknown tokens, missing values, and unparseable hex
-    /// return `Error::InvalidMessage("u32: ...")`.
+    /// return `Error::invalid_message("u32: ...")`.
     ///
     /// # Phase 3 surface (hash-table grammar)
     ///
@@ -532,7 +532,7 @@ impl U32Filter {
             match key {
                 "match" => {
                     let width = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "u32: `match` requires `WIDTH ...` (missing WIDTH)".to_string(),
                         )
                     })?;
@@ -548,7 +548,7 @@ impl U32Filter {
                             i += consumed;
                         }
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "u32: unknown match width `{other}` \
                                  (expected u32, u16, u8, ip, tcp, or udp)"
                             )));
@@ -558,7 +558,7 @@ impl U32Filter {
                 "classid" | "flowid" => {
                     let s = need_value(params, i, "u32", key)?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("u32: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("u32: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -601,7 +601,7 @@ impl U32Filter {
                                 let s = need_value(params, j, "u32", "offset plus")?;
                                 let plus = parse_offset("u32", s)?;
                                 let plus = u16::try_from(plus).map_err(|_| {
-                                    Error::InvalidMessage(format!(
+                                    Error::invalid_message(format!(
                                         "u32: offset plus `{s}` out of range (0–65535)"
                                     ))
                                 })?;
@@ -611,7 +611,7 @@ impl U32Filter {
                             "at" => {
                                 let s = need_value(params, j, "u32", "offset at")?;
                                 at = i16::try_from(parse_offset("u32", s)?).map_err(|_| {
-                                    Error::InvalidMessage(format!(
+                                    Error::invalid_message(format!(
                                         "u32: offset at `{s}` out of range for i16"
                                     ))
                                 })?;
@@ -621,7 +621,7 @@ impl U32Filter {
                                 let s = need_value(params, j, "u32", "offset mask")?;
                                 mask = u16::try_from(parse_hex_u32("u32", "offset mask", s)?)
                                     .map_err(|_| {
-                                        Error::InvalidMessage(format!(
+                                        Error::invalid_message(format!(
                                             "u32: offset mask `{s}` is wider than 16 bits"
                                         ))
                                     })?;
@@ -630,7 +630,7 @@ impl U32Filter {
                             "shift" => {
                                 let s = need_value(params, j, "u32", "offset shift")?;
                                 shift = s.parse().map_err(|_| {
-                                    Error::InvalidMessage(format!(
+                                    Error::invalid_message(format!(
                                         "u32: invalid offset shift `{s}` (expected 0–255)"
                                     ))
                                 })?;
@@ -644,7 +644,7 @@ impl U32Filter {
                         }
                     }
                     if j == i + 1 {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "u32: `offset` requires `plus`, `at`, `mask`, `shift` or `eat`"
                                 .to_string(),
                         ));
@@ -657,39 +657,39 @@ impl U32Filter {
                 "hashkey" => {
                     // Form: hashkey mask <hex> at <offset> → 5 tokens total.
                     let mask_kw = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "u32: `hashkey` requires `mask <hex> at <offset>`".to_string(),
                         )
                     })?;
                     if mask_kw != "mask" {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "u32: expected `mask` after `hashkey`, got `{mask_kw}`"
                         )));
                     }
                     let mask_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "u32: `hashkey mask` requires a hex value".to_string(),
                         )
                     })?;
                     let at_kw = params.get(i + 3).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "u32: `hashkey mask <hex>` requires `at <offset>`".to_string(),
                         )
                     })?;
                     if at_kw != "at" {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "u32: expected `at` between hashkey mask and offset, got `{at_kw}`"
                         )));
                     }
                     let off_s = params.get(i + 4).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "u32: `hashkey mask <hex> at` requires an offset".to_string(),
                         )
                     })?;
                     let mask = parse_hex_u32("u32", "hashkey mask", mask_s)?;
                     let offset = parse_offset("u32", off_s)?;
                     if !(i16::MIN as i32..=i16::MAX as i32).contains(&offset) {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "u32: hashkey offset `{off_s}` out of range for i16"
                         )));
                     }
@@ -697,7 +697,7 @@ impl U32Filter {
                     i += 5;
                 }
                 "order" => {
-                    return Err(Error::InvalidMessage(
+                    return Err(Error::invalid_message(
                         "u32: `order` is not yet typed-modelled — modifying the filter's own \
                          handle requires bin-side support that isn't wired through \
                          parse_params; ship `order` support separately when needed"
@@ -705,7 +705,7 @@ impl U32Filter {
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "u32: unknown token `{other}` (supports: match u32|u16|u8 VAL MASK at OFFSET, match ip|tcp|udp ..., classid/flowid, chain, divisor, ht, link, hashkey, skip_hw, skip_sw)"
                     )));
                 }
@@ -814,13 +814,13 @@ fn need_value<'a>(params: &[&'a str], i: usize, kind: &str, key: &str) -> Result
     params
         .get(i + 1)
         .copied()
-        .ok_or_else(|| Error::InvalidMessage(format!("{kind}: `{key}` requires a value")))
+        .ok_or_else(|| Error::invalid_message(format!("{kind}: `{key}` requires a value")))
 }
 
 /// Parse a decimal `u32` with kind-prefixed error context.
 fn parse_u32_int(kind: &str, key: &str, s: &str) -> Result<u32> {
     s.parse::<u32>().map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "{kind}: invalid {key} `{s}` (expected unsigned integer)"
         ))
     })
@@ -833,7 +833,7 @@ fn parse_hex_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
     u32::from_str_radix(body, 16).map_err(|_| {
-        Error::InvalidMessage(format!("{kind}: invalid {key} `{s}` (expected hex value)"))
+        Error::invalid_message(format!("{kind}: invalid {key} `{s}` (expected hex value)"))
     })
 }
 
@@ -843,10 +843,10 @@ fn parse_hex_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
 fn parse_offset(kind: &str, s: &str) -> Result<i32> {
     let v: u32 = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u32::from_str_radix(rest, 16)
-            .map_err(|_| Error::InvalidMessage(format!("{kind}: invalid offset `{s}`")))?
+            .map_err(|_| Error::invalid_message(format!("{kind}: invalid offset `{s}`")))?
     } else {
         s.parse::<u32>()
-            .map_err(|_| Error::InvalidMessage(format!("{kind}: invalid offset `{s}`")))?
+            .map_err(|_| Error::invalid_message(format!("{kind}: invalid offset `{s}`")))?
     };
     Ok(v as i32)
 }
@@ -864,7 +864,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
     // Need: match WIDTH VAL MASK at OFFSET → 6 tokens total.
     let need = |k: usize, name: &str| -> Result<&str> {
         params.get(i + k).copied().ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "u32: `match` requires `WIDTH VAL MASK at OFFSET` (missing {name})"
             ))
         })
@@ -875,7 +875,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
     let off_s = need(5, "OFFSET")?;
 
     if at_kw != "at" {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "u32: expected `at` between MASK and OFFSET, got `{at_kw}`"
         )));
     }
@@ -890,7 +890,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
             let val = parse_hex_u32("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             if val > 0xFFFF || mask > 0xFFFF {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "u32: u16 match VAL/MASK must fit in 16 bits (got val={val_s}, mask={mask_s})"
                 )));
             }
@@ -900,7 +900,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
             let val = parse_hex_u32("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             if val > 0xFF || mask > 0xFF {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "u32: u8 match VAL/MASK must fit in 8 bits (got val={val_s}, mask={mask_s})"
                 )));
             }
@@ -908,7 +908,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
         }
         other => {
             // Caller pre-validated; unreachable in practice.
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "u32: unknown match width `{other}`"
             )));
         }
@@ -934,9 +934,9 @@ fn apply_named_match(
     let field = params
         .get(i + 2)
         .copied()
-        .ok_or_else(|| Error::InvalidMessage(format!("u32: `match {layer}` requires FIELD")))?;
+        .ok_or_else(|| Error::invalid_message(format!("u32: `match {layer}` requires FIELD")))?;
     let value = params.get(i + 3).copied().ok_or_else(|| {
-        Error::InvalidMessage(format!("u32: `match {layer} {field}` requires VALUE"))
+        Error::invalid_message(format!("u32: `match {layer} {field}` requires VALUE"))
     })?;
 
     // tc(8) writes a port match with a hex mask: `match ip dport 80 0xffff`.
@@ -950,7 +950,7 @@ fn apply_named_match(
         {
             Some(mask) => {
                 let mask = u16::try_from(mask).map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "u32: `match {layer} {field}` mask `{}` is wider than 16 bits",
                         params[i + 4]
                     ))
@@ -987,7 +987,7 @@ fn apply_named_match(
             {
                 Some(mask) => {
                     let mask = u8::try_from(mask).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "u32: `match ip protocol` mask `{}` is wider than 8 bits",
                             params[i + 4]
                         ))
@@ -1007,7 +1007,7 @@ fn apply_named_match(
         // linking filter's `offset` sets.
         ("tcp" | "udp", "src") => port_match(0, true),
         ("tcp" | "udp", "dst") => port_match(2, true),
-        _ => Err(Error::InvalidMessage(format!(
+        _ => Err(Error::invalid_message(format!(
             "u32: unsupported `match {layer} {field}` \
              (supported: ip src/dst/protocol/sport/dport, \
              tcp/udp src/dst/sport/dport)"
@@ -1019,7 +1019,7 @@ fn apply_named_match(
 /// or a `0x` raw value — as iproute2's `get_u32_handle` does (#492). Not a
 /// qdisc handle: `2:` is `0x00200000`.
 fn parse_u32_handle(key: &str, s: &str) -> Result<u32> {
-    let bad = || Error::InvalidMessage(format!("u32: invalid {key} handle `{s}`"));
+    let bad = || Error::invalid_message(format!("u32: invalid {key} handle `{s}`"));
     let Some((htid, rest)) = s.split_once(':') else {
         return s
             .strip_prefix("0x")
@@ -1044,12 +1044,12 @@ fn parse_u32_ipv4_with_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
     let (addr_s, prefix) = match s.split_once('/') {
         Some((a, p)) => {
             let pl: u8 = p.parse().map_err(|_| {
-                Error::InvalidMessage(format!(
+                Error::invalid_message(format!(
                     "u32: invalid IPv4 prefix length `{p}` (expected 0–32)"
                 ))
             })?;
             if pl > 32 {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "u32: IPv4 prefix length `{pl}` out of range (expected 0–32)"
                 )));
             }
@@ -1059,7 +1059,7 @@ fn parse_u32_ipv4_with_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
     };
     let addr: Ipv4Addr = addr_s
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("u32: invalid IPv4 address `{addr_s}`")))?;
+        .map_err(|_| Error::invalid_message(format!("u32: invalid IPv4 address `{addr_s}`")))?;
     Ok((addr, prefix))
 }
 
@@ -1080,7 +1080,7 @@ fn parse_ip_proto_name_or_num(s: &str) -> Result<u8> {
         "esp" => 50,
         "gre" => 47,
         other => {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "u32: unknown IP protocol `{other}` \
                  (expected name [tcp/udp/icmp/icmpv6/sctp/ah/esp/gre] or number 0–255)"
             )));
@@ -1091,7 +1091,7 @@ fn parse_ip_proto_name_or_num(s: &str) -> Result<u8> {
 /// Parse a u16 port value with kind-prefixed error context.
 fn parse_port(field: &str, layer: &str, s: &str) -> Result<u16> {
     s.parse::<u16>().map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "u32: invalid {layer} {field} `{s}` (expected port 0–65535)"
         ))
     })
@@ -1532,14 +1532,14 @@ impl FlowerFilter {
     /// - `tcp_flags <flags[/mask]>` — hex u16
     /// - `skip_hw` / `skip_sw` — flag tokens (no value)
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `ct_state`, `ct_zone`, `ct_mark`, `enc_key_id`,
     /// `enc_dst_ip`, `enc_src_ip`, `enc_dst_port`, `indev`. File
     /// an issue if you need any of these.
     ///
     /// Stricter than the legacy `add_flower_options`: unknown tokens,
     /// missing values, and unparseable addresses / ports / MACs all
-    /// return `Error::InvalidMessage` rather than silently being
+    /// return `Error::invalid_message` rather than silently being
     /// skipped.
     ///
     /// # Example
@@ -1563,14 +1563,14 @@ impl FlowerFilter {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("flower: `{key}` requires a value"))
+                    Error::invalid_message(format!("flower: `{key}` requires a value"))
                 })
             };
             match key {
                 "classid" | "flowid" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("flower: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("flower: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -1633,10 +1633,10 @@ impl FlowerFilter {
                 "vlan_id" => {
                     let s = need_value()?;
                     let id: u16 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flower: invalid vlan_id `{s}`"))
+                        Error::invalid_message(format!("flower: invalid vlan_id `{s}`"))
                     })?;
                     if !(1..=4094).contains(&id) {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "flower: vlan_id `{id}` out of range (must be 1-4094)"
                         )));
                     }
@@ -1646,10 +1646,10 @@ impl FlowerFilter {
                 "vlan_prio" => {
                     let s = need_value()?;
                     let prio: u8 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flower: invalid vlan_prio `{s}`"))
+                        Error::invalid_message(format!("flower: invalid vlan_prio `{s}`"))
                     })?;
                     if prio > 7 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "flower: vlan_prio `{prio}` out of range (must be 0-7)"
                         )));
                     }
@@ -1681,18 +1681,18 @@ impl FlowerFilter {
                 }
                 "ct_state" | "ct_zone" | "ct_mark" | "enc_key_id" | "enc_dst_ip" | "enc_src_ip"
                 | "enc_dst_port" | "indev" => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "flower: `{key}` is not modelled by FlowerFilter yet — file an issue if you need this match"
                     )));
                 }
                 "action" | "actions" => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "flower: `{key}` is not modelled by FlowerFilter::parse_params — build the \
                          filter and attach them with FlowerFilter::actions(ActionList)"
                     )));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "flower: unknown token `{other}`"
                     )));
                 }
@@ -1712,7 +1712,7 @@ fn parse_flower_port(key: &str, s: &str) -> crate::Result<FlowerPort> {
     use crate::Error;
     let port = |p: &str| {
         p.parse::<u16>().map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "flower: invalid {key} `{s}` (expected 0-65535 or min-max)"
             ))
         })
@@ -1723,7 +1723,7 @@ fn parse_flower_port(key: &str, s: &str) -> crate::Result<FlowerPort> {
     let (min, max) = (port(min)?, port(max)?);
     // `fl_set_key_port_range` refuses `max <= min`; so does tc(8).
     if min >= max {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "flower: invalid {key} range `{s}` (min must be below max; a single port is \
              `{key} {min}`)"
         )));
@@ -1744,7 +1744,7 @@ fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
         "icmp" => flower::IPPROTO_ICMP,
         "icmpv6" => flower::IPPROTO_ICMPV6,
         other => u8::from_str_radix(other.strip_prefix("0x").unwrap_or(other), 16).map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "flower: invalid ip_proto `{other}` (expected tcp/udp/sctp/icmp/icmpv6 or a \
                  protocol number in hex, as tc(8) reads it: 2f or 0x2f for GRE)"
             ))
@@ -1757,7 +1757,7 @@ fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
 /// as hex before 0.32, so `2048` meant 0x2048 rather than IPv4 (#515).
 fn parse_flower_eth_type(s: &str) -> crate::Result<u16> {
     s.parse::<EthProto>().map(EthProto::as_u16).map_err(|_| {
-        crate::Error::InvalidMessage(format!(
+        crate::Error::invalid_message(format!(
             "flower: invalid eth_type `{s}` (expected a protocol name or a number)"
         ))
     })
@@ -1767,13 +1767,13 @@ fn parse_ipv4_with_prefix(s: &str) -> crate::Result<(Ipv4Addr, u8)> {
     use crate::Error;
     if let Some((addr_s, plen_s)) = s.split_once('/') {
         let addr: Ipv4Addr = addr_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("flower: invalid IPv4 address `{addr_s}`"))
+            Error::invalid_message(format!("flower: invalid IPv4 address `{addr_s}`"))
         })?;
         let plen: u8 = plen_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("flower: invalid IPv4 prefix `{plen_s}`"))
+            Error::invalid_message(format!("flower: invalid IPv4 prefix `{plen_s}`"))
         })?;
         if plen > 32 {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "flower: IPv4 prefix `{plen}` out of range (max 32)"
             )));
         }
@@ -1781,7 +1781,7 @@ fn parse_ipv4_with_prefix(s: &str) -> crate::Result<(Ipv4Addr, u8)> {
     } else {
         let addr: Ipv4Addr = s
             .parse()
-            .map_err(|_| Error::InvalidMessage(format!("flower: invalid IPv4 address `{s}`")))?;
+            .map_err(|_| Error::invalid_message(format!("flower: invalid IPv4 address `{s}`")))?;
         Ok((addr, 32))
     }
 }
@@ -1792,10 +1792,10 @@ fn parse_ipv6_with_prefix(s: &str) -> crate::Result<(Ipv6Addr, u8)> {
         && let Ok(addr) = addr_s.parse::<Ipv6Addr>()
     {
         let plen: u8 = plen_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("flower: invalid IPv6 prefix `{plen_s}`"))
+            Error::invalid_message(format!("flower: invalid IPv6 prefix `{plen_s}`"))
         })?;
         if plen > 128 {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "flower: IPv6 prefix `{plen}` out of range (max 128)"
             )));
         }
@@ -1803,7 +1803,7 @@ fn parse_ipv6_with_prefix(s: &str) -> crate::Result<(Ipv6Addr, u8)> {
     }
     let addr: Ipv6Addr = s
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("flower: invalid IPv6 address `{s}`")))?;
+        .map_err(|_| Error::invalid_message(format!("flower: invalid IPv6 address `{s}`")))?;
     Ok((addr, 128))
 }
 
@@ -1811,14 +1811,14 @@ fn parse_mac(s: &str) -> crate::Result<[u8; 6]> {
     use crate::Error;
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "flower: invalid MAC `{s}` (expected xx:xx:xx:xx:xx:xx)"
         )));
     }
     let mut mac = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
         mac[i] = u8::from_str_radix(part, 16)
-            .map_err(|_| Error::InvalidMessage(format!("flower: invalid MAC `{s}`")))?;
+            .map_err(|_| Error::invalid_message(format!("flower: invalid MAC `{s}`")))?;
     }
     Ok(mac)
 }
@@ -1829,7 +1829,7 @@ fn parse_mac(s: &str) -> crate::Result<[u8; 6]> {
 /// is valid hex, so `ip_ttl 64` came out as TTL 100 (#447).
 fn parse_value_mask_u8(s: &str, label: &str) -> crate::Result<(u8, u8)> {
     use crate::Error;
-    let invalid = |t: &str| Error::InvalidMessage(format!("flower: invalid {label} `{t}`"));
+    let invalid = |t: &str| Error::invalid_message(format!("flower: invalid {label} `{t}`"));
     let hex = |t: &str| u8::from_str_radix(t.strip_prefix("0x").unwrap_or(t), 16);
     let (v, m) = s.split_once('/').map_or((s, None), |(v, m)| (v, Some(m)));
     let value = v.parse::<u8>().or_else(|_| hex(v)).map_err(|_| invalid(v))?;
@@ -1843,7 +1843,7 @@ fn parse_value_mask_u16_hex(s: &str, label: &str) -> crate::Result<(u16, u16)> {
         let trimmed = t.strip_prefix("0x").unwrap_or(t);
         u16::from_str_radix(trimmed, 16)
             .or_else(|_| t.parse::<u16>())
-            .map_err(|_| Error::InvalidMessage(format!("flower: invalid {label} `{t}`")))
+            .map_err(|_| Error::invalid_message(format!("flower: invalid {label} `{t}`")))
     };
     if let Some((v, m)) = s.split_once('/') {
         Ok((parse_one(v)?, parse_one(m)?))
@@ -1875,7 +1875,7 @@ fn parse_flow_key(s: &str) -> crate::Result<FlowKey> {
         "vlan-tag" => FlowKey::VlanTag,
         "rxhash" => FlowKey::RxHash,
         other => {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "flow: unknown key `{other}` (see FlowKey enum docs for the list)"
             )));
         }
@@ -1891,7 +1891,7 @@ fn parse_flow_u32_hex_or_dec(s: &str, label: &str) -> crate::Result<u32> {
     } else {
         s.parse::<u32>()
     }
-    .map_err(|_| Error::InvalidMessage(format!("flow: invalid {label} `{s}`")))
+    .map_err(|_| Error::invalid_message(format!("flow: invalid {label} `{s}`")))
 }
 
 /// Helper to create an IPv4 mask from prefix length.
@@ -1991,7 +1991,7 @@ impl FilterConfig for FlowerFilter {
                     Some(t) => format!(" (this one is {t:#06x})"),
                     None => String::new(),
                 };
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "flower: {} needs an ethertype of IPv4 or IPv6{other} — cls_flower \
                      discards L3/L4 keys unless TCA_FLOWER_KEY_ETH_TYPE says IPv4 or \
                      IPv6, and would install this as a match-all filter. Call .ipv4() \
@@ -2012,7 +2012,7 @@ impl FilterConfig for FlowerFilter {
                 Some(p) => format!("ip_proto {p}"),
                 None => "no ip_proto".to_string(),
             };
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "flower: tcp_flags needs ip_proto tcp, not {proto} — cls_flower reads TCP \
                  flags only for TCP, and would install this as a match-all"
             )));
@@ -2029,7 +2029,7 @@ impl FilterConfig for FlowerFilter {
                 Some(t) => format!("ethertype {t:#06x}"),
                 None => "no ethertype".to_string(),
             };
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "flower: {what} needs an 802.1Q or 802.1AD ethertype, not {ethertype} — \
                  cls_flower reads VLAN keys only under a VLAN tag, and would install this \
                  as a match-all. Matching an IP header inside a VLAN \
@@ -2058,13 +2058,13 @@ impl FilterConfig for FlowerFilter {
         ] {
             if let Some((min, max)) = range {
                 if min >= max {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "flower: {what} range {min}-{max} is invalid: the kernel needs min \
                          below max (a single port is .{what}({min}))"
                     )));
                 }
                 if !has_ports {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "flower: a {what} range needs ip_proto tcp, udp or sctp, not {proto} — \
                          cls_flower reads port ranges for those only, and would install this \
                          as a match-all"
@@ -2074,7 +2074,7 @@ impl FilterConfig for FlowerFilter {
             if let Some(port) = exact
                 && !has_ports
             {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "flower: {what} {port} needs ip_proto tcp, udp or sctp, not {proto} — \
                      cls_flower reads ports for those only, and would install this as a \
                      match-all"
@@ -2387,7 +2387,7 @@ impl MatchallFilter {
     /// Stricter than the legacy parser (which only recognised
     /// `classid` / `flowid` and silently dropped everything else):
     /// unknown tokens, missing values, and unparseable handles
-    /// return `Error::InvalidMessage`.
+    /// return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use crate::Error;
         let mut f = Self::new();
@@ -2396,14 +2396,14 @@ impl MatchallFilter {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("matchall: `{key}` requires a value"))
+                    Error::invalid_message(format!("matchall: `{key}` requires a value"))
                 })
             };
             match key {
                 "classid" | "flowid" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("matchall: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("matchall: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -2411,14 +2411,14 @@ impl MatchallFilter {
                 "chain" => {
                     let s = need_value()?;
                     f = f.chain(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("matchall: invalid chain `{s}`"))
+                        Error::invalid_message(format!("matchall: invalid chain `{s}`"))
                     })?);
                     i += 2;
                 }
                 "goto_chain" => {
                     let s = need_value()?;
                     f = f.goto_chain(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("matchall: invalid goto_chain `{s}`"))
+                        Error::invalid_message(format!("matchall: invalid goto_chain `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -2431,7 +2431,7 @@ impl MatchallFilter {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "matchall: unknown token `{other}`"
                     )));
                 }
@@ -2594,7 +2594,7 @@ impl FwFilter {
     /// - `chain <n>` — chain index.
     ///
     /// Stricter than the legacy parser: unknown tokens, missing
-    /// values, and unparseable values return `Error::InvalidMessage`.
+    /// values, and unparseable values return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use crate::Error;
         let mut f = Self::new();
@@ -2605,13 +2605,13 @@ impl FwFilter {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("fw: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("fw: `{key}` requires a value")))
             };
             match key {
                 "classid" | "flowid" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("fw: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("fw: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -2628,7 +2628,7 @@ impl FwFilter {
                             s.parse::<u32>()
                         }
                         .map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "fw: invalid mask `{s}` (expected hex `0xNN` or decimal u32)"
                             ))
                         })?;
@@ -2639,12 +2639,12 @@ impl FwFilter {
                     let s = need_value()?;
                     f =
                         f.chain(s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!("fw: invalid chain `{s}`"))
+                            Error::invalid_message(format!("fw: invalid chain `{s}`"))
                         })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "fw: unknown token `{other}`"
                     )));
                 }
@@ -2789,14 +2789,14 @@ impl TcindexFilter {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("tcindex: `{key}` requires a value"))
+                    Error::invalid_message(format!("tcindex: `{key}` requires a value"))
                 })
             };
             match key {
                 "hash" => {
                     let s = need_value()?;
                     f.hash = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tcindex: invalid hash `{s}`"))
+                        Error::invalid_message(format!("tcindex: invalid hash `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -2810,7 +2810,7 @@ impl TcindexFilter {
                         s.parse::<u16>()
                     }
                     .map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "tcindex: invalid mask `{s}` (expected hex `0xNN` or decimal u16)"
                         ))
                     })?;
@@ -2820,7 +2820,7 @@ impl TcindexFilter {
                 "shift" => {
                     let s = need_value()?;
                     f.shift = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tcindex: invalid shift `{s}`"))
+                        Error::invalid_message(format!("tcindex: invalid shift `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -2835,7 +2835,7 @@ impl TcindexFilter {
                 "classid" | "flowid" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("tcindex: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("tcindex: invalid {key} `{s}`: {e}"))
                     })?;
                     f.classid = Some(h.as_raw());
                     i += 2;
@@ -2843,12 +2843,12 @@ impl TcindexFilter {
                 "chain" => {
                     let s = need_value()?;
                     f.chain = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tcindex: invalid chain `{s}`"))
+                        Error::invalid_message(format!("tcindex: invalid chain `{s}`"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "tcindex: unknown token `{other}`"
                     )));
                 }
@@ -3046,9 +3046,9 @@ impl BpfFilter {
     /// **Required**: either `fd <n>` or `pinned <path>` must be
     /// supplied; the kernel won't accept a BPF filter without a
     /// program reference. The parser returns
-    /// `Error::InvalidMessage` if neither is present.
+    /// `Error::invalid_message` if neither is present.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `skip_hw` / `skip_sw` — `BpfFilter` doesn't expose a flags
     /// field. File an issue if you need hardware-offload control
     /// on a BPF filter.
@@ -3069,18 +3069,18 @@ impl BpfFilter {
                 params
                     .get(idx + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("bpf: `{k}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("bpf: `{k}` requires a value")))
             };
             match key {
                 "fd" => {
                     let s = need_value(key, i)?;
                     if fd.is_some() {
-                        return Err(Error::InvalidMessage(
-                            "bpf: `fd` and `pinned` are mutually exclusive".into(),
+                        return Err(Error::invalid_message(
+                            "bpf: `fd` and `pinned` are mutually exclusive",
                         ));
                     }
                     fd = Some(ProgFd::Raw(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "bpf: invalid fd `{s}` (expected signed integer)"
                         ))
                     })?));
@@ -3089,13 +3089,13 @@ impl BpfFilter {
                 "pinned" | "object-pinned" => {
                     let path = need_value(key, i)?;
                     if fd.is_some() {
-                        return Err(Error::InvalidMessage(
-                            "bpf: `fd` and `pinned` are mutually exclusive".into(),
+                        return Err(Error::invalid_message(
+                            "bpf: `fd` and `pinned` are mutually exclusive",
                         ));
                     }
                     // `BPF_OBJ_GET`: bpffs refuses `open(2)` on a pin (#710).
                     fd = Some(ProgFd::open_pinned(std::path::Path::new(path)).map_err(|e| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "bpf: failed to open pinned program `{path}`: {e}"
                         ))
                     })?);
@@ -3108,7 +3108,7 @@ impl BpfFilter {
                 "classid" | "flowid" => {
                     let s = need_value(key, i)?;
                     classid = Some(s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("bpf: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("bpf: invalid {key} `{s}`: {e}"))
                     })?);
                     i += 2;
                 }
@@ -3116,7 +3116,7 @@ impl BpfFilter {
                     let s = need_value(key, i)?;
                     chain =
                         Some(s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!("bpf: invalid chain `{s}`"))
+                            Error::invalid_message(format!("bpf: invalid chain `{s}`"))
                         })?);
                     i += 2;
                 }
@@ -3125,12 +3125,12 @@ impl BpfFilter {
                     i += 1;
                 }
                 "skip_hw" | "skip_sw" => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "bpf: `{key}` is not modelled by BpfFilter — file an issue if you need hardware-offload control"
                     )));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "bpf: unknown token `{other}`"
                     )));
                 }
@@ -3138,8 +3138,8 @@ impl BpfFilter {
         }
 
         let Some(fd) = fd else {
-            return Err(Error::InvalidMessage(
-                "bpf: program reference required — supply `fd <n>` or `pinned <path>`".into(),
+            return Err(Error::invalid_message(
+                "bpf: program reference required — supply `fd <n>` or `pinned <path>`",
             ));
         };
 
@@ -3482,7 +3482,7 @@ impl BasicFilter {
                 "classid" | "flowid" => {
                     let s = need_value(params, i, "basic", key)?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("basic: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("basic: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -3497,13 +3497,13 @@ impl BasicFilter {
                     let proto = parse_ip_proto_name_or_num(s).map_err(|e| {
                         // Re-prefix from `u32:` to `basic:`.
                         let msg = e.to_string().replace("u32:", "basic:");
-                        Error::InvalidMessage(msg)
+                        Error::invalid_message(msg)
                     })?;
                     f = f.ip_proto_eq(proto);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "basic: unknown token `{other}` (recognised: classid/flowid, chain, ip_proto_eq; complex ematch trees go through the typed builder)"
                     )));
                 }
@@ -3732,15 +3732,15 @@ impl CgroupFilter {
             match key {
                 "chain" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("cgroup: `chain` requires a value".into())
+                        Error::invalid_message("cgroup: `chain` requires a value")
                     })?;
                     f = f.chain(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("cgroup: invalid chain `{s}`"))
+                        Error::invalid_message(format!("cgroup: invalid chain `{s}`"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "cgroup: unknown token `{other}`"
                     )));
                 }
@@ -3921,14 +3921,14 @@ impl RouteFilter {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("route: `{key}` requires a value"))
+                    Error::invalid_message(format!("route: `{key}` requires a value"))
                 })
             };
             match key {
                 "classid" | "flowid" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("route: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("route: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -3936,14 +3936,14 @@ impl RouteFilter {
                 "to" => {
                     let s = need_value()?;
                     f = f.to_realm(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("route: invalid to realm `{s}`"))
+                        Error::invalid_message(format!("route: invalid to realm `{s}`"))
                     })?);
                     i += 2;
                 }
                 "from" => {
                     let s = need_value()?;
                     f = f.from_realm(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("route: invalid from realm `{s}`"))
+                        Error::invalid_message(format!("route: invalid from realm `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -3955,12 +3955,12 @@ impl RouteFilter {
                 "chain" => {
                     let s = need_value()?;
                     f = f.chain(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("route: invalid chain `{s}`"))
+                        Error::invalid_message(format!("route: invalid chain `{s}`"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "route: unknown token `{other}`"
                     )));
                 }
@@ -4006,7 +4006,7 @@ impl FilterConfig for RouteFilter {
             let ifindex = match iface {
                 InterfaceRef::Index(idx) => *idx,
                 InterfaceRef::Name(name) => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "RouteFilter from_if interface '{}' must be resolved to index before use. \
                          Use from_if_index() or resolve the name via Connection::get_link_by_name()",
                         name
@@ -4150,7 +4150,7 @@ impl RsvpFilter {
     /// - `chain <n>` — chain index.
     ///
     /// Strict: unknown tokens, missing values, unparseable values, and
-    /// not-modelled port forms all return `Error::InvalidMessage`.
+    /// not-modelled port forms all return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use crate::Error;
         let mut f = Self::new();
@@ -4158,13 +4158,13 @@ impl RsvpFilter {
 
         let parse_addr = |key: &str, s: &str| -> crate::Result<IpAddr> {
             if s.contains('/') {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "rsvp: `{key} {s}` port matching is not modelled by RsvpFilter — \
                      use an address without `/<port>`, or a hand-rolled MessageBuilder"
                 )));
             }
             s.parse::<IpAddr>().map_err(|_| {
-                Error::InvalidMessage(format!("rsvp: invalid {key} address `{s}`"))
+                Error::invalid_message(format!("rsvp: invalid {key} address `{s}`"))
             })
         };
 
@@ -4172,7 +4172,7 @@ impl RsvpFilter {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("rsvp: `{key}` requires a value"))
+                    Error::invalid_message(format!("rsvp: `{key}` requires a value"))
                 })
             };
             match key {
@@ -4182,7 +4182,7 @@ impl RsvpFilter {
                         "tcp" => 6,
                         "udp" => 17,
                         other => other.parse::<u8>().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "rsvp: invalid ipproto `{other}` (expected tcp, udp, or a number)"
                             ))
                         })?,
@@ -4203,7 +4203,7 @@ impl RsvpFilter {
                 "classid" | "flowid" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("rsvp: invalid {key} `{s}`: {e}"))
+                        Error::invalid_message(format!("rsvp: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -4211,26 +4211,26 @@ impl RsvpFilter {
                 "tunnelid" => {
                     let s = need_value()?;
                     f = f.tunnelid(s.parse::<u8>().map_err(|_| {
-                        Error::InvalidMessage(format!("rsvp: invalid tunnelid `{s}`"))
+                        Error::invalid_message(format!("rsvp: invalid tunnelid `{s}`"))
                     })?);
                     i += 2;
                 }
                 "chain" => {
                     let s = need_value()?;
                     f = f.chain(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("rsvp: invalid chain `{s}`"))
+                        Error::invalid_message(format!("rsvp: invalid chain `{s}`"))
                     })?);
                     i += 2;
                 }
                 "tunnel" => {
-                    return Err(Error::InvalidMessage(
+                    return Err(Error::invalid_message(
                         "rsvp: `tunnel <id> skip <n>` tunnel-creation form is not modelled by \
                          RsvpFilter — use a hand-rolled MessageBuilder"
                             .to_string(),
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "rsvp: unknown token `{other}`"
                     )));
                 }
@@ -4591,7 +4591,7 @@ impl FlowFilter {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("flow: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("flow: `{key}` requires a value")))
             };
             match key {
                 "keys" => {
@@ -4612,7 +4612,7 @@ impl FlowFilter {
                 "baseclass" => {
                     let s = need_value()?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("flow: invalid baseclass `{s}`: {e}"))
+                        Error::invalid_message(format!("flow: invalid baseclass `{s}`: {e}"))
                     })?;
                     f = f.baseclass(h);
                     i += 2;
@@ -4620,28 +4620,28 @@ impl FlowFilter {
                 "divisor" => {
                     let s = need_value()?;
                     f = f.divisor(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flow: invalid divisor `{s}`"))
+                        Error::invalid_message(format!("flow: invalid divisor `{s}`"))
                     })?);
                     i += 2;
                 }
                 "perturb" => {
                     let s = need_value()?;
                     f = f.perturb(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flow: invalid perturb `{s}`"))
+                        Error::invalid_message(format!("flow: invalid perturb `{s}`"))
                     })?);
                     i += 2;
                 }
                 "rshift" => {
                     let s = need_value()?;
                     f = f.rshift(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flow: invalid rshift `{s}`"))
+                        Error::invalid_message(format!("flow: invalid rshift `{s}`"))
                     })?);
                     i += 2;
                 }
                 "addend" => {
                     let s = need_value()?;
                     f = f.addend(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flow: invalid addend `{s}`"))
+                        Error::invalid_message(format!("flow: invalid addend `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -4658,12 +4658,12 @@ impl FlowFilter {
                 "chain" => {
                     let s = need_value()?;
                     f = f.chain(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("flow: invalid chain `{s}`"))
+                        Error::invalid_message(format!("flow: invalid chain `{s}`"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "flow: unknown token `{other}`"
                     )));
                 }
@@ -5786,9 +5786,7 @@ mod tests {
         assert_eq!(f.src_port_range, Some((1, 2)));
 
         for bad in ["8100-8000", "8000-8000", "8000-", "-8000", "8000-x", "1-70000"] {
-            let crate::Error::InvalidMessage(err) =
-                FlowerFilter::parse_params(&["dst_port", bad]).expect_err(bad)
-            else {
+            let crate::ErrorDetail::InvalidMessage(err) = FlowerFilter::parse_params(&["dst_port", bad]).expect_err(bad).into_detail() else {
                 panic!("{bad}: not an InvalidMessage");
             };
             assert!(err.starts_with("flower: "), "{bad}: {err}");
@@ -7127,7 +7125,7 @@ fn flower_unusable_port_ranges_are_refused() {
         (FlowerFilter::new().ip_proto_udp().dst_port_range(80, 90), "needs an ethertype"),
     ];
     for (f, why) in cases {
-        let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err(why) else {
+        let crate::ErrorDetail::InvalidMessage(err) = flower_option_ids(&f).expect_err(why).into_detail() else {
             panic!("{why}: not an InvalidMessage");
         };
         assert!(err.starts_with("flower: ") && err.contains(why), "{why}: {err}");
@@ -7205,7 +7203,7 @@ fn flower_exact_ports_cls_flower_would_drop_are_refused() {
         ),
     ];
     for (f, what) in cases {
-        let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err(what) else {
+        let crate::ErrorDetail::InvalidMessage(err) = flower_option_ids(&f).expect_err(what).into_detail() else {
             panic!("{what}: not an InvalidMessage");
         };
         assert!(
@@ -7220,7 +7218,7 @@ fn flower_exact_ports_cls_flower_would_drop_are_refused() {
     // under ARP it is dropped, and the port with it.
     let f = FlowerFilter::parse_params(&["eth_type", "arp", "ip_proto", "tcp", "dst_port", "80"])
         .expect("parses");
-    let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err("ARP") else {
+    let crate::ErrorDetail::InvalidMessage(err) = flower_option_ids(&f).expect_err("ARP").into_detail() else {
         panic!("ARP: not an InvalidMessage");
     };
     assert!(
@@ -7268,7 +7266,7 @@ fn flower_tcp_flags_and_vlan_keys_cls_flower_would_drop_are_refused() {
         ),
     ];
     for (f, why) in cases {
-        let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err(why) else {
+        let crate::ErrorDetail::InvalidMessage(err) = flower_option_ids(&f).expect_err(why).into_detail() else {
             panic!("{why}: not an InvalidMessage");
         };
         assert!(err.starts_with("flower: ") && err.contains(why), "{why}: {err}");

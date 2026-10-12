@@ -104,5 +104,5 @@ async fn created_means_the_namespace_is_there() -> Result<()> {
         !listed.contains(&stale),
         "a stale marker is not a namespace: {listed:?}"
     );
-    outcome.map_err(nlink::Error::InvalidMessage)
+    outcome.map_err(nlink::Error::invalid_message)
 }

@@ -51,7 +51,7 @@ impl ProgFd {
         match self {
             Self::Raw(fd) => Ok(*fd),
             Self::Owned(fd) => Ok(fd.as_raw_fd()),
-            Self::Failed(e) => Err(crate::Error::InvalidMessage(e.to_string())),
+            Self::Failed(e) => Err(crate::Error::invalid_message(e.to_string())),
         }
     }
 

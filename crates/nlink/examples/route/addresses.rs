@@ -109,18 +109,18 @@ async fn list_addresses(conn: &Connection<Route>) -> nlink::netlink::Result<()> 
 fn parse_addr_prefix(s: &str) -> nlink::netlink::Result<(IpAddr, u8)> {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 2 {
-        return Err(nlink::netlink::Error::InvalidMessage(
-            "expected format: ip/prefix".into(),
+        return Err(nlink::netlink::Error::invalid_message(
+            "expected format: ip/prefix",
         ));
     }
 
     let addr: IpAddr = parts[0]
         .parse()
-        .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid IP: {}", e)))?;
+        .map_err(|e| nlink::netlink::Error::invalid_message(format!("invalid IP: {}", e)))?;
 
     let prefix: u8 = parts[1]
         .parse()
-        .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid prefix: {}", e)))?;
+        .map_err(|e| nlink::netlink::Error::invalid_message(format!("invalid prefix: {}", e)))?;
 
     Ok((addr, prefix))
 }

@@ -216,7 +216,7 @@ async fn run_apply() -> nlink::Result<()> {
         let link = route
             .get_link_by_name("ovpn0")
             .await?
-            .ok_or_else(|| nlink::Error::InvalidMessage("ovpn0 missing after add_link".into()))?;
+            .ok_or_else(|| nlink::Error::invalid_message("ovpn0 missing after add_link"))?;
         let ifindex = link.ifindex();
 
         println!("Created ovpn0 (ifindex={ifindex}) in namespace {ns_name}");

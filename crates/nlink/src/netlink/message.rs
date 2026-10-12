@@ -98,7 +98,7 @@ impl NlMsgHdr {
     /// dump stream was generated after the mutation; `iproute2` warns,
     /// `vishvananda/netlink` retries up to N times, Cilium's
     /// `safenetlink` wrapper retries up to 30. nlink surfaces this as
-    /// [`Error::DumpInterrupted`] from `Connection::send_dump` so
+    /// [`Error::dump_interrupted()`] from `Connection::send_dump` so
     /// callers can choose their own retry policy via the
     /// [`Error::is_dump_interrupted`] predicate.
     ///
@@ -120,10 +120,10 @@ impl NlMsgHdr {
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
         Self::ref_from_prefix(data)
             .map(|(r, _)| r)
-            .map_err(|_| Error::Truncated {
+            .map_err(|_| Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: std::mem::size_of::<Self>(),
                 actual: data.len(),
-            })
+            }))
     }
 }
 
@@ -298,7 +298,7 @@ impl<'a> Iterator for MessageIter<'a> {
             // hanging long-lived multicast subscribers (Plan
             // 193 §2.3, CLAUDE.md §"Parser robustness" rule 2).
             self.data = &[];
-            return Some(Err(Error::InvalidMessage(format!(
+            return Some(Err(Error::invalid_message(format!(
                 "invalid message length: {}",
                 msg_len
             ))));
@@ -474,10 +474,10 @@ impl NlMsgError {
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
         Self::ref_from_prefix(data)
             .map(|(r, _)| r)
-            .map_err(|_| Error::Truncated {
+            .map_err(|_| Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: std::mem::size_of::<Self>(),
                 actual: data.len(),
-            })
+            }))
     }
 
     /// Check if this is an ACK (no error).

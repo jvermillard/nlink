@@ -701,7 +701,7 @@ impl FieldSpec {
                     __ty if __ty == (#attr) as u16 => {
                         let __raw = #parse_fn(__attr_payload)?;
                         let __decoded = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
-                            .map_err(|e| ::nlink::Error::InvalidMessage(
+                            .map_err(|e| ::nlink::Error::invalid_message(
                                 ::std::format!("{e}")
                             ))?;
                         #ident = ::core::option::Option::Some(__decoded);
@@ -727,7 +727,7 @@ impl FieldSpec {
                 __ty if __ty == (#attr) as u16 => {
                     let __raw = #parse_fn(__attr_payload)?;
                     #ident = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
-                        .map_err(|e| ::nlink::Error::InvalidMessage(
+                        .map_err(|e| ::nlink::Error::invalid_message(
                             ::std::format!("{e}")
                         ))?;
                 }
@@ -738,7 +738,7 @@ impl FieldSpec {
                     // for list-valued fields. Push each occurrence.
                     let __raw = #parse_fn(__attr_payload)?;
                     let __decoded = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
-                        .map_err(|e| ::nlink::Error::InvalidMessage(
+                        .map_err(|e| ::nlink::Error::invalid_message(
                             ::std::format!("{e}")
                         ))?;
                     #ident.push(__decoded);

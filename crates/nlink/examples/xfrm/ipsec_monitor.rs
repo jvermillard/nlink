@@ -340,7 +340,7 @@ async fn run_apply() -> nlink::Result<()> {
         println!("\n=== Events captured during the lifecycle ===");
         let events = collector
             .await
-            .map_err(|e| nlink::Error::InvalidMessage(format!("collector task: {e}")))??;
+            .map_err(|e| nlink::Error::invalid_message(format!("collector task: {e}")))??;
         if events.is_empty() {
             println!("  (none captured — the kernel may not have delivered");
             println!("   notifications within the 3s window)");

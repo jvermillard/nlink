@@ -62,12 +62,12 @@ async fn test_spawn_background_process() -> Result<()> {
     let mut child = namespace::spawn(ns.name(), cmd)?;
 
     // Verify it's running
-    let try_wait = child.try_wait().map_err(nlink::Error::Io)?;
+    let try_wait = child.try_wait().map_err(nlink::Error::from)?;
     assert!(try_wait.is_none(), "process should still be running");
 
     // Kill it
-    child.kill().map_err(nlink::Error::Io)?;
-    child.wait().map_err(nlink::Error::Io)?;
+    child.kill().map_err(nlink::Error::from)?;
+    child.wait().map_err(nlink::Error::from)?;
 
     Ok(())
 }
@@ -177,7 +177,7 @@ async fn test_spawn_parent_namespace_unaffected() -> Result<()> {
     let parent_output = Command::new("ip")
         .arg("link")
         .output()
-        .map_err(nlink::Error::Io)?;
+        .map_err(nlink::Error::from)?;
     let parent_stdout = String::from_utf8_lossy(&parent_output.stdout);
     assert!(
         !parent_stdout.contains("nsonly0"),
@@ -430,7 +430,7 @@ async fn spawn_with_etc_as_mounts_then_drops() -> Result<()> {
     cmd.args(["-c", "id -u; cat /etc/hosts"]);
     cmd.stdout(std::process::Stdio::piped());
     let out = namespace::spawn_with_etc_as(ns.name(), cmd, &SpawnUser::new(1, 1))
-        .and_then(|c| c.wait_with_output().map_err(nlink::Error::Io));
+        .and_then(|c| c.wait_with_output().map_err(nlink::Error::from));
     cleanup_etc_netns(ns.name());
     let out = out?;
     let stdout = String::from_utf8_lossy(&out.stdout);

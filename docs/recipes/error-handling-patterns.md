@@ -64,7 +64,7 @@ Predicate list (see [`error.rs`][error-rs] for the full set):
 - `is_no_device` (ENODEV)
 - `is_permission_denied` (EPERM, EACCES)
 - `is_network_unreachable` (ENETUNREACH)
-- `is_timeout` (ETIMEDOUT plus the synthetic `Error::Timeout`)
+- `is_timeout` (ETIMEDOUT plus the synthetic `Error::timeout()`)
 - `is_address_in_use` (EADDRINUSE)
 - `is_no_buffer_space` (ENOBUFS — multicast overflow)
 - `is_try_again` (EAGAIN)
@@ -99,7 +99,7 @@ where
             Err(other) => return Err(other),
         }
     }
-    Err(nlink::Error::Timeout)
+    Err(nlink::Error::timeout())
 }
 ```
 

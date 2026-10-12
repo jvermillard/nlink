@@ -123,7 +123,7 @@ impl AddressCmd {
 
         // Get device index if filtering by name
         let filter_index =
-            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::invalid_message)?;
 
         // Filter addresses
         let addresses: Vec<_> = all_addresses
@@ -188,7 +188,7 @@ impl AddressCmd {
         use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+            nlink::netlink::Error::invalid_message(format!("invalid address: {}", e))
         })?;
 
         // Parse the optional peer address (point-to-point) up front so a bad
@@ -196,7 +196,7 @@ impl AddressCmd {
         let peer_addr = peer
             .map(|p| {
                 p.parse::<IpAddr>().map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid peer address: {}", e))
+                    nlink::netlink::Error::invalid_message(format!("invalid peer address: {}", e))
                 })
             })
             .transpose()?;
@@ -224,9 +224,9 @@ impl AddressCmd {
 
                 if let Some(p) = peer_addr {
                     let IpAddr::V4(p4) = p else {
-                        return Err(nlink::netlink::Error::InvalidMessage(
+                        return Err(nlink::netlink::Error::invalid_message(
                             "peer address family must match the local address (expected IPv4)"
-                                .into(),
+                                ,
                         ));
                     };
                     config = config.peer(p4);
@@ -239,9 +239,9 @@ impl AddressCmd {
 
                 if let Some(p) = peer_addr {
                     let IpAddr::V6(p6) = p else {
-                        return Err(nlink::netlink::Error::InvalidMessage(
+                        return Err(nlink::netlink::Error::invalid_message(
                             "peer address family must match the local address (expected IPv6)"
-                                .into(),
+                                ,
                         ));
                     };
                     config = config.peer(p6);
@@ -256,7 +256,7 @@ impl AddressCmd {
         use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+            nlink::netlink::Error::invalid_message(format!("invalid address: {}", e))
         })?;
 
         conn.del_address(dev, addr, prefix).await
@@ -268,7 +268,7 @@ impl AddressCmd {
 
         // Get device index if filtering by name
         let filter_index =
-            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::invalid_message)?;
 
         // Filter and delete addresses
         for addr in all_addresses {

@@ -86,8 +86,8 @@ impl Connection<Nl80211> {
         }
 
         if !subscribed {
-            return Err(Error::InvalidMessage(
-                "no nl80211 multicast groups available".into(),
+            return Err(Error::invalid_message(
+                "no nl80211 multicast groups available",
             ));
         }
 
@@ -741,8 +741,8 @@ impl Connection<Nl80211> {
                             return Err(err.to_error(header.nlmsg_flags, payload));
                         }
                         return ifindex.ok_or_else(|| {
-                            crate::netlink::Error::InvalidMessage(
-                                "new_interface: the kernel acked without the interface".into(),
+                            crate::netlink::Error::invalid_message(
+                                "new_interface: the kernel acked without the interface",
                             )
                         });
                     }
@@ -777,7 +777,7 @@ impl Connection<Nl80211> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "join_mesh_by_index"))]
     pub async fn join_mesh_by_index(&self, ifindex: u32, mesh_id: &[u8], freq_mhz: u32) -> Result<()> {
         if mesh_id.is_empty() || mesh_id.len() > 32 {
-            return Err(crate::netlink::Error::InvalidMessage(format!(
+            return Err(crate::netlink::Error::invalid_message(format!(
                 "join_mesh: a mesh id is 1 to 32 bytes, not {}",
                 mesh_id.len()
             )));
@@ -965,7 +965,7 @@ impl Connection<Nl80211> {
             .iter()
             .find(|i| i.name.as_deref() == Some(name))
             .map(|i| i.ifindex)
-            .ok_or_else(|| Error::InvalidAttribute(format!("interface not found: {name}")))
+            .ok_or_else(|| Error::invalid_attribute(format!("interface not found: {name}")))
     }
 }
 
@@ -1590,7 +1590,7 @@ fn normalize_alpha2(s: &str) -> Result<String> {
     if t.len() == 2 && t.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Ok(t.to_ascii_uppercase());
     }
-    Err(Error::InvalidMessage(format!(
+    Err(Error::invalid_message(format!(
         "invalid regulatory country code `{s}` (expected a 2-letter code like `US`, or `00` for the world domain)"
     )))
 }

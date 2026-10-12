@@ -519,7 +519,7 @@ mod tests {
         let items = vec![
             Ok(ResyncedEvent::Event((1, true))),
             Ok(ResyncedEvent::Marker(ResyncStart)),
-            Err(crate::Error::InvalidMessage("cut".into())),
+            Err(crate::Error::invalid_message("cut")),
             Ok(ResyncedEvent::Marker(ResyncEnd)),
         ];
         let out: Vec<_> = synth_stream(items)
@@ -626,7 +626,7 @@ mod tests {
     async fn map_event_propagates_errors() {
         let items: Vec<crate::Result<ResyncedEvent<i32>>> = vec![
             Ok(ResyncedEvent::Event(1)),
-            Err(crate::Error::InvalidMessage("synth".into())),
+            Err(crate::Error::invalid_message("synth")),
         ];
         let s = synth_stream(items);
         let mapped: Vec<_> = s.map_event(|i: i32| i + 100).collect().await;

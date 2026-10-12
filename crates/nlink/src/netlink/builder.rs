@@ -57,7 +57,7 @@ impl MessageBuilder {
     pub(crate) fn check_size(&self) -> crate::Result<()> {
         match self.oversized {
             None => Ok(()),
-            Some(len) => Err(crate::Error::InvalidMessage(format!(
+            Some(len) => Err(crate::Error::invalid_message(format!(
                 "netlink: a nested attribute of {len} bytes exceeds the 65535 an nla_len can say"
             ))),
         }

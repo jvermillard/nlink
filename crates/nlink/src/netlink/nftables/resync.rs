@@ -81,7 +81,7 @@ use crate::{Connection, Result};
 /// The dumps are taken between two reads of the ruleset generation and
 /// taken again if it moved — a commit in between would leave a snapshot
 /// of two rulesets. After several tries the error is
-/// [`Error::DumpInterrupted`](crate::Error::DumpInterrupted), which the
+/// [`Error::dump_interrupted()`](crate::Error::dump_interrupted()), which the
 /// resync wrapper retries.
 ///
 /// Used internally by the resync wrapper; exposed here so
@@ -95,7 +95,7 @@ pub async fn nftables_snapshot(conn: &Connection<Nftables>) -> Result<Vec<Nftabl
             return Ok(out);
         }
     }
-    Err(crate::Error::DumpInterrupted)
+    Err(crate::Error::dump_interrupted())
 }
 
 async fn walk_ruleset(conn: &Connection<Nftables>) -> Result<Vec<NftablesEvent>> {
@@ -216,7 +216,7 @@ impl Connection<Nftables> {
     /// While the stream is alive the connection serves requests only in
     /// dispatcher mode ([`Connection::with_dispatcher`]). In the default
     /// mutex mode the stream holds its request lock, and a request fails
-    /// at once with [`Error::EventStreamActive`](crate::Error::EventStreamActive)
+    /// at once with [`Error::event_stream_active()`](crate::Error::event_stream_active())
     /// (#505). The snapshot itself never uses this connection: it runs on
     /// one from the factory.
     ///

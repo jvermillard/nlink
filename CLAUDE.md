@@ -285,7 +285,7 @@ impl FooConfig {
 
 - **Strict**: unknown tokens, missing values, and unparseable
   inner values all return
-  `Error::InvalidMessage(format!("kind: ..."))`. **Silent
+  `Error::invalid_message(format!("kind: ..."))`. **Silent
   skipping is a bug** — the typed parsers exist precisely
   because the old string-args builders swallowed unknown tokens.
 - **Error shape**: every message starts with the kind name
@@ -426,10 +426,10 @@ the underlying sockopt:
 - `conn.set_ext_ack(true)?` — `NETLINK_EXT_ACK` (kernel 4.12+).
   **On by default** — disabling is rarely useful. When on (and
   the kernel cooperates), error responses carry human-readable
-  TLVs that nlink parses and stitches into `Error::Kernel::Display`
+  TLVs that nlink parses and stitches into the error's `Display`
   output. Example: `errno = 22 (EINVAL)` becomes
   `"attribute IFLA_MTU rejected: value 0 out of range (at request
-  offset 24)"`. See `Error::Kernel::ext_ack`.
+  offset 24)"`. See `Error::ext_ack`.
 
 ### Concurrency (0.19 F1 fix + opt-in dispatcher mode, #134)
 
@@ -524,15 +524,19 @@ match conn.del_qdisc("eth0", TcHandle::ROOT).await {
 }
 ```
 
-Specific not-found cases get typed variants
-(`Error::QdiscNotFound { .. }`, etc.) for reconcile patterns.
-Kernel errors carry `KernelWithContext` (operation name + args +
-errno), so messages read like `"add_link(veth0, kind=veth): File
-exists (errno 17)"`. **Operation timeout defaults to 30 seconds**
+`Error` is a struct, one pointer wide (#526): `kind()` classifies it,
+`detail()` says where it came from (`ErrorDetail::Kernel { errno,
+ext_ack, .. }`, `Io`, `QdiscNotFound`, …), and `context()` lists what
+was being done, outermost first. `with_context` / `ResultExt::context`
+keep a context on **every** error, so messages read like
+`"add_link(veth0, kind=veth): File exists (errno 17)"`. Construct with
+the helpers (`Error::invalid_message`, `Error::from_errno`,
+`Error::from(io_err)`, `ErrorDetail::X { .. }.into()`), never by
+naming a variant on `Error`. **Operation timeout defaults to 30 seconds**
 (Plan 171 — closes the "hidden hang" class). Override with
 `Connection::timeout(Duration)`; opt out (rarely useful) with
 `.no_timeout()`. The default surfaces any kernel response
-anomaly as `Error::Timeout` instead of an indefinite block.
+anomaly as a timeout (`e.is_timeout()`) instead of an indefinite block.
 
 ## Recv-loop shape (canonical)
 

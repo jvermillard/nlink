@@ -86,7 +86,7 @@ use crate::util::AddressFamily;
 ///
 /// A multicast `events()` stream on a plain connection holds the
 /// request lock for as long as it lives, so requests wait for it (or
-/// fail with [`Error::EventStreamActive`]
+/// fail with [`Error::event_stream_active()`]
 /// where they cannot wait). For events and requests on one connection at
 /// once, opt into the per-seq response router with
 /// [`with_dispatcher`](Self::with_dispatcher) (#134), or use a second
@@ -210,7 +210,7 @@ impl RecvSession {
     /// *whole* future, which for a multi-message dump is a total
     /// duration budget: a legitimately large dump — conntrack with
     /// millions of entries, a full BGP table — failed with
-    /// `Error::Timeout` while the kernel was streaming perfectly well,
+    /// `Error::timeout()` while the kernel was streaming perfectly well,
     /// and the caller could not tell "the kernel hung" from "this table
     /// is big", which is the distinction the timeout exists to draw. A
     /// per-recv deadline, reset by every frame that arrives, catches a
@@ -222,7 +222,7 @@ impl RecvSession {
         match conn.timeout {
             Some(dur) => tokio::time::timeout(dur, self.recv(conn))
                 .await
-                .map_err(|_| Error::Timeout)?,
+                .map_err(|_| Error::timeout())?,
             None => self.recv(conn).await,
         }
     }
@@ -336,7 +336,7 @@ where
     /// [`Into<NetnsTarget>`](super::namespace::NetnsTarget).
     ///
     /// The socket is made inside the namespace and works from any thread.
-    /// A stream on it ends with [`Error::NamespaceDeleted`] once a
+    /// A stream on it ends with [`ErrorDetail::NamespaceDeleted`](crate::ErrorDetail::NamespaceDeleted) once a
     /// namespace opened by name or path is deleted.
     ///
     /// ```no_run
@@ -613,7 +613,7 @@ impl<P: ProtocolState> Connection<P> {
     /// Override the operation timeout.
     ///
     /// Operations that exceed the configured duration return
-    /// [`Error::Timeout`]. As of 0.17 (Plan 171) the **default is
+    /// [`Error::timeout()`]. As of 0.17 (Plan 171) the **default is
     /// 30 seconds** — long enough for legitimate slow ops, short
     /// enough to fail fast on the "hidden hang" class of bugs
     /// (kernel response anomaly, missing DONE marker, etc.).
@@ -658,14 +658,14 @@ impl<P: ProtocolState> Connection<P> {
     pub fn netns(&self) -> Result<crate::netlink::namespace::Netns> {
         use crate::netlink::namespace::Netns;
         if let Some(fd) = self.socket.origin_netns() {
-            return Netns::from_fd(fd.try_clone().map_err(Error::Io)?);
+            return Netns::from_fd(fd.try_clone().map_err(Error::from)?);
         }
         match self.socket.netns_fd() {
             Ok(fd) => Netns::from_fd(fd),
             Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
                 Netns::current()
             }
-            Err(e) => Err(Error::Io(e)),
+            Err(e) => Err(Error::from(e)),
         }
     }
 
@@ -782,7 +782,7 @@ impl<P: ProtocolState> Connection<P> {
     /// Silently a no-op on pre-4.12 kernels (returns `Ok(())` on
     /// `ENOPROTOOPT`).
     ///
-    /// See [`Error::Kernel::ext_ack`] for what these TLVs contain
+    /// See [`ErrorDetail::Kernel::ext_ack`](crate::ErrorDetail::Kernel::ext_ack) for what these TLVs contain
     /// once parsed.
     ///
     /// # Example
@@ -818,7 +818,7 @@ impl<P: ProtocolState> Connection<P> {
                 let here = Connection::<Route>::new()?;
                 match (self.socket.netns_cookie(), here.socket.netns_cookie()) {
                     (Ok(ours), Ok(theirs)) if ours == theirs => Ok(here),
-                    _ => Err(Error::Io(refused)),
+                    _ => Err(Error::from(refused)),
                 }
             }
         }
@@ -829,7 +829,7 @@ impl<P: ProtocolState> Connection<P> {
     /// B: the owned guard outlives the `&Connection` borrow, so a stream
     /// can store it).
     ///
-    /// Fails fast with [`Error::EventStreamActive`] while an event stream
+    /// Fails fast with [`Error::event_stream_active()`] while an event stream
     /// holds the lock (#505): it keeps it until it is dropped, so waiting
     /// could only end in the operation timeout, which reads as a kernel
     /// hang. A request already queued when a stream takes the lock is
@@ -843,18 +843,18 @@ impl<P: ProtocolState> Connection<P> {
             .active
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            return Err(Error::EventStreamActive);
+            return Err(Error::event_stream_active());
         }
         tokio::select! {
             biased;
             guard = self.request_lock.clone().lock_owned() => Ok(guard),
-            () = claimed => Err(Error::EventStreamActive),
+            () = claimed => Err(Error::event_stream_active()),
         }
     }
 
     /// Take the request lock for a mutex-mode event stream's lifetime.
     /// Until the returned guard drops, requests on this connection fail
-    /// with [`Error::EventStreamActive`] instead of queueing behind it
+    /// with [`Error::event_stream_active()`] instead of queueing behind it
     /// (#505). Requests already in flight finish first: the lock is fair.
     pub(crate) async fn claim_for_events(&self) -> EventLock {
         let guard = self.request_lock.clone().lock_owned().await;
@@ -951,7 +951,7 @@ impl<P: ProtocolState> Connection<P> {
     /// Wrap a future with the configured timeout.
     ///
     /// If no timeout is set, the future runs without time limit.
-    /// On timeout, returns [`Error::Timeout`].
+    /// On timeout, returns [`Error::timeout()`].
     pub(crate) async fn with_timeout<F, T>(&self, fut: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>>,
@@ -959,7 +959,7 @@ impl<P: ProtocolState> Connection<P> {
         match self.timeout {
             Some(dur) => tokio::time::timeout(dur, fut)
                 .await
-                .map_err(|_| Error::Timeout)?,
+                .map_err(|_| Error::timeout())?,
             None => fut.await,
         }
     }
@@ -1037,7 +1037,7 @@ impl<P: ProtocolState> Connection<P> {
     /// the dump as a whole. Wrapping the whole future made it a total
     /// duration budget, so a legitimately large dump — conntrack with
     /// millions of entries, a full BGP table, a big nftables ruleset —
-    /// failed with `Error::Timeout` while the kernel was streaming
+    /// failed with `Error::timeout()` while the kernel was streaming
     /// perfectly well, and the caller could not tell "the kernel hung"
     /// from "this table is big". Resetting the deadline on every frame
     /// still catches a genuine stall promptly, which is the failure the
@@ -1121,7 +1121,7 @@ impl<P: ProtocolState> Connection<P> {
         // otherwise be mistaken for the response. The 30s default
         // operation timeout (`with_timeout` in `send_request`)
         // bounds the loop so a never-ack'd request still surfaces
-        // as `Error::Timeout` instead of hanging.
+        // as `Error::timeout()` instead of hanging.
         loop {
             let response = self.socket.recv_unicast().await?;
             let mut found_seq = false;
@@ -1210,7 +1210,7 @@ impl<P: ProtocolState> Connection<P> {
                 // the next recv, blocking until the 30s timeout. Now
                 // we surface explicitly so the caller can react
                 // (Plan 212 M16).
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "send_ack: expected ACK or error for seq {}, got nlmsg_type {} \
                      (kernel returned data on an ack-only request)",
                     seq, header.nlmsg_type
@@ -1295,7 +1295,7 @@ impl<P: ProtocolState> Connection<P> {
                     // in `send_dump` does not find its frames (#494).
                     if interrupted {
                         if ends_dump(header, seq) {
-                            return Err(Error::DumpInterrupted);
+                            return Err(Error::dump_interrupted());
                         }
                         msg_start = msg_start.saturating_add(aligned);
                         continue;
@@ -1306,9 +1306,9 @@ impl<P: ProtocolState> Connection<P> {
                             continue;
                         }
                         Classification::Ack => {}
-                        Classification::Error(Error::DumpInterrupted) => {
+                        Classification::Error(e) if e.is_dump_interrupted() => {
                             if ends_dump(header, seq) {
-                                return Err(Error::DumpInterrupted);
+                                return Err(Error::dump_interrupted());
                             }
                             interrupted = true;
                         }
@@ -1418,7 +1418,7 @@ impl<P: ProtocolState> Connection<P> {
                     }
                     return Ok(());
                 }
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "send_ack: expected ACK or error for seq {}, got nlmsg_type {} \
                      (kernel returned data on an ack-only request)",
                     seq, header.nlmsg_type
@@ -1457,7 +1457,7 @@ impl<P: ProtocolState> Connection<P> {
             let next = match self.timeout {
                 Some(dur) => tokio::time::timeout(dur, guard.rx.recv())
                     .await
-                    .map_err(|_| Error::Timeout)?,
+                    .map_err(|_| Error::timeout())?,
                 None => guard.rx.recv().await,
             };
             let Some(buf) = next else {
@@ -1474,7 +1474,7 @@ impl<P: ProtocolState> Connection<P> {
                 // As in the mutex path: read an interrupted dump to its end.
                 if interrupted {
                     if ends_dump(header, seq) {
-                        return Err(Error::DumpInterrupted);
+                        return Err(Error::dump_interrupted());
                     }
                     msg_start = msg_start.saturating_add(aligned);
                     continue;
@@ -1485,9 +1485,9 @@ impl<P: ProtocolState> Connection<P> {
                         continue;
                     }
                     Classification::Ack => {}
-                    Classification::Error(Error::DumpInterrupted) => {
+                    Classification::Error(e) if e.is_dump_interrupted() => {
                         if ends_dump(header, seq) {
-                            return Err(Error::DumpInterrupted);
+                            return Err(Error::dump_interrupted());
                         }
                         interrupted = true;
                     }
@@ -1747,10 +1747,10 @@ impl Connection<Route> {
     /// Parse a single response into a typed message.
     pub fn parse_response<T: FromNetlink>(&self, response: &[u8]) -> Result<T> {
         if response.len() < NLMSG_HDRLEN {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: NLMSG_HDRLEN,
                 actual: response.len(),
-            });
+            }));
         }
         let payload = &response[NLMSG_HDRLEN..];
         let mut msg = T::from_bytes(payload)?;
@@ -1764,7 +1764,7 @@ impl Connection<Route> {
 /// Helper to build a dump request.
 /// How many times [`Connection::send_dump`] sends a dump the kernel keeps
 /// marking `NLM_F_DUMP_INTR` before it gives up with
-/// [`Error::DumpInterrupted`] (#494). Cilium allows about 30; a dump torn
+/// [`Error::dump_interrupted()`] (#494). Cilium allows about 30; a dump torn
 /// that often is a namespace that will not hold still.
 const DUMP_INTR_ATTEMPTS: usize = 10;
 
@@ -2065,14 +2065,14 @@ impl Connection<Route> {
             let link =
                 self.get_link_by_index(ifindex)
                     .await?
-                    .ok_or_else(|| Error::InterfaceNotFound {
+                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                         name: label.clone(),
-                    })?;
+                    }))?;
             if cond.holds(&link) {
                 return Ok(link);
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::Timeout);
+                return Err(Error::timeout());
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_millis(100));
@@ -2084,7 +2084,7 @@ impl Connection<Route> {
     /// when `None` (#524).
     ///
     /// An address that DAD found in use elsewhere ends in
-    /// [`Error::DadFailed`], naming every such address: it will never
+    /// [`ErrorDetail::DadFailed`](crate::ErrorDetail::DadFailed), naming every such address: it will never
     /// become usable. Until DAD is done, an address is tentative, and
     /// binding or sending from it fails (`EADDRNOTAVAIL`), which is why
     /// a test that pings over IPv6 straight after configuring it fails.
@@ -2127,13 +2127,13 @@ impl Connection<Route> {
                 .filter_map(|a| a.address)
                 .collect();
             if !failed.is_empty() {
-                return Err(Error::DadFailed { addresses: failed });
+                return Err(Error::from(crate::netlink::ErrorDetail::DadFailed { addresses: failed }));
             }
             if !addresses.iter().any(|a| a.is_tentative()) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::Timeout);
+                return Err(Error::timeout());
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_millis(100));
@@ -2180,11 +2180,11 @@ impl Connection<Route> {
         let link = self
             .get_link_by_name(iface)
             .await?
-            .ok_or_else(|| Error::InterfaceNotFound {
+            .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                 name: label.clone(),
-            })?;
+            }))?;
         link.stats().copied().ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "interface {label} response did not include link-stats attribute"
             ))
         })
@@ -2200,7 +2200,7 @@ impl Connection<Route> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InterfaceNotFound`] if the interface name doesn't exist.
+    /// Returns [`ErrorDetail::InterfaceNotFound`](crate::ErrorDetail::InterfaceNotFound) if the interface name doesn't exist.
     ///
     /// # Example
     ///
@@ -2349,9 +2349,9 @@ impl Connection<Route> {
         let link = self
             .get_link_by_index(ifindex)
             .await?
-            .ok_or_else(|| Error::InvalidMessage("interface not found".into()))?;
+            .ok_or_else(|| Error::invalid_message("interface not found"))?;
         link.bond_info()
-            .ok_or_else(|| Error::InvalidMessage("not a bond interface".into()))
+            .ok_or_else(|| Error::invalid_message("not a bond interface"))
     }
 
     /// List all slaves of a bond interface with their status.
@@ -3066,7 +3066,7 @@ impl Connection<Route> {
     /// scanning every filter on the interface.
     ///
     /// `parent` accepts the standard `tc` handle syntax: `"1:"`, `"1:5"`,
-    /// `"root"`, `"ingress"`, `"clsact"`. Returns `Error::InvalidMessage`
+    /// `"root"`, `"ingress"`, `"clsact"`. Returns `Error::invalid_message`
     /// for unparseable handles.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters_by_parent"))]
     pub async fn get_filters_by_parent(
@@ -3504,9 +3504,9 @@ impl Connection<Route> {
         let state = if up { "up" } else { "down" };
         self.send_ack(builder).await.map_err(|e| {
             if e.is_not_found() {
-                Error::InterfaceNotFound {
+                Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                     name: format!("ifindex {ifindex}"),
-                }
+                })
             } else {
                 e.with_context(format!("set_link_{state}(ifindex {ifindex})"))
             }
@@ -3617,9 +3617,9 @@ impl Connection<Route> {
 
         self.send_ack(builder).await.map_err(|e| {
             if e.is_not_found() {
-                Error::InterfaceNotFound {
+                Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                     name: format!("ifindex {ifindex}"),
-                }
+                })
             } else {
                 e.with_context(format!("del_link(ifindex {ifindex})"))
             }
@@ -3888,8 +3888,8 @@ impl Connection<Route> {
             }
         }
 
-        Err(Error::InvalidMessage(
-            "namespace ID not found in response".into(),
+        Err(Error::invalid_message(
+            "namespace ID not found in response",
         ))
     }
 
@@ -3934,8 +3934,8 @@ impl Connection<Route> {
             }
         }
 
-        Err(Error::InvalidMessage(
-            "namespace ID not found in response".into(),
+        Err(Error::invalid_message(
+            "namespace ID not found in response",
         ))
     }
 
@@ -4064,9 +4064,9 @@ impl Connection<Generic> {
         // `FamilyNotFound`.
         let (seq, datagrams) = self.genl_request(builder).await.map_err(|e| {
             if e.errno() == Some(libc::ENOENT) {
-                Error::FamilyNotFound {
+                Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
                     name: name.to_string(),
-                }
+                })
             } else {
                 e
             }
@@ -4078,14 +4078,14 @@ impl Connection<Generic> {
                     continue;
                 }
                 if payload.len() < GENL_HDRLEN {
-                    return Err(Error::InvalidMessage("GENL header too short".into()));
+                    return Err(Error::invalid_message("GENL header too short"));
                 }
                 return self.parse_family_attrs(&payload[GENL_HDRLEN..]);
             }
         }
-        Err(Error::FamilyNotFound {
+        Err(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
             name: name.to_string(),
-        })
+        }))
     }
 
     /// Send a GENL request with `NLM_F_ACK` and read every datagram that
@@ -4168,7 +4168,7 @@ impl Connection<Generic> {
             }
         }
 
-        let id = id.ok_or_else(|| Error::InvalidMessage("missing family ID".into()))?;
+        let id = id.ok_or_else(|| Error::invalid_message("missing family ID"))?;
 
         Ok(FamilyInfo {
             id,
@@ -4593,7 +4593,7 @@ mod send_sync_tests {
             .get_family("no-such-family")
             .await
             .expect_err("unknown");
-        assert!(matches!(err, Error::FamilyNotFound { .. }), "{err}");
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::FamilyNotFound { .. }), "{err}");
     }
 
     /// #496: `query_family` read the socket directly, so in dispatcher

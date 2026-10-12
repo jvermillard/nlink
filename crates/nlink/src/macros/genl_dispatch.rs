@@ -101,7 +101,7 @@ where
     /// `#[genl_family]`'s `resolve_async` impl, parsing
     /// `CTRL_ATTR_MCAST_GROUPS` out of `CTRL_CMD_GETFAMILY`).
     /// Returns
-    /// [`Error::FamilyNotFound`] when the named group isn't
+    /// [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound) when the named group isn't
     /// registered on this kernel —
     /// e.g., asking for `"monitor"` on a kernel too old to ship
     /// that group, or a binary/kernel mismatch.
@@ -133,9 +133,9 @@ where
         let id = self
             .state()
             .mcast_group(name)
-            .ok_or_else(|| crate::Error::FamilyNotFound {
+            .ok_or_else(|| crate::Error::from(crate::ErrorDetail::FamilyNotFound {
                 name: ::std::format!("{}::{}", F::NAME, name),
-            })?;
+            }))?;
         self.socket().add_membership(id)?;
         Ok(())
     }
@@ -231,8 +231,8 @@ where
         }
 
         if payload.len() < GENL_HDRLEN {
-            return Err(Error::InvalidMessage(
-                "GENL response payload too short for header".into(),
+            return Err(Error::invalid_message(
+                "GENL response payload too short for header",
             ));
         }
         let attrs = &payload[GENL_HDRLEN..];
@@ -307,7 +307,7 @@ where
             // A torn snapshot — this drainer had no check at all
             // (#271).
             if header.is_dump_interrupted() {
-                self.pending.push_back(Err(Error::DumpInterrupted));
+                self.pending.push_back(Err(Error::dump_interrupted()));
                 self.errored = true;
                 return;
             }
@@ -343,8 +343,8 @@ where
             }
 
             if payload.len() < GENL_HDRLEN {
-                self.pending.push_back(Err(Error::InvalidMessage(
-                    "GENL dump frame too short for header".into(),
+                self.pending.push_back(Err(Error::invalid_message(
+                    "GENL dump frame too short for header",
                 )));
                 continue;
             }

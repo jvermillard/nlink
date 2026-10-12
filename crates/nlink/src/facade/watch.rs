@@ -290,7 +290,7 @@ impl Stream for NsStreams {
         if this.route.is_none() && this.nftables.is_none() {
             this.gone = true;
             let why = this.last_error.take().unwrap_or_else(|| "no family left".into());
-            return Poll::Ready(Some(NsEvent::Gone(crate::Error::InvalidMessage(format!(
+            return Poll::Ready(Some(NsEvent::Gone(crate::Error::invalid_message(format!(
                 "the namespace's watch gave up: {why}"
             )))));
         }

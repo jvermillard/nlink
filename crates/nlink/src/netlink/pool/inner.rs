@@ -65,7 +65,7 @@ impl<P: ProtocolState> ConnectionPool<P> {
     ///
     /// - `Err(Error::PoolExhausted)` if no connection is returned to
     ///   the pool within the timeout.
-    /// - `Err(Error::PoolClosed)` if the last `ConnectionPool`
+    /// - `Err(Error::pool_closed())` if the last `ConnectionPool`
     ///   handle has been dropped while this acquire was waiting.
     ///
     /// The returned [`PooledConnection`] derefs to `&Connection<P>`,
@@ -79,11 +79,11 @@ impl<P: ProtocolState> ConnectionPool<P> {
         };
         match tokio::time::timeout(self.inner.acquire_timeout, recv_fut).await {
             Ok(Some(conn)) => Ok(PooledConnection::new(self, conn)),
-            Ok(None) => Err(Error::PoolClosed),
-            Err(_) => Err(Error::PoolExhausted {
+            Ok(None) => Err(Error::pool_closed()),
+            Err(_) => Err(Error::from(crate::netlink::ErrorDetail::PoolExhausted {
                 size: self.inner.size,
                 timeout: self.inner.acquire_timeout,
-            }),
+            })),
         }
     }
 
@@ -219,7 +219,7 @@ impl<P: ProtocolState> ConnectionPoolBuilder<P> {
     }
 
     /// Maximum time `acquire()` will wait for a connection to become
-    /// available before returning [`Error::PoolExhausted`].
+    /// available before returning [`ErrorDetail::PoolExhausted`](crate::ErrorDetail::PoolExhausted).
     pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
         self.acquire_timeout = timeout;
         self
@@ -259,7 +259,7 @@ where
         let namespace = netns.as_ref().map(|ns| ns.label().to_string());
         for _ in 0..self.size {
             let conn = make_sync::<P>(netns.as_deref())?;
-            tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
+            tx.send(conn).await.map_err(|_| Error::pool_closed())?;
         }
         let factory: Arc<dyn Factory<P>> = Arc::new(SyncFactory {
             netns,
@@ -325,7 +325,7 @@ where
         let namespace = netns.as_ref().map(|ns| ns.label().to_string());
         for _ in 0..self.size {
             let conn = make_async::<P>(netns.clone()).await?;
-            tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
+            tx.send(conn).await.map_err(|_| Error::pool_closed())?;
         }
         let factory: Arc<dyn Factory<P>> = Arc::new(AsyncFactory {
             netns,

@@ -248,28 +248,28 @@ pub mod __rt {
 
     pub fn parse_u8_attr(payload: &[u8]) -> Result<u8> {
         if payload.is_empty() {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 1,
                 actual: 0,
-            });
+            }));
         }
         Ok(payload[0])
     }
     pub fn parse_u16_attr(payload: &[u8]) -> Result<u16> {
         if payload.len() < 2 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 2,
                 actual: payload.len(),
-            });
+            }));
         }
         Ok(u16::from_ne_bytes([payload[0], payload[1]]))
     }
     pub fn parse_u32_attr(payload: &[u8]) -> Result<u32> {
         if payload.len() < 4 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 4,
                 actual: payload.len(),
-            });
+            }));
         }
         Ok(u32::from_ne_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -277,10 +277,10 @@ pub mod __rt {
     }
     pub fn parse_u64_attr(payload: &[u8]) -> Result<u64> {
         if payload.len() < 8 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 8,
                 actual: payload.len(),
-            });
+            }));
         }
         let mut a = [0u8; 8];
         a.copy_from_slice(&payload[..8]);
@@ -291,10 +291,10 @@ pub mod __rt {
     /// per its `nla_get_s32` helper).
     pub fn parse_i32_attr(payload: &[u8]) -> Result<i32> {
         if payload.len() < 4 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 4,
                 actual: payload.len(),
-            });
+            }));
         }
         Ok(i32::from_ne_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -311,10 +311,10 @@ pub mod __rt {
     /// attoseconds × 1000 (essentially always for real PTP/SyncE).
     pub fn parse_i64_attr(payload: &[u8]) -> Result<i64> {
         if payload.len() < 8 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 8,
                 actual: payload.len(),
-            });
+            }));
         }
         let mut a = [0u8; 8];
         a.copy_from_slice(&payload[..8]);
@@ -348,7 +348,7 @@ pub mod __rt {
                 a.copy_from_slice(&payload[..8]);
                 Ok(i64::from_ne_bytes(a))
             }
-            actual => Err(Error::Truncated { expected: 4, actual }),
+            actual => Err(Error::from(crate::netlink::ErrorDetail::Truncated { expected: 4, actual })),
         }
     }
 
@@ -371,7 +371,7 @@ pub mod __rt {
     pub fn parse_sint_attr_as_i32(payload: &[u8]) -> Result<i32> {
         let widened = parse_sint_attr_as_i64(payload)?;
         i32::try_from(widened).map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "sint attribute value {widened} does not fit in i32 (kernel emitted 8-byte sint; \
                  field needs i64 widening — see Plan 226 / Plan 226 follow-on 0.21)"
             ))
@@ -405,19 +405,19 @@ pub mod __rt {
     // Big-endian parse variants.
     pub fn parse_u16_be_attr(payload: &[u8]) -> Result<u16> {
         if payload.len() < 2 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 2,
                 actual: payload.len(),
-            });
+            }));
         }
         Ok(u16::from_be_bytes([payload[0], payload[1]]))
     }
     pub fn parse_u32_be_attr(payload: &[u8]) -> Result<u32> {
         if payload.len() < 4 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 4,
                 actual: payload.len(),
-            });
+            }));
         }
         Ok(u32::from_be_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -425,10 +425,10 @@ pub mod __rt {
     }
     pub fn parse_u64_be_attr(payload: &[u8]) -> Result<u64> {
         if payload.len() < 8 {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 8,
                 actual: payload.len(),
-            });
+            }));
         }
         let mut a = [0u8; 8];
         a.copy_from_slice(&payload[..8]);
@@ -530,13 +530,13 @@ pub mod __rt {
         };
         tokio::time::timeout(crate::netlink::connection::DEFAULT_OPERATION_TIMEOUT, read)
             .await
-            .map_err(|_| Error::Timeout)??;
+            .map_err(|_| Error::timeout())??;
 
         match family_id {
             Some(id) => Ok((id, mcast_groups)),
-            None => Err(Error::FamilyNotFound {
+            None => Err(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
                 name: name.to_string(),
-            }),
+            })),
         }
     }
 
@@ -562,9 +562,9 @@ pub mod __rt {
                 err.warn_if_ack_warns(header.nlmsg_flags, payload);
                 if !err.is_ack() {
                     if err.error == -libc::ENOENT {
-                        return Err(Error::FamilyNotFound {
+                        return Err(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
                             name: name.to_string(),
-                        });
+                        }));
                     }
                     return Err(err.to_error(header.nlmsg_flags, payload));
                 }
@@ -576,8 +576,8 @@ pub mod __rt {
             }
 
             if payload.len() < GENL_HDRLEN {
-                return Err(Error::InvalidMessage(
-                    "GENL header too short in CTRL_CMD_GETFAMILY response".into(),
+                return Err(Error::invalid_message(
+                    "GENL header too short in CTRL_CMD_GETFAMILY response",
                 ));
             }
 
@@ -625,7 +625,6 @@ pub mod __rt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Error;
 
     /// Hand-rolled GenlMessage impl exercising the trait shape +
     /// the runtime helpers. Stand-in for what the derive will
@@ -682,15 +681,15 @@ mod tests {
     fn parse_helpers_reject_truncated_payloads() {
         let short_u32: &[u8] = &[0, 1, 2];
         let err = __rt::parse_u32_attr(short_u32).unwrap_err();
-        assert!(matches!(err, Error::Truncated { expected: 4, actual: 3 }));
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::Truncated { expected: 4, actual: 3 }));
 
         let short_u64: &[u8] = &[0, 0, 0, 0];
         let err = __rt::parse_u64_attr(short_u64).unwrap_err();
-        assert!(matches!(err, Error::Truncated { expected: 8, actual: 4 }));
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::Truncated { expected: 8, actual: 4 }));
 
         let empty: &[u8] = &[];
         let err = __rt::parse_u8_attr(empty).unwrap_err();
-        assert!(matches!(err, Error::Truncated { expected: 1, actual: 0 }));
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::Truncated { expected: 1, actual: 0 }));
     }
 
     #[test]
@@ -766,7 +765,7 @@ mod tests {
         let overflow = (i32::MAX as i64 + 1).to_ne_bytes();
         let err = __rt::parse_sint_attr_as_i32(&overflow).unwrap_err();
         assert!(
-            matches!(err, Error::InvalidMessage(_)),
+            matches!(err.detail(), crate::netlink::ErrorDetail::InvalidMessage(_)),
             "expected InvalidMessage for i32-overflow sint payload"
         );
     }
@@ -1201,7 +1200,7 @@ mod tests {
     fn derived_genl_enum_unknown_value_surfaces_as_error() {
         // Synthesize a frame with a value (=99) outside any
         // TestMode variant. Parse should fail with
-        // Error::InvalidMessage carrying the UnknownValue text.
+        // Error::invalid_message carrying the UnknownValue text.
         let mut builder = MessageBuilder::new(0, 0);
         let body_start = builder.len();
         __rt::emit_u32_attr(&mut builder, 2, 99); // attr=2, value=99 (not a variant)
@@ -1407,7 +1406,7 @@ mod tests {
         let err = __rt::resolve_genl_family(&socket, "no-such-family")
             .await
             .expect_err("unknown family");
-        assert!(matches!(err, Error::FamilyNotFound { .. }), "{err}");
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::FamilyNotFound { .. }), "{err}");
         assert_eq!(socket.try_recv_msg().expect("recv"), None);
     }
 }

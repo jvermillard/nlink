@@ -109,12 +109,12 @@ impl FromStr for MdbGroup {
             let mut mac = [0u8; 6];
             for (i, p) in parts.iter().enumerate() {
                 mac[i] = u8::from_str_radix(p, 16).map_err(|_| {
-                    Error::InvalidMessage(format!("mdb group: invalid MAC octet `{p}`"))
+                    Error::invalid_message(format!("mdb group: invalid MAC octet `{p}`"))
                 })?;
             }
             return Ok(MdbGroup::Mac(mac));
         }
-        Err(Error::InvalidMessage(format!(
+        Err(Error::invalid_message(format!(
             "mdb group: `{s}` is neither an IP multicast address nor a MAC"
         )))
     }

@@ -93,7 +93,7 @@ pub use types::{
 /// Constructed via [`Connection::<NetShaper>::new_async()`][Connection]
 /// — the family ID is resolved against the kernel at connection
 /// time. Returns
-/// [`Error::FamilyNotFound`](crate::Error::FamilyNotFound) on
+/// [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound) on
 /// kernels without `CONFIG_NET_SHAPER` (the family is built-in
 /// when the option is set; there's no separate module to load).
 ///

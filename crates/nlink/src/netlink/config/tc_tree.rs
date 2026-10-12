@@ -880,7 +880,7 @@ async fn apply_tree(
             .iter()
             .partition(|c| !to_add.iter().any(|p| p.id == c.parent));
         if ready.is_empty() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "tc {}: classes {:?} are each other's parents",
                 diff.dev,
                 waiting.iter().map(|c| c.id).collect::<Vec<_>>()

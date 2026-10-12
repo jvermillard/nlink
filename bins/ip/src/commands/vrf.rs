@@ -143,7 +143,7 @@ impl VrfCmd {
         use std::{os::unix::process::CommandExt, process::Command};
 
         if command.is_empty() {
-            return Err(nlink::netlink::Error::InvalidMessage(
+            return Err(nlink::netlink::Error::invalid_message(
                 "no command specified".to_string(),
             ));
         }
@@ -163,7 +163,7 @@ impl VrfCmd {
             .env("VRF", name)
             .exec();
 
-        Err(nlink::netlink::Error::InvalidMessage(format!(
+        Err(nlink::netlink::Error::invalid_message(format!(
             "failed to execute: {}",
             err
         )))
@@ -192,7 +192,7 @@ impl VrfCmd {
                 println!();
                 Ok(())
             }
-            Err(e) => Err(nlink::netlink::Error::InvalidMessage(format!(
+            Err(e) => Err(nlink::netlink::Error::invalid_message(format!(
                 "cannot read cgroup for process {}: {}",
                 pid, e
             ))),

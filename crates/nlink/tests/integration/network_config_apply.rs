@@ -867,7 +867,7 @@ async fn a_precomputed_diff_verifies_against_its_own_config() -> Result<()> {
             .apply(&conn, ExecOptions::new().with_verify(true))
             .await
             .expect_err("the MTU changed under the diff");
-        let nlink::Error::NotConverged { remaining } = &err else {
+        let nlink::ErrorDetail::NotConverged { remaining } = err.detail() else {
             panic!("not NotConverged: {err}");
         };
         assert!(remaining.to_string().contains("d0"), "{remaining}");

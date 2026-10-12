@@ -930,11 +930,11 @@ async fn create(
 
 fn parse_mac(addr: &str) -> Result<[u8; 6]> {
     nlink::util::addr::parse_mac(addr)
-        .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e)))
+        .map_err(|e| nlink::netlink::Error::invalid_message(format!("invalid MAC address: {}", e)))
 }
 
 fn invalid(msg: String) -> nlink::netlink::Error {
-    nlink::netlink::Error::InvalidMessage(msg)
+    nlink::netlink::Error::invalid_message(msg)
 }
 
 /// An IPv4 address option of an IPv4-only kind: an IPv6 address names the

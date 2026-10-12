@@ -60,9 +60,9 @@ fn sysctl_path(key: &str) -> Result<PathBuf> {
 
 /// Validate a sysctl key to prevent path traversal.
 fn validate_key(key: &str) -> Result<()> {
-    let invalid = || Error::InvalidMessage(format!("invalid sysctl key: {key}"));
+    let invalid = || Error::invalid_message(format!("invalid sysctl key: {key}"));
     if key.is_empty() {
-        return Err(Error::InvalidMessage("sysctl key cannot be empty".into()));
+        return Err(Error::invalid_message("sysctl key cannot be empty"));
     }
     if key.starts_with('/') || key.contains('\0') {
         return Err(invalid());
@@ -107,7 +107,7 @@ pub fn ipv6_conf_key(dev: &str, setting: &str) -> String {
 /// Reads from `/proc/sys/` in the current namespace. For namespace-aware
 /// operations, use [`super::namespace::get_sysctl`].
 ///
-/// A missing key is an [`Error::Sysctl`] for which `is_not_found()` holds;
+/// A missing key is an [`ErrorDetail::Sysctl`](crate::ErrorDetail::Sysctl) for which `is_not_found()` holds;
 /// every error names the key.
 ///
 /// # Example
@@ -123,10 +123,10 @@ pub fn ipv6_conf_key(dev: &str, setting: &str) -> String {
 /// ```
 pub fn get(key: &str) -> Result<String> {
     let path = sysctl_path(key)?;
-    let contents = std::fs::read_to_string(&path).map_err(|source| Error::Sysctl {
+    let contents = std::fs::read_to_string(&path).map_err(|source| Error::from(crate::netlink::ErrorDetail::Sysctl {
         key: key.to_string(),
         source,
-    })?;
+    }))?;
     Ok(contents.trim_end().to_string())
 }
 
@@ -148,10 +148,10 @@ pub fn get(key: &str) -> Result<String> {
 /// ```
 pub fn set(key: &str, value: &str) -> Result<()> {
     let path = sysctl_path(key)?;
-    std::fs::write(&path, value).map_err(|source| Error::Sysctl {
+    std::fs::write(&path, value).map_err(|source| Error::from(crate::netlink::ErrorDetail::Sysctl {
         key: key.to_string(),
         source,
-    })?;
+    }))?;
     Ok(())
 }
 

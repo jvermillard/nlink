@@ -276,12 +276,12 @@ pub struct WireguardWatcher {
 
 impl WireguardWatcher {
     /// Construct a new watcher. Returns
-    /// `Error::InvalidMessage` if `opts.interfaces` is
+    /// `Error::invalid_message` if `opts.interfaces` is
     /// empty (the caller must specify at least one
     /// interface to watch).
     pub fn new(conn: Connection<Wireguard>, opts: WireguardWatchOptions) -> Result<Self> {
         if opts.interfaces.is_empty() {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "WireguardWatchOptions::interfaces is empty — \
                  specify at least one interface to watch"
                     .to_string(),

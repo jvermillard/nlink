@@ -93,7 +93,7 @@ impl<P: ProtocolState + 'static> Connection<P> {
                 let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = ready.send(Err(Error::Io(e)));
+                        let _ = ready.send(Err(Error::from(e)));
                         return;
                     }
                 };
@@ -114,14 +114,14 @@ impl<P: ProtocolState + 'static> Connection<P> {
                     job(&conn, &rt);
                 }
             })
-            .map_err(Error::Io)?;
+            .map_err(Error::from)?;
         match started.recv() {
             Ok(Ok(())) => Ok(Self {
                 jobs: Some(jobs),
                 worker: Some(worker),
             }),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(Error::InvalidMessage("the blocking connection's worker died starting".into())),
+            Err(_) => Err(Error::invalid_message("the blocking connection's worker died starting")),
         }
     }
 

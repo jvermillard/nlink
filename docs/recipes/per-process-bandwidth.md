@@ -70,7 +70,7 @@ async fn main() -> nlink::Result<()> {
     // Pure-state predicates hoist into the request header; ports and
     // addresses compile to INET_DIAG_REQ_BYTECODE (#163).
     let expr = FilterExpr::parse("state established")
-        .map_err(nlink::Error::InvalidMessage)?;
+        .map_err(nlink::Error::invalid_message)?;
 
     loop {
         let snapshot = conn

@@ -19,6 +19,6 @@ pub(crate) fn to_json_string<T: serde::Serialize>(
         serde_json::to_string(value)
     };
     result.map_err(|e| {
-        nlink::netlink::Error::InvalidMessage(format!("JSON serialization failed: {e}"))
+        nlink::netlink::Error::invalid_message(format!("JSON serialization failed: {e}"))
     })
 }

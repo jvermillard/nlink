@@ -212,7 +212,7 @@ pub enum MacsecError { ... }
 // Implement From for the main error type
 impl From<MacsecError> for crate::netlink::Error {
     fn from(e: MacsecError) -> Self {
-        Error::InvalidMessage(e.to_string())
+        Error::invalid_message(e.to_string())
     }
 }
 ```

@@ -324,14 +324,14 @@ mod apply_reconcile_tests {
         // Plan 187 §2.5 fix: Error::errno() unwraps Io via
         // raw_os_error(). is_busy(Io(EBUSY)) must be true,
         // so apply_reconcile would retry instead of bubbling.
-        let io_ebusy = Error::Io(std::io::Error::from_raw_os_error(libc::EBUSY));
+        let io_ebusy = Error::from(std::io::Error::from_raw_os_error(libc::EBUSY));
         assert!(io_ebusy.is_busy(), "Io(EBUSY) must trigger apply_reconcile retry");
         assert!(!io_ebusy.is_no_buffer_space(), "wrong predicate must NOT match");
     }
 
     #[test]
     fn classify_io_eagain_as_retryable() {
-        let io_eagain = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        let io_eagain = Error::from(std::io::Error::from_raw_os_error(libc::EAGAIN));
         assert!(io_eagain.is_try_again(), "Io(EAGAIN) must trigger apply_reconcile retry");
     }
 

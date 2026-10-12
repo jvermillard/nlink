@@ -252,10 +252,10 @@ impl QdiscConfig for QdiscSpec {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         match self.config() {
             Some(cfg) => cfg.write_options(builder),
-            None => Err(Error::InvalidMessage(
+            None => Err(Error::invalid_message(
                 "the kernel's default qdisc is not installed: delete the root qdisc, and the \
                  kernel puts it back"
-                    .into(),
+                    ,
             )),
         }
     }

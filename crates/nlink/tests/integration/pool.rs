@@ -66,7 +66,7 @@ async fn pool_acquire_times_out_when_exhausted() -> nlink::Result<()> {
     let _held = pool.acquire().await?;
     match pool.acquire().await {
         Ok(_) => panic!("second acquire must NOT succeed while the pool is held"),
-        Err(nlink::Error::PoolExhausted { .. }) => Ok(()),
+        Err(e) if e.is_pool_exhausted() => Ok(()),
         Err(other) => panic!("expected PoolExhausted; got {other:?}"),
     }
 }

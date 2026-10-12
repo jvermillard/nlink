@@ -320,7 +320,7 @@ impl StackPlan {
     /// - `exec.continue_on_error` applies inside the network layer; a layer
     ///   that fails stops the stack.
     /// - `exec.verify`: plan every layer again afterwards and fail with
-    ///   [`Error::StackNotConverged`] if anything is left.
+    ///   [`ErrorDetail::StackNotConverged`](crate::ErrorDetail::StackNotConverged) if anything is left.
     /// - An nftables commit the ruleset moved under is refused with
     ///   `ERESTART` ([`Error::is_restart`]): plan again, or use
     ///   [`Stack::apply_reconcile_in`].
@@ -367,9 +367,9 @@ impl StackPlan {
         if exec.verify {
             let remaining = stack.plan_in(ns, self.options.clone()).await?;
             if !remaining.is_empty() {
-                return Err(Error::StackNotConverged {
+                return Err(Error::from(crate::netlink::ErrorDetail::StackNotConverged {
                     remaining: Box::new(remaining),
-                });
+                }));
             }
         }
         Ok(report)

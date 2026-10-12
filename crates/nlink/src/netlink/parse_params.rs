@@ -36,7 +36,7 @@ mod sealed {
 ///
 /// Implementations **must**:
 ///
-/// - Return `Err(`[`Error::InvalidMessage`]`)` for unknown tokens,
+/// - Return `Err(`[`Error::invalid_message`]`)` for unknown tokens,
 ///   missing values, and unparseable inner values. Silent skipping
 ///   is a bug — the typed parsers exist precisely because the old
 ///   string-args builders swallowed unknown tokens.
@@ -72,7 +72,7 @@ mod sealed {
 /// # }
 /// ```
 ///
-/// [`Error::InvalidMessage`]: crate::Error::InvalidMessage
+/// [`Error::invalid_message`]: crate::Error::invalid_message
 pub trait ParseParams: Sized + sealed::Sealed {
     /// Parse `params` into `Self`. See the trait-level docs for the
     /// full error-shape and rejection contract.

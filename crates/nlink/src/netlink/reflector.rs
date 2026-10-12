@@ -494,7 +494,7 @@ mod tests {
         let reader = store.clone();
         let items = vec![
             Ok(ResyncedEvent::Event((1, "a"))),
-            Err(crate::Error::InvalidMessage("synth".into())),
+            Err(crate::Error::invalid_message("synth")),
             Ok(ResyncedEvent::Event((2, "b"))),
         ];
         let drained: Vec<_> = synth(items).reflect(store, op).collect().await;
@@ -570,7 +570,7 @@ mod tests {
             Ok(ResyncedEvent::Event(1)),
             Ok(ResyncedEvent::Marker(ResyncMarker::ResyncStart)),
             Ok(ResyncedEvent::Resynced(2)),
-            Err(crate::Error::InvalidMessage("boom".into())),
+            Err(crate::Error::invalid_message("boom")),
             // …and the consumer keeps going, as a supervisor loop does.
             Ok(ResyncedEvent::Event(3)),
         ];

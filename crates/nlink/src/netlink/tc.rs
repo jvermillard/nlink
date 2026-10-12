@@ -380,7 +380,7 @@ impl NetemDistribution {
     /// `/usr/lib/<triplet>/tc`.
     pub fn named(name: &str) -> Result<Self> {
         if name.is_empty() || name.contains('/') {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "netem: distribution `{name}` is not a table name"
             )));
         }
@@ -399,7 +399,7 @@ impl NetemDistribution {
                 return Self::from_file(path);
             }
         }
-        Err(Error::InvalidMessage(format!(
+        Err(Error::invalid_message(format!(
             "netem: no distribution table `{file}` (is iproute2 installed? set TC_LIB_DIR to \
              where its .dist files are)"
         )))
@@ -409,13 +409,13 @@ impl NetemDistribution {
     /// `#` comments.
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(Error::Io)?;
+        let text = std::fs::read_to_string(path).map_err(Error::from)?;
         let mut table = Vec::new();
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
             for word in line.split_whitespace() {
                 let v: i16 = word.parse().map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "netem: {}: `{word}` is not a table entry",
                         path.display()
                     ))
@@ -430,7 +430,7 @@ impl NetemDistribution {
     /// at most [`MAX_LEN`](Self::MAX_LEN).
     pub fn from_table(table: Vec<i16>) -> Result<Self> {
         if table.is_empty() || table.len() > Self::MAX_LEN {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "netem: a distribution table has 1 to {} entries, not {}",
                 Self::MAX_LEN,
                 table.len()
@@ -653,7 +653,7 @@ impl NetemConfig {
     ///   [`NetemDistribution::named`]
     /// - `seed <n>`
     ///
-    /// **Not modelled** (returns `Error::InvalidMessage`): `slot
+    /// **Not modelled** (returns `Error::invalid_message`): `slot
     /// distribution …`, a slot whose spacing is drawn from a table.
     ///
     /// Strict: unknown keywords, missing values, and unparseable
@@ -683,10 +683,10 @@ impl NetemConfig {
             match key {
                 "delay" | "latency" => {
                     let time_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage(format!("netem: `{key}` requires a value"))
+                        Error::invalid_message(format!("netem: `{key}` requires a value"))
                     })?;
                     cfg.delay = Some(crate::util::parse::get_time(time_str).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "netem: invalid {key} `{time_str}` (expected tc-style time)"
                         ))
                     })?);
@@ -695,7 +695,7 @@ impl NetemConfig {
                         && !is_netem_keyword(j)
                     {
                         cfg.jitter = Some(crate::util::parse::get_time(j).map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "netem: invalid jitter `{j}` (expected tc-style time)"
                             ))
                         })?);
@@ -721,7 +721,7 @@ impl NetemConfig {
                         && (model == "state" || model == "gemodel")
                     {
                         if random {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "netem: `loss random {model}` mixes two loss generators; use `loss {model} …`"
                             )));
                         }
@@ -737,7 +737,7 @@ impl NetemConfig {
                         continue;
                     }
                     let pct_str = params.get(i).copied().ok_or_else(|| {
-                        Error::InvalidMessage(format!("netem: `{key}` requires a percent value"))
+                        Error::invalid_message(format!("netem: `{key}` requires a percent value"))
                     })?;
                     cfg.loss = parse_netem_percent(pct_str, key)?;
                     i += 1;
@@ -750,7 +750,7 @@ impl NetemConfig {
                 }
                 "duplicate" => {
                     let pct_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `duplicate` requires a percent value".into())
+                        Error::invalid_message("netem: `duplicate` requires a percent value")
                     })?;
                     cfg.duplicate = parse_netem_percent(pct_str, "duplicate")?;
                     i += 2;
@@ -764,7 +764,7 @@ impl NetemConfig {
                 }
                 "corrupt" => {
                     let pct_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `corrupt` requires a percent value".into())
+                        Error::invalid_message("netem: `corrupt` requires a percent value")
                     })?;
                     cfg.corrupt = parse_netem_percent(pct_str, "corrupt")?;
                     i += 2;
@@ -777,7 +777,7 @@ impl NetemConfig {
                 }
                 "reorder" => {
                     let pct_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `reorder` requires a percent value".into())
+                        Error::invalid_message("netem: `reorder` requires a percent value")
                     })?;
                     cfg.reorder = parse_netem_percent(pct_str, "reorder")?;
                     i += 2;
@@ -790,10 +790,10 @@ impl NetemConfig {
                 }
                 "gap" => {
                     let n_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `gap` requires a value".into())
+                        Error::invalid_message("netem: `gap` requires a value")
                     })?;
                     cfg.gap = n_str.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "netem: invalid gap `{n_str}` (expected unsigned integer)"
                         ))
                     })?;
@@ -801,10 +801,10 @@ impl NetemConfig {
                 }
                 "rate" => {
                     let rate_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `rate` requires a value".into())
+                        Error::invalid_message("netem: `rate` requires a value")
                     })?;
                     cfg.rate = Some(crate::util::Rate::parse(rate_str).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "netem: invalid rate `{rate_str}` (expected tc-style rate like `100mbit`)"
                         ))
                     })?);
@@ -815,7 +815,7 @@ impl NetemConfig {
                         && !is_netem_keyword(v)
                     {
                         let bad = |what: &str| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "netem: invalid rate {what} `{v}` (expected integer)"
                             ))
                         };
@@ -830,7 +830,7 @@ impl NetemConfig {
                                     v.parse().map_err(|_| bad("cell overhead"))?
                             }
                             _ => {
-                                return Err(Error::InvalidMessage(format!(
+                                return Err(Error::invalid_message(format!(
                                     "netem: `rate` takes <rate> [<packet_overhead> [<cell_size> [<cell_overhead>]]], got an extra `{v}`"
                                 )));
                             }
@@ -841,10 +841,10 @@ impl NetemConfig {
                 }
                 "limit" => {
                     let n_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `limit` requires a value".into())
+                        Error::invalid_message("netem: `limit` requires a value")
                     })?;
                     cfg.limit = n_str.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "netem: invalid limit `{n_str}` (expected unsigned integer)"
                         ))
                     })?;
@@ -856,10 +856,10 @@ impl NetemConfig {
                 }
                 "seed" => {
                     let n_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `seed` requires a value".into())
+                        Error::invalid_message("netem: `seed` requires a value")
                     })?;
                     cfg.seed = Some(n_str.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "netem: invalid seed `{n_str}` (expected unsigned 64-bit integer)"
                         ))
                     })?);
@@ -867,7 +867,7 @@ impl NetemConfig {
                 }
                 "distribution" => {
                     let name = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `distribution` requires a table name".into())
+                        Error::invalid_message("netem: `distribution` requires a table name")
                     })?;
                     cfg.distribution = Some(NetemDistribution::named(name)?);
                     i += 2;
@@ -875,17 +875,17 @@ impl NetemConfig {
                 "slot" => {
                     let time = |what: &str, v: &str| {
                         crate::util::parse::get_time(v).map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "netem: invalid slot {what} `{v}` (expected tc-style time)"
                             ))
                         })
                     };
                     let min_str = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("netem: `slot` requires a minimum delay".into())
+                        Error::invalid_message("netem: `slot` requires a minimum delay")
                     })?;
                     if min_str == "distribution" {
-                        return Err(Error::InvalidMessage(
-                            "netem: `slot distribution …` is not modelled by NetemConfig; use `slot <min> <max>` (NetemSlot::new)".into(),
+                        return Err(Error::invalid_message(
+                            "netem: `slot distribution …` is not modelled by NetemConfig; use `slot <min> <max>` (NetemSlot::new)",
                         ));
                     }
                     let min = time("minimum delay", min_str)?;
@@ -904,10 +904,10 @@ impl NetemConfig {
                         && (sub == "packets" || sub == "bytes")
                     {
                         let n_str = params.get(i + 1).copied().ok_or_else(|| {
-                            Error::InvalidMessage(format!("netem: slot `{sub}` requires a value"))
+                            Error::invalid_message(format!("netem: slot `{sub}` requires a value"))
                         })?;
                         let n: u32 = n_str.parse().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "netem: invalid slot {sub} `{n_str}` (expected unsigned integer)"
                             ))
                         })?;
@@ -921,7 +921,7 @@ impl NetemConfig {
                     cfg.slot = Some(slot);
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "netem: unknown token `{other}`"
                     )));
                 }
@@ -1018,7 +1018,7 @@ fn netem_loss_model(model: &str, v: &[crate::util::Percent]) -> Result<NetemLoss
         (4, "<p> [<r> [<1-h> [<1-k>]]]")
     };
     if v.is_empty() || v.len() > max {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "netem: `loss {model}` takes {args}, got {} value(s)",
             v.len()
         )));
@@ -1052,7 +1052,7 @@ fn netem_loss_model(model: &str, v: &[crate::util::Percent]) -> Result<NetemLoss
 /// label folded into the error so the user knows which field failed.
 fn parse_netem_percent(s: &str, label: &str) -> Result<crate::util::Percent> {
     s.parse::<crate::util::Percent>()
-        .map_err(|_| Error::InvalidMessage(format!("netem: invalid {label} `{s}`")))
+        .map_err(|_| Error::invalid_message(format!("netem: invalid {label} `{s}`")))
 }
 
 impl QdiscConfig for NetemConfig {
@@ -1063,8 +1063,8 @@ impl QdiscConfig for NetemConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Validate: reorder requires delay
         if !self.reorder.is_zero() && self.delay.is_none() {
-            return Err(Error::InvalidMessage(
-                "netem: reorder requires delay to be set".into(),
+            return Err(Error::invalid_message(
+                "netem: reorder requires delay to be set",
             ));
         }
         // A distribution shapes the jitter, which netem only adds to a
@@ -1072,14 +1072,14 @@ impl QdiscConfig for NetemConfig {
         if self.distribution.is_some()
             && (self.delay.is_none() || self.jitter.is_none_or(|j| j.is_zero()))
         {
-            return Err(Error::InvalidMessage(
-                "netem: a distribution needs a delay and a jitter to shape".into(),
+            return Err(Error::invalid_message(
+                "netem: a distribution needs a delay and a jitter to shape",
             ));
         }
         if let Some(slot) = &self.slot
             && slot.min_delay > slot.max_delay
         {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "netem: slot min_delay {:?} is above its max_delay {:?}",
                 slot.min_delay, slot.max_delay
             )));
@@ -1089,8 +1089,8 @@ impl QdiscConfig for NetemConfig {
         if self.loss_model.is_some()
             && (!self.loss.is_zero() || !self.loss_correlation.is_zero())
         {
-            return Err(Error::InvalidMessage(
-                "netem: a loss model (`loss state`/`loss gemodel`) excludes random `loss` and its correlation".into(),
+            return Err(Error::invalid_message(
+                "netem: a loss model (`loss state`/`loss gemodel`) excludes random `loss` and its correlation",
             ));
         }
 
@@ -1370,7 +1370,7 @@ impl FqCodelConfig {
     ///
     /// Stricter than the legacy parser: unknown tokens, missing
     /// values, and unparseable time/size/integer values all return
-    /// `Error::InvalidMessage`.
+    /// `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -1378,21 +1378,21 @@ impl FqCodelConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("fq_codel: `{key}` requires a value"))
+                    Error::invalid_message(format!("fq_codel: `{key}` requires a value"))
                 })
             };
             match key {
                 "limit" => {
                     let s = need_value()?;
                     cfg.limit = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("fq_codel: invalid limit `{s}`"))
+                        Error::invalid_message(format!("fq_codel: invalid limit `{s}`"))
                     })?);
                     i += 2;
                 }
                 "target" => {
                     let s = need_value()?;
                     cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_codel: invalid target `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -1401,7 +1401,7 @@ impl FqCodelConfig {
                 "interval" => {
                     let s = need_value()?;
                     cfg.interval = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_codel: invalid interval `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -1410,14 +1410,14 @@ impl FqCodelConfig {
                 "flows" => {
                     let s = need_value()?;
                     cfg.flows = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("fq_codel: invalid flows `{s}`"))
+                        Error::invalid_message(format!("fq_codel: invalid flows `{s}`"))
                     })?);
                     i += 2;
                 }
                 "quantum" => {
                     let s = need_value()?;
                     cfg.quantum = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_codel: invalid quantum `{s}` (expected unsigned integer bytes)"
                         ))
                     })?);
@@ -1426,7 +1426,7 @@ impl FqCodelConfig {
                 "ce_threshold" => {
                     let s = need_value()?;
                     cfg.ce_threshold = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_codel: invalid ce_threshold `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -1435,12 +1435,12 @@ impl FqCodelConfig {
                 "memory_limit" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_codel: invalid memory_limit `{s}` (expected tc-style size)"
                         ))
                     })?;
                     cfg.memory_limit = Some(bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("fq_codel: memory_limit `{s}` exceeds u32"))
+                        Error::invalid_message(format!("fq_codel: memory_limit `{s}` exceeds u32"))
                     })?);
                     i += 2;
                 }
@@ -1453,7 +1453,7 @@ impl FqCodelConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "fq_codel: unknown token `{other}`"
                     )));
                 }
@@ -1612,21 +1612,21 @@ impl CodelConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("codel: `{key}` requires a value"))
+                    Error::invalid_message(format!("codel: `{key}` requires a value"))
                 })
             };
             match key {
                 "limit" => {
                     let s = need_value()?;
                     cfg.limit = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("codel: invalid limit `{s}`"))
+                        Error::invalid_message(format!("codel: invalid limit `{s}`"))
                     })?);
                     i += 2;
                 }
                 "target" => {
                     let s = need_value()?;
                     cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "codel: invalid target `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -1635,7 +1635,7 @@ impl CodelConfig {
                 "interval" => {
                     let s = need_value()?;
                     cfg.interval = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "codel: invalid interval `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -1644,7 +1644,7 @@ impl CodelConfig {
                 "ce_threshold" => {
                     let s = need_value()?;
                     cfg.ce_threshold = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "codel: invalid ce_threshold `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -1659,7 +1659,7 @@ impl CodelConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!("codel: unknown token `{other}`")));
+                    return Err(Error::invalid_message(format!("codel: unknown token `{other}`")));
                 }
             }
         }
@@ -1821,21 +1821,21 @@ impl FqConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("fq: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("fq: `{key}` requires a value")))
             };
             let parse_u32 = |s: &str, what: &str| {
                 s.parse::<u32>().map_err(|_| {
-                    Error::InvalidMessage(format!("fq: invalid {what} `{s}` (expected integer)"))
+                    Error::invalid_message(format!("fq: invalid {what} `{s}` (expected integer)"))
                 })
             };
             let parse_rate = |s: &str, what: &str| {
                 crate::util::Rate::parse(s).map_err(|_| {
-                    Error::InvalidMessage(format!("fq: invalid {what} `{s}` (expected tc-style rate)"))
+                    Error::invalid_message(format!("fq: invalid {what} `{s}` (expected tc-style rate)"))
                 })
             };
             let parse_time = |s: &str, what: &str| {
                 crate::util::parse::get_time(s).map_err(|_| {
-                    Error::InvalidMessage(format!("fq: invalid {what} `{s}` (expected tc-style time)"))
+                    Error::invalid_message(format!("fq: invalid {what} `{s}` (expected tc-style time)"))
                 })
             };
             match key {
@@ -1884,7 +1884,7 @@ impl FqConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!("fq: unknown token `{other}`")));
+                    return Err(Error::invalid_message(format!("fq: unknown token `{other}`")));
                 }
             }
         }
@@ -1978,7 +1978,7 @@ impl MqConfig {
     /// per-queue tuning belongs on the child qdiscs).
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(token) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "mq: qdisc takes no parameters (got `{token}`); install per-queue qdiscs on the child classes"
             )));
         }
@@ -2091,10 +2091,10 @@ impl EtsConfig {
             match key {
                 "bands" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("ets: `bands` requires a value".to_string())
+                        Error::invalid_message("ets: `bands` requires a value".to_string())
                     })?;
                     cfg.bands = Some(v.parse::<u8>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "ets: invalid bands `{v}` (expected integer 1..=16)"
                         ))
                     })?);
@@ -2102,10 +2102,10 @@ impl EtsConfig {
                 }
                 "strict" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("ets: `strict` requires a value".to_string())
+                        Error::invalid_message("ets: `strict` requires a value".to_string())
                     })?;
                     cfg.strict = Some(v.parse::<u8>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "ets: invalid strict `{v}` (expected integer)"
                         ))
                     })?);
@@ -2117,14 +2117,14 @@ impl EtsConfig {
                     while i < params.len() && !is_keyword(params[i]) {
                         let v = params[i];
                         cfg.quanta.push(v.parse::<u32>().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "ets: invalid quantum `{v}` (expected integer bytes)"
                             ))
                         })?);
                         i += 1;
                     }
                     if i == start {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "ets: `quanta` requires at least one value".to_string(),
                         ));
                     }
@@ -2135,20 +2135,20 @@ impl EtsConfig {
                     while i < params.len() && !is_keyword(params[i]) {
                         let v = params[i];
                         cfg.priomap.push(v.parse::<u8>().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "ets: invalid priomap entry `{v}` (expected band index)"
                             ))
                         })?);
                         i += 1;
                     }
                     if i == start {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "ets: `priomap` requires at least one value".to_string(),
                         ));
                     }
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!("ets: unknown token `{other}`")));
+                    return Err(Error::invalid_message(format!("ets: unknown token `{other}`")));
                 }
             }
         }
@@ -2301,14 +2301,14 @@ impl TbfConfig {
     /// - `peakrate <rate>` — optional secondary rate cap.
     /// - `mtu <bytes>` (alias `minburst`) — peak-burst MTU.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `latency` — `tc(8)` accepts it as a way to specify `limit`
     /// indirectly (`limit ≈ rate * latency`), but `TbfConfig` only
     /// stores the raw `limit`. Compute the limit yourself or file
     /// an issue if the latency form is important.
     ///
     /// Strict: unknown tokens, missing values, and unparseable
-    /// rate/size values all return `Error::InvalidMessage`. Note:
+    /// rate/size values all return `Error::invalid_message`. Note:
     /// this parser does NOT enforce the kernel's "rate and burst
     /// are required" rule — that's left to `add_qdisc` / the kernel
     /// itself, mirroring how `parse_params` behaves on every other
@@ -2336,13 +2336,13 @@ impl TbfConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("tbf: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("tbf: `{key}` requires a value")))
             };
             match key {
                 "rate" => {
                     let s = need_value()?;
                     cfg.rate = crate::util::Rate::parse(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "tbf: invalid rate `{s}` (expected tc-style rate like `1mbit`)"
                         ))
                     })?;
@@ -2351,7 +2351,7 @@ impl TbfConfig {
                 "peakrate" => {
                     let s = need_value()?;
                     cfg.peakrate = Some(crate::util::Rate::parse(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "tbf: invalid peakrate `{s}` (expected tc-style rate)"
                         ))
                     })?);
@@ -2360,7 +2360,7 @@ impl TbfConfig {
                 "burst" | "buffer" | "maxburst" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "tbf: invalid {key} `{s}` (expected tc-style size)"
                         ))
                     })?;
@@ -2370,7 +2370,7 @@ impl TbfConfig {
                 "limit" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "tbf: invalid limit `{s}` (expected tc-style size)"
                         ))
                     })?;
@@ -2380,22 +2380,22 @@ impl TbfConfig {
                 "mtu" | "minburst" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "tbf: invalid {key} `{s}` (expected tc-style size)"
                         ))
                     })?;
                     cfg.mtu = bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("tbf: {key} `{s}` exceeds u32 (max ~4GB)"))
+                        Error::invalid_message(format!("tbf: {key} `{s}` exceeds u32 (max ~4GB)"))
                     })?;
                     i += 2;
                 }
                 "latency" => {
-                    return Err(Error::InvalidMessage(
-                        "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself".into(),
+                    return Err(Error::invalid_message(
+                        "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself",
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "tbf: unknown token `{other}`"
                     )));
                 }
@@ -2420,11 +2420,11 @@ impl QdiscConfig for TbfConfig {
         // built with only a rate and a burst — the shape most callers
         // reach for — used to install as a black hole.
         if self.limit.as_u32_saturating() == 0 {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "tbf: a queue limit is required — with limit 0 the kernel gives the qdisc no \
                  queue and it drops every packet (tc(8): \"either limit or latency are \
                  required\"); set TbfConfig::limit (QdiscBuilder::limit_bytes when declared)"
-                    .into(),
+                    ,
             ));
         }
         let rate_bps = self.rate.as_bytes_per_sec();
@@ -2573,7 +2573,7 @@ impl HtbQdiscConfig {
     /// - `direct_qlen <n>` — direct queue length.
     ///
     /// Strict: unknown tokens, keys missing their value, and
-    /// unparseable numbers all return `Error::InvalidMessage`
+    /// unparseable numbers all return `Error::invalid_message`
     /// instead of being silently skipped.
     ///
     /// # Example
@@ -2595,7 +2595,7 @@ impl HtbQdiscConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("htb: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("htb: `{key}` requires a value")))
             };
             match key {
                 "default" => {
@@ -2604,7 +2604,7 @@ impl HtbQdiscConfig {
                 }
                 "r2q" => {
                     cfg.r2q = value()?.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "htb: invalid r2q `{}` (expected unsigned integer)",
                             params[i + 1]
                         ))
@@ -2613,7 +2613,7 @@ impl HtbQdiscConfig {
                 }
                 "direct_qlen" => {
                     cfg.direct_qlen = Some(value()?.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "htb: invalid direct_qlen `{}` (expected unsigned integer)",
                             params[i + 1]
                         ))
@@ -2621,7 +2621,7 @@ impl HtbQdiscConfig {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "htb: unknown token `{other}` (expected default, r2q, or direct_qlen)"
                     )));
                 }
@@ -2641,10 +2641,10 @@ fn parse_default_class(s: &str) -> Result<u32> {
     if s.contains(':') {
         s.parse::<crate::netlink::tc_handle::TcHandle>()
             .map(|h| h.as_raw())
-            .map_err(|e| Error::InvalidMessage(format!("htb: invalid default class `{s}`: {e}")))
+            .map_err(|e| Error::invalid_message(format!("htb: invalid default class `{s}`: {e}")))
     } else {
         u32::from_str_radix(s, 16).map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "htb: invalid default class `{s}` (expected hex minor or tc handle)"
             ))
         })
@@ -2770,7 +2770,7 @@ impl PrioConfig {
     ///   priomap is an explicit error.
     ///
     /// Unknown tokens, missing values, and unparseable numbers all
-    /// return `Error::InvalidMessage`.
+    /// return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -2779,10 +2779,10 @@ impl PrioConfig {
             match key {
                 "bands" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("prio: `bands` requires a value".into())
+                        Error::invalid_message("prio: `bands` requires a value")
                     })?;
                     cfg.bands = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "prio: invalid bands `{s}` (expected signed integer)"
                         ))
                     })?;
@@ -2790,7 +2790,7 @@ impl PrioConfig {
                 }
                 "priomap" => {
                     if params.len() < i + 1 + 16 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "prio: `priomap` requires exactly 16 values, got {}",
                             params.len().saturating_sub(i + 1)
                         )));
@@ -2798,7 +2798,7 @@ impl PrioConfig {
                     for j in 0..16 {
                         let s = params[i + 1 + j];
                         cfg.priomap[j] = s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "prio: invalid priomap[{j}] `{s}` (expected 0-255)"
                             ))
                         })?;
@@ -2806,7 +2806,7 @@ impl PrioConfig {
                     i += 17;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "prio: unknown token `{other}`"
                     )));
                 }
@@ -2831,7 +2831,7 @@ impl QdiscConfig for PrioConfig {
         // every priomap entry below `bands`. Say so here rather than relay
         // a bare EINVAL.
         if !(2..=16).contains(&self.bands) {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "prio: bands {} out of range (2..=16)",
                 self.bands
             )));
@@ -2842,7 +2842,7 @@ impl QdiscConfig for PrioConfig {
             .enumerate()
             .find(|(_, band)| i32::from(**band) >= self.bands)
         {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "prio: priomap[{tos}] names band {band}, but there are only {} bands",
                 self.bands
             )));
@@ -2939,7 +2939,7 @@ impl SfqConfig {
     /// - `perturb <seconds>` — hash perturbation interval.
     /// - `limit <packets>` — queue limit in packets.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `divisor` — `SfqConfig` doesn't expose the hash-table divisor
     /// field. File an issue if you need it.
     ///
@@ -2954,25 +2954,25 @@ impl SfqConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("sfq: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("sfq: `{key}` requires a value")))
             };
             match key {
                 "quantum" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "sfq: invalid quantum `{s}` (expected tc-style size)"
                         ))
                     })?;
                     cfg.quantum = bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("sfq: quantum `{s}` exceeds u32"))
+                        Error::invalid_message(format!("sfq: quantum `{s}` exceeds u32"))
                     })?;
                     i += 2;
                 }
                 "perturb" => {
                     let s = need_value()?;
                     cfg.perturb = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "sfq: invalid perturb `{s}` (expected signed integer seconds)"
                         ))
                     })?;
@@ -2981,20 +2981,20 @@ impl SfqConfig {
                 "limit" => {
                     let s = need_value()?;
                     cfg.limit = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "sfq: invalid limit `{s}` (expected unsigned integer packets)"
                         ))
                     })?;
                     i += 2;
                 }
                 "divisor" => {
-                    return Err(Error::InvalidMessage(
+                    return Err(Error::invalid_message(
                         "sfq: `divisor` is not modelled by SfqConfig — file an issue if you need it"
-                            .into(),
+                            ,
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "sfq: unknown token `{other}`"
                     )));
                 }
@@ -3155,7 +3155,7 @@ impl RedConfig {
     /// - `harddrop` / `noharddrop` — hard-drop flag pair.
     /// - `adaptive` / `noadaptive` — adaptive RED flag pair.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `avpkt`, `burst`, `bandwidth` — RedConfig doesn't model
     /// those classic RED parameters. The library uses the bare
     /// thresholds directly; if you need the avpkt-derived burst
@@ -3164,7 +3164,7 @@ impl RedConfig {
     /// Stricter than the legacy parser (which doesn't recognise red
     /// at all — it silently ignores unknown qdisc kinds in
     /// `add_qdisc`): unknown tokens, missing values, and
-    /// unparseable values return `Error::InvalidMessage`.
+    /// unparseable values return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -3174,18 +3174,18 @@ impl RedConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("red: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("red: `{key}` requires a value")))
             };
             match key {
                 "limit" | "min" | "max" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "red: invalid {key} `{s}` (expected tc-style size)"
                         ))
                     })?;
                     let val: u32 = bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("red: {key} `{s}` exceeds u32"))
+                        Error::invalid_message(format!("red: {key} `{s}` exceeds u32"))
                     })?;
                     match key {
                         "limit" => cfg.limit = val,
@@ -3198,7 +3198,7 @@ impl RedConfig {
                 "probability" => {
                     let s = need_value()?;
                     let pct: f64 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "red: invalid probability `{s}` (expected percentage 0-100)"
                         ))
                     })?;
@@ -3230,12 +3230,12 @@ impl RedConfig {
                     i += 1;
                 }
                 "avpkt" | "burst" | "bandwidth" => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "red: `{key}` is not modelled by RedConfig — drop to a hand-rolled MessageBuilder if needed"
                     )));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "red: unknown token `{other}`"
                     )));
                 }
@@ -3397,12 +3397,12 @@ impl ChokeConfig {
     /// - `ecn` / `noecn` — ECN marking flag pair.
     /// - `harddrop` / `noharddrop` — hard-drop flag pair.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `avpkt`, `burst`, `bandwidth` — same as [`RedConfig`]; CHOKe
     /// uses the bare thresholds directly.
     ///
     /// Strict: unknown tokens, missing values, and unparseable values
-    /// return `Error::InvalidMessage`.
+    /// return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -3410,19 +3410,19 @@ impl ChokeConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("choke: `{key}` requires a value"))
+                    Error::invalid_message(format!("choke: `{key}` requires a value"))
                 })
             };
             match key {
                 "limit" | "min" | "max" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "choke: invalid {key} `{s}` (expected tc-style size)"
                         ))
                     })?;
                     let val: u32 = bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("choke: {key} `{s}` exceeds u32"))
+                        Error::invalid_message(format!("choke: {key} `{s}` exceeds u32"))
                     })?;
                     match key {
                         "limit" => cfg.limit = val,
@@ -3435,7 +3435,7 @@ impl ChokeConfig {
                 "probability" => {
                     let s = need_value()?;
                     let pct: f64 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "choke: invalid probability `{s}` (expected percentage 0-100)"
                         ))
                     })?;
@@ -3459,12 +3459,12 @@ impl ChokeConfig {
                     i += 1;
                 }
                 "avpkt" | "burst" | "bandwidth" => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "choke: `{key}` is not modelled by ChokeConfig — drop to a hand-rolled MessageBuilder if needed"
                     )));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "choke: unknown token `{other}`"
                     )));
                 }
@@ -3549,7 +3549,7 @@ impl PfifoFastConfig {
     /// parameters; any token is rejected (strict-parse contract).
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(tok) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "pfifo_fast: unexpected token `{tok}` (pfifo_fast takes no parameters)"
             )));
         }
@@ -3630,7 +3630,7 @@ impl AtmConfig {
     /// parameters; any token is rejected (strict-parse contract).
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(tok) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "atm: unexpected token `{tok}` (the atm qdisc takes no parameters; \
                  VC binding is a class-level concern not modelled by nlink)"
             )));
@@ -3759,7 +3759,7 @@ impl GredConfig {
     /// - `grio` / `nogrio` — GRIO flag pair.
     /// - `limit <bytes>` — global queue limit (tc-style size).
     ///
-    /// **Not modelled by `GredConfig`** (returns `Error::InvalidMessage`):
+    /// **Not modelled by `GredConfig`** (returns `Error::invalid_message`):
     /// the per-VQ RED tokens `min`/`max`/`avpkt`/`burst`/`bandwidth`/`DP`/
     /// `probability`/`prio`/`ecn`/`harddrop`. Per-VQ parameterization needs
     /// the RED stab probability table the kernel requires under
@@ -3767,7 +3767,7 @@ impl GredConfig {
     /// until that lands.
     ///
     /// Strict: unknown tokens, missing values, and unparseable values
-    /// return `Error::InvalidMessage`.
+    /// return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -3777,7 +3777,7 @@ impl GredConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("gred: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("gred: `{key}` requires a value")))
             };
             match key {
                 "setup" => {
@@ -3787,12 +3787,12 @@ impl GredConfig {
                 "DPs" | "dps" => {
                     let s = need_value()?;
                     let n: u32 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "gred: invalid DPs `{s}` (expected 1..=16)"
                         ))
                     })?;
                     if n == 0 || n > super::types::tc::qdisc::gred::MAX_DPS {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "gred: DPs `{n}` out of range (1..=16)"
                         )));
                     }
@@ -3802,7 +3802,7 @@ impl GredConfig {
                 "default" => {
                     let s = need_value()?;
                     let dp: u32 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "gred: invalid default `{s}` (expected unsigned integer)"
                         ))
                     })?;
@@ -3820,26 +3820,26 @@ impl GredConfig {
                 "limit" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "gred: invalid limit `{s}` (expected tc-style size)"
                         ))
                     })?;
                     let val: u32 = bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("gred: limit `{s}` exceeds u32"))
+                        Error::invalid_message(format!("gred: limit `{s}` exceeds u32"))
                     })?;
                     cfg.limit = Some(val);
                     i += 2;
                 }
                 "min" | "max" | "avpkt" | "burst" | "bandwidth" | "DP" | "probability" | "prio"
                 | "ecn" | "harddrop" => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "gred: per-VQ token `{key}` is not modelled by GredConfig — \
                          per-VQ RED parameterization needs the TCA_GRED_STAB table; \
                          use setup mode (DPs/default/grio) or a hand-rolled MessageBuilder"
                     )));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "gred: unknown token `{other}`"
                     )));
                 }
@@ -4002,7 +4002,7 @@ impl PieConfig {
     ///
     /// Stricter than the legacy parser (which doesn't recognise pie
     /// at all): unknown tokens, missing values, and unparseable
-    /// time/integer values return `Error::InvalidMessage`.
+    /// time/integer values return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -4012,13 +4012,13 @@ impl PieConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("pie: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("pie: `{key}` requires a value")))
             };
             match key {
                 "target" => {
                     let s = need_value()?;
                     cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "pie: invalid target `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -4028,14 +4028,14 @@ impl PieConfig {
                     let s = need_value()?;
                     cfg.limit =
                         Some(s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!("pie: invalid limit `{s}`"))
+                            Error::invalid_message(format!("pie: invalid limit `{s}`"))
                         })?);
                     i += 2;
                 }
                 "tupdate" => {
                     let s = need_value()?;
                     cfg.tupdate = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "pie: invalid tupdate `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -4045,7 +4045,7 @@ impl PieConfig {
                     let s = need_value()?;
                     cfg.alpha =
                         Some(s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!("pie: invalid alpha `{s}`"))
+                            Error::invalid_message(format!("pie: invalid alpha `{s}`"))
                         })?);
                     i += 2;
                 }
@@ -4053,7 +4053,7 @@ impl PieConfig {
                     let s = need_value()?;
                     cfg.beta =
                         Some(s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!("pie: invalid beta `{s}`"))
+                            Error::invalid_message(format!("pie: invalid beta `{s}`"))
                         })?);
                     i += 2;
                 }
@@ -4074,7 +4074,7 @@ impl PieConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "pie: unknown token `{other}`"
                     )));
                 }
@@ -4299,7 +4299,7 @@ impl FqPieConfig {
     ///   `dq_rate_estimator` / `no_dq_rate_estimator`
     ///
     /// Strict: unknown tokens, missing values, and unparseable
-    /// values all return `Error::InvalidMessage`.
+    /// values all return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -4307,14 +4307,14 @@ impl FqPieConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("fq_pie: `{key}` requires a value"))
+                    Error::invalid_message(format!("fq_pie: `{key}` requires a value"))
                 })
             };
             match key {
                 "limit" => {
                     let s = need_value()?;
                     cfg.limit = Some(crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid limit `{s}` (expected packet count)"
                         ))
                     })?);
@@ -4323,7 +4323,7 @@ impl FqPieConfig {
                 "flows" => {
                     let s = need_value()?;
                     cfg.flows = Some(crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid flows `{s}` (expected unsigned integer)"
                         ))
                     })?);
@@ -4332,7 +4332,7 @@ impl FqPieConfig {
                 "alpha" => {
                     let s = need_value()?;
                     cfg.alpha = Some(crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid alpha `{s}` (expected unsigned integer)"
                         ))
                     })?);
@@ -4341,7 +4341,7 @@ impl FqPieConfig {
                 "beta" => {
                     let s = need_value()?;
                     cfg.beta = Some(crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid beta `{s}` (expected unsigned integer)"
                         ))
                     })?);
@@ -4350,7 +4350,7 @@ impl FqPieConfig {
                 "target" => {
                     let s = need_value()?;
                     cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid target `{s}` (expected tc-style time like `15ms`)"
                         ))
                     })?);
@@ -4359,7 +4359,7 @@ impl FqPieConfig {
                 "tupdate" => {
                     let s = need_value()?;
                     cfg.tupdate = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid tupdate `{s}` (expected tc-style time like `15ms`)"
                         ))
                     })?);
@@ -4368,7 +4368,7 @@ impl FqPieConfig {
                 "quantum" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid quantum `{s}` (expected tc-style size)"
                         ))
                     })?;
@@ -4378,7 +4378,7 @@ impl FqPieConfig {
                 "memory_limit" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid memory_limit `{s}` (expected tc-style size)"
                         ))
                     })?;
@@ -4388,12 +4388,12 @@ impl FqPieConfig {
                 "ecnprob" | "ecn_prob" => {
                     let s = need_value()?;
                     let prob = s.parse::<crate::util::Percent>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "fq_pie: invalid ecnprob `{s}` (expected percent 0-100)"
                         ))
                     })?;
                     if prob.as_percent().fract() != 0.0 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "fq_pie: ecnprob `{s}` is not a whole percentage"
                         )));
                     }
@@ -4425,7 +4425,7 @@ impl FqPieConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "fq_pie: unknown token `{other}`"
                     )));
                 }
@@ -4476,7 +4476,7 @@ impl QdiscConfig for FqPieConfig {
             // probability (#631).
             let pct = prob.as_percent();
             if pct.fract() != 0.0 {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "fq_pie: ecn_prob {prob} is not a whole percentage"
                 )));
             }
@@ -4531,7 +4531,7 @@ impl IngressConfig {
     /// rollout — empty slice succeeds, anything else errors.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(token) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "ingress: takes no parameters (got `{token}`)"
             )));
         }
@@ -4591,7 +4591,7 @@ impl ClsactConfig {
     /// succeeds, anything else errors.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(token) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "clsact: takes no parameters (got `{token}`)"
             )));
         }
@@ -4675,7 +4675,7 @@ impl PfifoConfig {
     /// - `limit <packets>` — queue limit in packets.
     ///
     /// Strict: unknown tokens, missing values, and unparseable
-    /// numbers all return `Error::InvalidMessage`.
+    /// numbers all return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -4684,17 +4684,17 @@ impl PfifoConfig {
             match key {
                 "limit" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("pfifo: `limit` requires a value".into())
+                        Error::invalid_message("pfifo: `limit` requires a value")
                     })?;
                     cfg.limit = crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "pfifo: invalid limit `{s}` (expected packet count)"
                         ))
                     })?;
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "pfifo: unknown token `{other}`"
                     )));
                 }
@@ -4781,7 +4781,7 @@ impl BfifoConfig {
     ///   accepts suffixes like `kb`/`mb`).
     ///
     /// Strict: unknown tokens, missing values, and unparseable
-    /// sizes all return `Error::InvalidMessage`.
+    /// sizes all return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -4790,20 +4790,20 @@ impl BfifoConfig {
             match key {
                 "limit" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("bfifo: `limit` requires a value".into())
+                        Error::invalid_message("bfifo: `limit` requires a value")
                     })?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "bfifo: invalid limit `{s}` (expected tc-style size)"
                         ))
                     })?;
                     cfg.limit = bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("bfifo: limit `{s}` exceeds u32 (max ~4GB)"))
+                        Error::invalid_message(format!("bfifo: limit `{s}` exceeds u32 (max ~4GB)"))
                     })?;
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "bfifo: unknown token `{other}`"
                     )));
                 }
@@ -4921,12 +4921,12 @@ impl CbsConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("cbs: `{key}` requires a value"))
+                    Error::invalid_message(format!("cbs: `{key}` requires a value"))
                 })
             };
             let parse_i32 = |s: &str| -> Result<i32> {
                 s.parse::<i32>().map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "cbs: invalid {key} `{s}` (expected signed integer)"
                     ))
                 })
@@ -4954,7 +4954,7 @@ impl CbsConfig {
                         "0" | "off" | "false" => false,
                         "1" | "on" | "true" => true,
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "cbs: invalid offload `{other}` (expected 0|1)"
                             )));
                         }
@@ -4962,7 +4962,7 @@ impl CbsConfig {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!("cbs: unknown token `{other}`")));
+                    return Err(Error::invalid_message(format!("cbs: unknown token `{other}`")));
                 }
             }
         }
@@ -5049,15 +5049,15 @@ impl SkbprioConfig {
             match key {
                 "limit" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("skbprio: `limit` requires a value".to_string())
+                        Error::invalid_message("skbprio: `limit` requires a value".to_string())
                     })?;
                     cfg.limit = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("skbprio: invalid limit `{s}`"))
+                        Error::invalid_message(format!("skbprio: invalid limit `{s}`"))
                     })?;
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "skbprio: unknown token `{other}`"
                     )));
                 }
@@ -5198,19 +5198,19 @@ impl SfbConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("sfb: `{key}` requires a value"))
+                    Error::invalid_message(format!("sfb: `{key}` requires a value"))
                 })
             };
             let parse_u32 = |s: &str| -> Result<u32> {
                 s.parse::<u32>().map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "sfb: invalid {key} `{s}` (expected unsigned integer)"
                     ))
                 })
             };
             let parse_time = |s: &str| -> Result<Duration> {
                 crate::util::parse::get_time(s).map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "sfb: invalid {key} `{s}` (expected tc-style time)"
                     ))
                 })
@@ -5253,7 +5253,7 @@ impl SfbConfig {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!("sfb: unknown token `{other}`")));
+                    return Err(Error::invalid_message(format!("sfb: unknown token `{other}`")));
                 }
             }
         }
@@ -5321,7 +5321,7 @@ impl MultiqConfig {
     /// parameters; any token is rejected (strict-parse contract).
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(tok) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "multiq: unexpected token `{tok}` (multiq takes no parameters)"
             )));
         }
@@ -5450,12 +5450,12 @@ impl HhfConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("hhf: `{key}` requires a value"))
+                    Error::invalid_message(format!("hhf: `{key}` requires a value"))
                 })
             };
             let parse_u32 = |s: &str| -> Result<u32> {
                 s.parse::<u32>().map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "hhf: invalid {key} `{s}` (expected unsigned integer)"
                     ))
                 })
@@ -5464,14 +5464,14 @@ impl HhfConfig {
                 crate::util::parse::get_size(s)
                     .map(crate::util::Bytes::new)
                     .map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "hhf: invalid {key} `{s}` (expected tc-style size)"
                         ))
                     })
             };
             let parse_time = |s: &str| -> Result<Duration> {
                 crate::util::parse::get_time(s).map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "hhf: invalid {key} `{s}` (expected tc-style time)"
                     ))
                 })
@@ -5506,7 +5506,7 @@ impl HhfConfig {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!("hhf: unknown token `{other}`")));
+                    return Err(Error::invalid_message(format!("hhf: unknown token `{other}`")));
                 }
             }
         }
@@ -5634,12 +5634,12 @@ impl DsmarkConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("dsmark: `{key}` requires a value"))
+                    Error::invalid_message(format!("dsmark: `{key}` requires a value"))
                 })
             };
             let parse_u16 = |s: &str| -> Result<u16> {
                 s.parse::<u16>().map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "dsmark: invalid {key} `{s}` (expected unsigned integer)"
                     ))
                 })
@@ -5658,14 +5658,14 @@ impl DsmarkConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "dsmark: unknown token `{other}`"
                     )));
                 }
             }
         }
         if cfg.indices.is_none() {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "dsmark: `indices <n>` is required (dsmark_init rejects options without TCA_DSMARK_INDICES)"
                     .to_string(),
             ));
@@ -5692,7 +5692,7 @@ impl QdiscConfig for DsmarkConfig {
         // there is no default, so an empty nest is a request the kernel
         // refuses with EINVAL. Say so here instead (#347).
         let Some(indices) = self.indices else {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "dsmark: indices is required (dsmark_init rejects TCA_OPTIONS without \
                  TCA_DSMARK_INDICES); use DsmarkConfig::new().indices(n)"
                     .to_string(),
@@ -5762,7 +5762,7 @@ impl DrrConfig {
     /// anything else errors.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(token) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "drr: qdisc takes no parameters (got `{token}`); per-class quantum belongs on DrrClassConfig"
             )));
         }
@@ -5837,7 +5837,7 @@ impl QfqConfig {
     /// `QfqClassConfig`); empty slice succeeds, anything else errors.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if let Some(token) = params.first() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "qfq: qdisc takes no parameters (got `{token}`); per-class weight/lmax belongs on QfqClassConfig"
             )));
         }
@@ -6183,7 +6183,7 @@ impl CakeConfig {
     ///
     /// Strict: unknown tokens, missing values, and unparseable
     /// rate / time / size / integer values all return
-    /// `Error::InvalidMessage`.
+    /// `Error::invalid_message`.
     ///
     /// # Example
     ///
@@ -6208,14 +6208,14 @@ impl CakeConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("cake: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("cake: `{key}` requires a value")))
             };
             match key {
                 // Value tokens.
                 "bandwidth" => {
                     let s = need_value()?;
                     cfg.bandwidth = Some(crate::util::Rate::parse(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid bandwidth `{s}` (expected tc-style rate like `100mbit`)"
                         ))
                     })?);
@@ -6224,7 +6224,7 @@ impl CakeConfig {
                 "rtt" => {
                     let s = need_value()?;
                     cfg.rtt = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid rtt `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -6233,7 +6233,7 @@ impl CakeConfig {
                 "target" => {
                     let s = need_value()?;
                     cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid target `{s}` (expected tc-style time)"
                         ))
                     })?);
@@ -6242,7 +6242,7 @@ impl CakeConfig {
                 "overhead" => {
                     let s = need_value()?;
                     cfg.overhead = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid overhead `{s}` (expected signed integer bytes)"
                         ))
                     })?);
@@ -6251,7 +6251,7 @@ impl CakeConfig {
                 "mpu" => {
                     let s = need_value()?;
                     cfg.mpu = Some(s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid mpu `{s}` (expected unsigned integer bytes)"
                         ))
                     })?);
@@ -6260,7 +6260,7 @@ impl CakeConfig {
                 "memlimit" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid memlimit `{s}` (expected tc-style size)"
                         ))
                     })?;
@@ -6271,7 +6271,7 @@ impl CakeConfig {
                     let s = need_value()?;
                     let trimmed = s.strip_prefix("0x").unwrap_or(s);
                     cfg.fwmark = Some(u32::from_str_radix(trimmed, 16).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "cake: invalid fwmark `{s}` (expected hex u32)"
                         ))
                     })?);
@@ -6403,7 +6403,7 @@ impl CakeConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "cake: unknown token `{other}`"
                     )));
                 }
@@ -6591,7 +6591,7 @@ impl PlugConfig {
     /// - `limit <bytes>` — initial buffer limit.
     ///
     /// Unknown tokens, missing values, and unparseable sizes return
-    /// `Error::InvalidMessage`.
+    /// `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -6600,20 +6600,20 @@ impl PlugConfig {
             match key {
                 "limit" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("plug: `limit` requires a value".into())
+                        Error::invalid_message("plug: `limit` requires a value")
                     })?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "plug: invalid limit `{s}` (expected tc-style size)"
                         ))
                     })?;
                     cfg.limit = Some(bytes.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!("plug: limit `{s}` exceeds u32"))
+                        Error::invalid_message(format!("plug: limit `{s}` exceeds u32"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "plug: unknown token `{other}`"
                     )));
                 }
@@ -6773,7 +6773,7 @@ impl MqprioConfig {
     ///   mappings.
     /// - `hw` / `nohw` — hardware-offload flag pair.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `queues <count1@offset1> <count2@offset2> ...` — the
     /// per-class queue layout is structured (count + offset pairs)
     /// and the `count@offset` parsing isn't implemented here yet.
@@ -6787,15 +6787,15 @@ impl MqprioConfig {
             match key {
                 "num_tc" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("mqprio: `num_tc` requires a value".into())
+                        Error::invalid_message("mqprio: `num_tc` requires a value")
                     })?;
                     let n: u8 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "mqprio: invalid num_tc `{s}` (expected 1-16)"
                         ))
                     })?;
                     if !(1..=16).contains(&n) {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "mqprio: num_tc `{n}` out of range (1-16)"
                         )));
                     }
@@ -6804,7 +6804,7 @@ impl MqprioConfig {
                 }
                 "map" => {
                     if params.len() < i + 1 + 16 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "mqprio: `map` requires exactly 16 values, got {}",
                             params.len().saturating_sub(i + 1)
                         )));
@@ -6813,7 +6813,7 @@ impl MqprioConfig {
                     for j in 0..16 {
                         let s = params[i + 1 + j];
                         map[j] = s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "mqprio: invalid map[{j}] `{s}` (expected 0-15)"
                             ))
                         })?;
@@ -6830,12 +6830,12 @@ impl MqprioConfig {
                     i += 1;
                 }
                 "queues" => {
-                    return Err(Error::InvalidMessage(
-                        "mqprio: `queues` (count@offset list) is not parsed by parse_params yet — use MqprioConfig::queues() on the typed builder".into(),
+                    return Err(Error::invalid_message(
+                        "mqprio: `queues` (count@offset list) is not parsed by parse_params yet — use MqprioConfig::queues() on the typed builder",
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "mqprio: unknown token `{other}`"
                     )));
                 }
@@ -7062,7 +7062,7 @@ impl TaprioConfig {
     ///   `SET_AND_HOLD` (`HOLD`/`H`), or `SET_AND_RELEASE`
     ///   (`RELEASE`/`R`). Multiple `sched-entry` tokens append.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
     /// `queues <count@offset>` — same pair-grammar deferral as
     /// `MqprioConfig`.
     ///
@@ -7078,19 +7078,19 @@ impl TaprioConfig {
             let key = params[i];
             let need_value = || {
                 params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("taprio: `{key}` requires a value"))
+                    Error::invalid_message(format!("taprio: `{key}` requires a value"))
                 })
             };
             match key {
                 "num_tc" => {
                     let s = need_value()?;
                     let n: u8 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "taprio: invalid num_tc `{s}` (expected 1-16)"
                         ))
                     })?;
                     if !(1..=16).contains(&n) {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "taprio: num_tc `{n}` out of range (1-16)"
                         )));
                     }
@@ -7099,7 +7099,7 @@ impl TaprioConfig {
                 }
                 "map" => {
                     if params.len() < i + 1 + 16 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "taprio: `map` requires exactly 16 values, got {}",
                             params.len().saturating_sub(i + 1)
                         )));
@@ -7108,7 +7108,7 @@ impl TaprioConfig {
                     for j in 0..16 {
                         let s = params[i + 1 + j];
                         map[j] = s.parse().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "taprio: invalid map[{j}] `{s}` (expected 0-15)"
                             ))
                         })?;
@@ -7120,35 +7120,35 @@ impl TaprioConfig {
                     let s = need_value()?;
                     cfg.clockid = parse_etf_clockid(s).map_err(|e| {
                         // Re-label the error from the etf helper to taprio context.
-                        Error::InvalidMessage(format!("taprio: invalid clockid `{s}` ({e})"))
+                        Error::invalid_message(format!("taprio: invalid clockid `{s}` ({e})"))
                     })?;
                     i += 2;
                 }
                 "base-time" => {
                     let s = need_value()?;
                     cfg.base_time = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("taprio: invalid base-time `{s}`"))
+                        Error::invalid_message(format!("taprio: invalid base-time `{s}`"))
                     })?;
                     i += 2;
                 }
                 "cycle-time" => {
                     let s = need_value()?;
                     cfg.cycle_time = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("taprio: invalid cycle-time `{s}`"))
+                        Error::invalid_message(format!("taprio: invalid cycle-time `{s}`"))
                     })?;
                     i += 2;
                 }
                 "cycle-time-extension" => {
                     let s = need_value()?;
                     cfg.cycle_time_extension = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("taprio: invalid cycle-time-extension `{s}`"))
+                        Error::invalid_message(format!("taprio: invalid cycle-time-extension `{s}`"))
                     })?;
                     i += 2;
                 }
                 "txtime-delay" => {
                     let s = need_value()?;
                     cfg.txtime_delay = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("taprio: invalid txtime-delay `{s}`"))
+                        Error::invalid_message(format!("taprio: invalid txtime-delay `{s}`"))
                     })?;
                     i += 2;
                 }
@@ -7174,7 +7174,7 @@ impl TaprioConfig {
                     cfg.flags = u32::from_str_radix(trimmed, 16)
                         .or_else(|_| s.parse::<u32>())
                         .map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "taprio: invalid flags `{s}` (expected hex u32 or decimal)"
                             ))
                         })?;
@@ -7182,21 +7182,21 @@ impl TaprioConfig {
                 }
                 "sched-entry" => {
                     let cmd_s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "taprio: `sched-entry` needs <cmd> <gate-mask-hex> <interval-ns>"
-                                .into(),
+                                ,
                         )
                     })?;
                     let mask_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "taprio: `sched-entry` needs <cmd> <gate-mask-hex> <interval-ns>"
-                                .into(),
+                                ,
                         )
                     })?;
                     let interval_s = params.get(i + 3).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "taprio: `sched-entry` needs <cmd> <gate-mask-hex> <interval-ns>"
-                                .into(),
+                                ,
                         )
                     })?;
                     let entry = parse_taprio_sched_entry(cmd_s, mask_s, interval_s)?;
@@ -7204,12 +7204,12 @@ impl TaprioConfig {
                     i += 4;
                 }
                 "queues" => {
-                    return Err(Error::InvalidMessage(
-                        "taprio: `queues` (count@offset list) is not parsed by parse_params yet — use TaprioConfig::queues() on the typed builder".into(),
+                    return Err(Error::invalid_message(
+                        "taprio: `queues` (count@offset list) is not parsed by parse_params yet — use TaprioConfig::queues() on the typed builder",
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "taprio: unknown token `{other}`"
                     )));
                 }
@@ -7235,19 +7235,19 @@ fn parse_taprio_sched_entry(
         "SET_AND_HOLD" | "HOLD" | "H" | "hold" | "h" => TC_TAPRIO_CMD_SET_AND_HOLD,
         "SET_AND_RELEASE" | "RELEASE" | "R" | "release" | "r" => TC_TAPRIO_CMD_SET_AND_RELEASE,
         other => {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "taprio: invalid sched-entry cmd `{other}` (expected SET / HOLD / RELEASE)"
             )));
         }
     };
     let mask_trimmed = mask_s.strip_prefix("0x").unwrap_or(mask_s);
     let mask = u32::from_str_radix(mask_trimmed, 16).map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "taprio: invalid sched-entry gate mask `{mask_s}` (expected hex)"
         ))
     })?;
     let interval = interval_s.parse::<u32>().map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "taprio: invalid sched-entry interval `{interval_s}` (expected u32 ns)"
         ))
     })?;
@@ -7404,7 +7404,7 @@ impl HfscConfig {
     ///   convention).
     ///
     /// Unknown tokens, missing values, and unparseable values
-    /// return `Error::InvalidMessage`.
+    /// return `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -7413,17 +7413,17 @@ impl HfscConfig {
             match key {
                 "default" => {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("hfsc: `default` requires a value".into())
+                        Error::invalid_message("hfsc: `default` requires a value")
                     })?;
                     cfg.default_class = u16::from_str_radix(s, 16).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "hfsc: invalid default `{s}` (expected hex minor like `10`)"
                         ))
                     })?;
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "hfsc: unknown token `{other}`"
                     )));
                 }
@@ -7577,13 +7577,13 @@ impl EtfConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("etf: `{key}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("etf: `{key}` requires a value")))
             };
             match key {
                 "delta" => {
                     let s = need_value()?;
                     cfg.delta = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "etf: invalid delta `{s}` (expected signed integer ns)"
                         ))
                     })?;
@@ -7619,7 +7619,7 @@ impl EtfConfig {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "etf: unknown token `{other}`"
                     )));
                 }
@@ -7641,7 +7641,7 @@ fn parse_etf_clockid(s: &str) -> Result<i32> {
         "CLOCK_BOOTTIME" => libc::CLOCK_BOOTTIME,
         "CLOCK_TAI" => libc::CLOCK_TAI,
         other => other.parse::<i32>().map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "etf: invalid clockid `{other}` (expected name like CLOCK_TAI or bare integer)"
             ))
         })?,
@@ -7870,7 +7870,7 @@ impl HtbClassConfig {
     /// (matches the kernel and `HtbClassConfig::new`'s contract).
     ///
     /// Strict: unknown tokens, missing values, and unparseable
-    /// rates/sizes/integers all return `Error::InvalidMessage` —
+    /// rates/sizes/integers all return `Error::invalid_message` —
     /// the legacy stringly-typed dispatcher used to silently swallow
     /// unknown tokens, which this replaces.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
@@ -7892,41 +7892,41 @@ impl HtbClassConfig {
                 params
                     .get(i + 1)
                     .copied()
-                    .ok_or_else(|| Error::InvalidMessage(format!("htb: `{tok}` requires a value")))
+                    .ok_or_else(|| Error::invalid_message(format!("htb: `{tok}` requires a value")))
             };
             match tok {
                 "rate" => {
                     let v = val()?;
                     rate = Some(v.parse::<Rate>().map_err(|e| {
-                        Error::InvalidMessage(format!("htb: invalid rate `{v}`: {e}"))
+                        Error::invalid_message(format!("htb: invalid rate `{v}`: {e}"))
                     })?);
                     i += 2;
                 }
                 "ceil" => {
                     let v = val()?;
                     ceil = Some(v.parse::<Rate>().map_err(|e| {
-                        Error::InvalidMessage(format!("htb: invalid ceil `{v}`: {e}"))
+                        Error::invalid_message(format!("htb: invalid ceil `{v}`: {e}"))
                     })?);
                     i += 2;
                 }
                 "burst" | "buffer" | "maxburst" => {
                     let v = val()?;
                     burst = Some(v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::InvalidMessage(format!("htb: invalid burst `{v}`: {e}"))
+                        Error::invalid_message(format!("htb: invalid burst `{v}`: {e}"))
                     })?);
                     i += 2;
                 }
                 "cburst" | "cbuffer" | "cmaxburst" => {
                     let v = val()?;
                     cburst = Some(v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::InvalidMessage(format!("htb: invalid cburst `{v}`: {e}"))
+                        Error::invalid_message(format!("htb: invalid cburst `{v}`: {e}"))
                     })?);
                     i += 2;
                 }
                 "prio" => {
                     let v = val()?;
                     prio = Some(v.parse::<u32>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "htb: invalid prio `{v}` (expected unsigned integer)"
                         ))
                     })?);
@@ -7935,7 +7935,7 @@ impl HtbClassConfig {
                 "quantum" => {
                     let v = val()?;
                     let bytes = v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::InvalidMessage(format!("htb: invalid quantum `{v}`: {e}"))
+                        Error::invalid_message(format!("htb: invalid quantum `{v}`: {e}"))
                     })?;
                     quantum = Some(bytes.as_u32_saturating());
                     i += 2;
@@ -7943,7 +7943,7 @@ impl HtbClassConfig {
                 "mtu" => {
                     let v = val()?;
                     mtu = Some(v.parse::<u32>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "htb: invalid mtu `{v}` (expected unsigned integer)"
                         ))
                     })?);
@@ -7952,26 +7952,26 @@ impl HtbClassConfig {
                 "mpu" => {
                     let v = val()?;
                     mpu = Some(v.parse::<u16>().map_err(|_| {
-                        Error::InvalidMessage(format!("htb: invalid mpu `{v}` (expected u16)"))
+                        Error::invalid_message(format!("htb: invalid mpu `{v}` (expected u16)"))
                     })?);
                     i += 2;
                 }
                 "overhead" => {
                     let v = val()?;
                     overhead = Some(v.parse::<u16>().map_err(|_| {
-                        Error::InvalidMessage(format!("htb: invalid overhead `{v}` (expected u16)"))
+                        Error::invalid_message(format!("htb: invalid overhead `{v}` (expected u16)"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "htb: unknown token `{other}` (recognised: rate, ceil, burst, cburst, prio, quantum, mtu, mpu, overhead)"
                     )));
                 }
             }
         }
 
-        let rate = rate.ok_or_else(|| Error::InvalidMessage("htb: `rate` is required".into()))?;
+        let rate = rate.ok_or_else(|| Error::invalid_message("htb: `rate` is required"))?;
         let mut cfg = HtbClassConfig::new(rate);
         if let Some(c) = ceil {
             cfg = cfg.ceil(c);
@@ -8255,31 +8255,31 @@ impl HfscClassConfig {
             let kind = match curve {
                 "rt" | "ls" | "ul" => curve,
                 "sc" => {
-                    return Err(Error::InvalidMessage(
-                        "hfsc: `sc` (real-time + link-share combined) not modelled by parse_params — use HfscClassConfig::rt_curve + ls_curve on the typed builder".into(),
+                    return Err(Error::invalid_message(
+                        "hfsc: `sc` (real-time + link-share combined) not modelled by parse_params — use HfscClassConfig::rt_curve + ls_curve on the typed builder",
                     ));
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "hfsc: unknown token `{other}` (recognised: rt, ls, ul; each followed by `rate <rate>`)"
                     )));
                 }
             };
             // Expect `rate <rate>` after the curve keyword.
             let next = params.get(i + 1).copied().ok_or_else(|| {
-                Error::InvalidMessage(format!("hfsc: `{kind}` requires `rate <rate>`"))
+                Error::invalid_message(format!("hfsc: `{kind}` requires `rate <rate>`"))
             })?;
             if next != "rate" {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "hfsc: `{kind}` followed by `{next}` — only the `rate <rate>` form is parsed (use the typed builder for full m1/d/m2 curves)"
                 )));
             }
             let v = params.get(i + 2).copied().ok_or_else(|| {
-                Error::InvalidMessage(format!("hfsc: `{kind} rate` requires a value"))
+                Error::invalid_message(format!("hfsc: `{kind} rate` requires a value"))
             })?;
             let rate = v
                 .parse::<Rate>()
-                .map_err(|e| Error::InvalidMessage(format!("hfsc: invalid rate `{v}`: {e}")))?;
+                .map_err(|e| Error::invalid_message(format!("hfsc: invalid rate `{v}`: {e}")))?;
             cfg = match kind {
                 "rt" => cfg.rt_rate(rate),
                 "ls" => cfg.ls_rate(rate),
@@ -8391,7 +8391,7 @@ impl DrrClassConfig {
     ///
     /// DRR class accepts a single optional keyword: `quantum <bytes>`.
     /// Unknown tokens, missing values, and unparseable sizes return
-    /// `Error::InvalidMessage`.
+    /// `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = DrrClassConfig::new();
         let mut i = 0;
@@ -8400,16 +8400,16 @@ impl DrrClassConfig {
             match tok {
                 "quantum" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("drr: `quantum` requires a value".into())
+                        Error::invalid_message("drr: `quantum` requires a value")
                     })?;
                     let q = v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::InvalidMessage(format!("drr: invalid quantum `{v}`: {e}"))
+                        Error::invalid_message(format!("drr: invalid quantum `{v}`: {e}"))
                     })?;
                     cfg = cfg.quantum(q);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "drr: unknown token `{other}` (recognised: quantum)"
                     )));
                 }
@@ -8520,7 +8520,7 @@ impl QfqClassConfig {
     ///
     /// QFQ class accepts: `weight <u32>` (1..=1023, clamped) and
     /// `lmax <bytes>`. Unknown tokens and unparseable values return
-    /// `Error::InvalidMessage`.
+    /// `Error::invalid_message`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = QfqClassConfig::new();
         let mut i = 0;
@@ -8529,10 +8529,10 @@ impl QfqClassConfig {
             match tok {
                 "weight" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("qfq: `weight` requires a value".into())
+                        Error::invalid_message("qfq: `weight` requires a value")
                     })?;
                     let w = v.parse::<u32>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "qfq: invalid weight `{v}` (expected unsigned integer)"
                         ))
                     })?;
@@ -8541,16 +8541,16 @@ impl QfqClassConfig {
                 }
                 "lmax" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage("qfq: `lmax` requires a value".into())
+                        Error::invalid_message("qfq: `lmax` requires a value")
                     })?;
                     let b = v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::InvalidMessage(format!("qfq: invalid lmax `{v}`: {e}"))
+                        Error::invalid_message(format!("qfq: invalid lmax `{v}`: {e}"))
                     })?;
                     cfg = cfg.lmax(b);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "qfq: unknown token `{other}` (recognised: weight, lmax)"
                     )));
                 }
@@ -8831,10 +8831,10 @@ impl Connection<Route> {
             builder.append_attr_str(TcaAttr::Kind as u16, kind);
         }
 
-        let not_found = || Error::QdiscNotFound {
+        let not_found = || Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
             kind: kind.map_or_else(|| handle.unwrap_or(parent).to_string(), str::to_string),
             interface: format!("ifindex {ifindex}"),
-        };
+        });
         let Err(e) = self.send_ack(builder).await else {
             return Ok(());
         };
@@ -8853,7 +8853,7 @@ impl Connection<Route> {
                 .find(|q| q.parent() == parent && q.handle().as_raw() != 0);
             return Err(match there.and_then(|q| q.kind()) {
                 None => not_found(),
-                Some(other) => Error::InvalidMessage(format!(
+                Some(other) => Error::invalid_message(format!(
                     "del_qdisc(ifindex {ifindex}, parent={parent}): the qdisc there is \
                      `{other}`, not `{kind}`; left in place"
                 )),
@@ -9060,7 +9060,7 @@ impl Connection<Route> {
         // classful qdisc's leaf while no ingress exists, and then refuses
         // the ingress — or, the other way round, the leaf (#485).
         if TcHandle::from_raw(handle).is_reserved_major() && !parent.is_ingress() {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "tc: qdisc handle {} is reserved for the ingress/clsact qdisc",
                 TcHandle::from_raw(handle)
             )));
@@ -9168,10 +9168,10 @@ impl Connection<Route> {
         .await
         .map_err(|e| {
             if e.is_not_found() {
-                Error::QdiscNotFound {
+                Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
                     kind,
                     interface: format!("ifindex {ifindex}"),
-                }
+                })
             } else {
                 e.with_context(format!(
                     "change_qdisc(ifindex {ifindex}, parent={})",

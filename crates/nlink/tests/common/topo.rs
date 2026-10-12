@@ -92,7 +92,7 @@ async fn wait_oper_up(ns: &TestNamespace, ifindex: u32) -> nlink::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    Err(nlink::Error::InvalidMessage(format!(
+    Err(nlink::Error::invalid_message(format!(
         "link {ifindex} in {} never reached operstate UP",
         ns.name()
     )))

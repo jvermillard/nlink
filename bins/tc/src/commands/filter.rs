@@ -230,7 +230,7 @@ impl FilterCmd {
                 kind: _,
             } => {
                 let parent_t = parent.parse::<TcHandle>().map_err(|e| {
-                    Error::InvalidMessage(format!("tc filter del: invalid parent `{parent}`: {e}"))
+                    Error::invalid_message(format!("tc filter del: invalid parent `{parent}`: {e}"))
                 })?;
                 match (protocol.as_deref(), prio) {
                     // Full lookup tuple → delete exactly that filter.
@@ -244,7 +244,7 @@ impl FilterCmd {
                     (None, None) => conn.flush_filters(dev.as_str(), parent_t).await,
                     // A half-specified tuple is ambiguous: which filter?
                     // Reject rather than guess (strict-parse contract).
-                    _ => Err(Error::InvalidMessage(
+                    _ => Err(Error::invalid_message(
                         "tc filter del: specify both --protocol and --prio to delete one \
                          filter, or neither to flush all filters on the parent"
                             .to_string(),
@@ -312,8 +312,8 @@ impl FilterCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         if dev.is_empty() {
-            return Err(nlink::netlink::Error::InvalidMessage(
-                "device name required".into(),
+            return Err(nlink::netlink::Error::invalid_message(
+                "device name required",
             ));
         }
 
@@ -324,7 +324,7 @@ impl FilterCmd {
             .get_link_by_name(dev)
             .await?
             .ok_or_else(|| {
-                nlink::netlink::Error::InvalidMessage(format!("device not found: {dev}"))
+                nlink::netlink::Error::invalid_message(format!("device not found: {dev}"))
             })?
             .ifindex();
 
@@ -336,7 +336,7 @@ impl FilterCmd {
                 tc_handle::parse(p)
                     .map(nlink::TcHandle::from_raw)
                     .ok_or_else(|| {
-                        nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", p))
+                        nlink::netlink::Error::invalid_message(format!("invalid parent: {}", p))
                     })
             })
             .transpose()?;
@@ -415,7 +415,7 @@ async fn dispatch_filter(
 ) -> Result<()> {
     let parent = parent
         .parse::<TcHandle>()
-        .map_err(|e| Error::InvalidMessage(format!("tc filter: invalid parent `{parent}`: {e}")))?;
+        .map_err(|e| Error::invalid_message(format!("tc filter: invalid parent `{parent}`: {e}")))?;
     let proto = parse_protocol(protocol)?;
     let priority = FilterPriority::new(prio.unwrap_or(0));
 
@@ -424,7 +424,7 @@ async fn dispatch_filter(
     let handle = match handle {
         None => None,
         Some(h) => Some(h.parse::<TcHandle>().map_err(|e| {
-            Error::InvalidMessage(format!("tc filter: invalid handle `{h}`: {e}"))
+            Error::invalid_message(format!("tc filter: invalid handle `{h}`: {e}"))
         })?),
     };
 
@@ -453,7 +453,7 @@ async fn dispatch_filter(
         "basic" => dispatch!(BasicFilter),
         "tcindex" => dispatch!(TcindexFilter),
         "rsvp" | "rsvp6" => dispatch!(RsvpFilter),
-        other => Err(Error::InvalidMessage(format!(
+        other => Err(Error::invalid_message(format!(
             "tc filter: unknown kind `{other}` (recognised: flower, matchall, fw, route, bpf, cgroup, flow, u32, basic, tcindex, rsvp, rsvp6)"
         ))),
     }

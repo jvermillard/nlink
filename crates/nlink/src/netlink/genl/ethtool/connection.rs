@@ -81,9 +81,9 @@ impl Connection<Ethtool> {
                     .get_link_by_index(*idx)
                     .await?
                     .and_then(|l| l.name().map(|s| s.to_string()))
-                    .ok_or_else(|| Error::InterfaceNotFound {
+                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                         name: format!("ifindex {}", idx),
-                    })
+                    }))
             }
         }
     }
@@ -1382,7 +1382,7 @@ impl Connection<Ethtool> {
         // instead of a silent no-op (strict-parse spirit).
         for m in &config.modes {
             if !WOL_MODE_NAMES.contains(&m.as_str()) {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "wol: unknown mode `{m}` (expected one of {})",
                     WOL_MODE_NAMES.join(", ")
                 )));
@@ -1672,7 +1672,7 @@ impl Connection<Ethtool> {
         request: ModuleEepromRequest,
     ) -> Result<ModuleEeprom> {
         if request.length == 0 || request.length > 128 {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "get_module_eeprom: length {} out of range (1..=128)",
                 request.length
             )));
@@ -1872,7 +1872,7 @@ impl Connection<Ethtool> {
                     break;
                 }
             }
-            result_payload.ok_or_else(|| Error::InvalidMessage("no stats response received".into()))
+            result_payload.ok_or_else(|| Error::invalid_message("no stats response received"))
         })
         .await
     }
@@ -1990,7 +1990,7 @@ impl Connection<Ethtool> {
                 }
             }
 
-            result_payload.ok_or_else(|| Error::InvalidMessage("no response received".into()))
+            result_payload.ok_or_else(|| Error::invalid_message("no response received"))
         })
         .await
     }
@@ -2044,7 +2044,7 @@ impl Connection<Ethtool> {
                         return Err(err.to_error(header.nlmsg_flags, payload));
                     }
                     if header.is_done() {
-                        return Err(Error::InvalidMessage("no response received".into()));
+                        return Err(Error::invalid_message("no response received"));
                     }
                     // The doit reply is a single message — return its payload.
                     return Ok(payload.to_vec());

@@ -300,9 +300,9 @@ pub async fn apply_diff(
         let (config, plan) = &**source;
         let remaining = compute_diff_with_options(config, conn, plan).await?;
         if !remaining.is_empty() {
-            return Err(Error::NotConverged {
+            return Err(Error::from(crate::netlink::ErrorDetail::NotConverged {
                 remaining: Box::new(remaining),
-            });
+            }));
         }
     }
     Ok(result)
@@ -436,17 +436,17 @@ fn refusal(step: &Step) -> Option<Error> {
         // A declared route whose place holds a route the config does not
         // own — the kernel's connected route, an RA, DHCP or routing
         // daemon's — would replace it (#469).
-        Step::RefuseRoute(conflict) => Error::NotSupported(format!(
+        Step::RefuseRoute(conflict) => Error::not_supported(format!(
             "route {}/{}: adding it would replace {}, which this config does not own. Give \
              the declared route another metric, or remove the other route, and apply again.",
             conflict.route.destination, conflict.route.prefix_len, conflict.held_by
         )),
-        Step::RefuseNexthop(conflict) => Error::NotSupported(format!(
+        Step::RefuseNexthop(conflict) => Error::not_supported(format!(
             "nexthop {}: {}",
             conflict.nexthop.id, conflict.reason
         )),
         // A removal that would destroy what no config declares (#512).
-        Step::RefuseRemoval(removal) => Error::NotSupported(format!(
+        Step::RefuseRemoval(removal) => Error::not_supported(format!(
             "link {}: the previous config declared it and this one does not, but deleting it \
              would destroy what no config declares: {}. Declare them, or remove them, and \
              apply again.",
@@ -459,7 +459,7 @@ fn refusal(step: &Step) -> Option<Error> {
                 .join(", ")
         )),
         // A recreate that would destroy what the config does not declare.
-        Step::RefuseRecreate(recreate) => Error::NotSupported(format!(
+        Step::RefuseRecreate(recreate) => Error::not_supported(format!(
             "link {}: {} cannot be changed on the live link, and recreating it would \
              destroy what this config does not declare: {}. Declare them, or remove them \
              (or the link), and apply again.",
@@ -2143,7 +2143,7 @@ async fn refuse_htb_change_in_place(
         }
         _ => "unreadable options".to_string(),
     };
-    Err(Error::NotSupported(format!(
+    Err(Error::not_supported(format!(
         "htb on {dev}: the live HTB root ({live_params}) cannot be changed in place to the \
          declared one (default_class {:#x}, r2q {}). The kernel's htb has no change \
          operation, so the only way is to delete the root qdisc, which deletes every class \

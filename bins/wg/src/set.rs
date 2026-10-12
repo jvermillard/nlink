@@ -67,19 +67,19 @@ pub async fn run(args: SetArgs) -> Result<()> {
     // per-peer config flags previously silently dropped those flags.
     // Reject the contradiction instead.
     if args.remove && has_peer_config {
-        return Err(Error::InvalidMessage(
+        return Err(Error::invalid_message(
             "wg set: `--remove` cannot be combined with peer configuration flags \
              (--endpoint/--allowed-ips/--persistent-keepalive/--preshared-key)"
-                .into(),
+                ,
         ));
     }
 
     // A `set` with nothing to do was previously a silent no-op exiting 0.
     if !has_device_opts && args.peer.is_none() {
-        return Err(Error::InvalidMessage(
+        return Err(Error::invalid_message(
             "wg set: nothing to do — specify a device option \
              (--listen-port/--private-key/--fwmark) or `--peer <key> ...`"
-                .into(),
+                ,
         ));
     }
 
@@ -171,7 +171,7 @@ fn read_private_key(path: &Path) -> Result<[u8; 32]> {
     if path == Path::new("/dev/null") {
         return Ok([0u8; 32]);
     }
-    let content = fs::read_to_string(path).map_err(Error::Io)?;
+    let content = fs::read_to_string(path).map_err(Error::from)?;
     if content.trim().is_empty() {
         return Ok([0u8; 32]);
     }
@@ -180,26 +180,26 @@ fn read_private_key(path: &Path) -> Result<[u8; 32]> {
 
 /// Read a key from a file.
 fn read_key_file(path: &PathBuf) -> Result<[u8; 32]> {
-    let content = fs::read_to_string(path).map_err(Error::Io)?;
+    let content = fs::read_to_string(path).map_err(Error::from)?;
     decode_key(&content)
 }
 
 /// Decode a base64 32-byte WireGuard key.
 fn decode_key(s: &str) -> Result<[u8; 32]> {
     let bytes = base64_decode(s)
-        .map_err(|e| Error::InvalidMessage(format!("Invalid base64 in key: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("Invalid base64 in key: {}", e)))?;
     bytes.as_slice().try_into().map_err(|_| {
-        Error::InvalidMessage(format!("Invalid key length: expected 32, got {}", bytes.len()))
+        Error::invalid_message(format!("Invalid key length: expected 32, got {}", bytes.len()))
     })
 }
 
 /// Parse a base64 public key string.
 fn parse_public_key(s: &str) -> Result<[u8; 32]> {
     let bytes = base64_decode(s)
-        .map_err(|e| Error::InvalidMessage(format!("Invalid base64 public key: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("Invalid base64 public key: {}", e)))?;
 
     if bytes.len() != 32 {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "Invalid public key length: expected 32, got {}",
             bytes.len()
         )));
@@ -214,24 +214,24 @@ fn parse_public_key(s: &str) -> Result<[u8; 32]> {
 fn parse_one_cidr(cidr: &str) -> Result<AllowedIp> {
     let (addr_str, prefix_str) = cidr
         .split_once('/')
-        .ok_or_else(|| Error::InvalidMessage(format!("Invalid CIDR notation: {}", cidr)))?;
+        .ok_or_else(|| Error::invalid_message(format!("Invalid CIDR notation: {}", cidr)))?;
 
     let addr: IpAddr = addr_str
         .trim()
         .parse()
-        .map_err(|e| Error::InvalidMessage(format!("Invalid IP address '{}': {}", addr_str, e)))?;
+        .map_err(|e| Error::invalid_message(format!("Invalid IP address '{}': {}", addr_str, e)))?;
 
     let prefix: u8 = prefix_str
         .trim()
         .parse()
-        .map_err(|e| Error::InvalidMessage(format!("Invalid prefix length '{}': {}", prefix_str, e)))?;
+        .map_err(|e| Error::invalid_message(format!("Invalid prefix length '{}': {}", prefix_str, e)))?;
 
     let max_prefix = match addr {
         IpAddr::V4(_) => 32,
         IpAddr::V6(_) => 128,
     };
     if prefix > max_prefix {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "Prefix length {} exceeds maximum {} for {}",
             prefix, max_prefix, addr
         )));
@@ -264,10 +264,10 @@ fn parse_allowed_ips_spec(s: &str) -> Result<(Vec<AllowedIp>, bool)> {
             saw_incremental = true;
             rest.trim()
         } else if entry.starts_with('-') {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "removing individual allowed-ips (`-`) is not modelled — the library \
                  lacks the WGALLOWEDIP remove flag; re-list the full set to replace it"
-                    .into(),
+                    ,
             ));
         } else {
             saw_plain = true;
@@ -277,10 +277,10 @@ fn parse_allowed_ips_spec(s: &str) -> Result<(Vec<AllowedIp>, bool)> {
     }
 
     if saw_incremental && saw_plain {
-        return Err(Error::InvalidMessage(
+        return Err(Error::invalid_message(
             "mixing plain and `+`-prefixed allowed-ips is not supported; prefix all with \
              `+` for incremental add, or none for replace"
-                .into(),
+                ,
         ));
     }
 
