@@ -223,6 +223,15 @@ impl NetworkConfig {
                 bad("a member is listed twice".into());
             }
         }
+        for r in self.routes.iter().filter(|r| !r.attrs.mpls_encap.is_empty()) {
+            let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
+            if let Some(l) = r.attrs.mpls_encap.iter().find(|l| **l > 0xF_FFFF) {
+                errors.push(ValidationErrorInfo::new(at(), format!("MPLS label {l} is past 1048575")));
+            }
+            if r.gateway.is_none() && r.dev.is_none() {
+                errors.push(ValidationErrorInfo::new(at(), "an MPLS encapsulation needs a gateway or device"));
+            }
+        }
         for r in self.routes.iter().filter(|r| !r.attrs.multipath.is_empty()) {
             let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
             let mut bad = |why: String| errors.push(ValidationErrorInfo::new(at(), why));
@@ -4046,6 +4055,9 @@ pub(crate) struct RouteAttrs {
     /// The next hops of a multipath route (`RTA_MULTIPATH`), in place of a
     /// gateway and device; in the kernel's order, which is the declared.
     pub(crate) multipath: Vec<RouteNexthop>,
+    /// The labels an MPLS encapsulation pushes (`encap mpls`), outermost
+    /// first; none for no encapsulation.
+    pub(crate) mpls_encap: Vec<u32>,
 }
 
 /// One next hop of a multipath route (#516); see [`RouteBuilder::nexthop`].
@@ -4220,6 +4232,9 @@ struct RouteRepr {
     /// The next hops of a multipath route.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     nexthops: Vec<RouteNexthop>,
+    /// The labels an MPLS encapsulation pushes, outermost first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    encap_mpls: Vec<u32>,
 }
 
 // Delegate `DeclaredRoute`'s schema to `RouteRepr` so it describes
@@ -4273,6 +4288,7 @@ impl From<DeclaredRoute> for RouteRepr {
             hoplimit: a.hoplimit,
             nhid: a.nhid,
             nexthops: a.multipath,
+            encap_mpls: a.mpls_encap,
         }
     }
 }
@@ -4350,6 +4366,7 @@ impl TryFrom<RouteRepr> for DeclaredRoute {
                 hoplimit: r.hoplimit,
                 nhid: r.nhid,
                 multipath: r.nexthops,
+                mpls_encap: r.encap_mpls,
             },
         })
     }
@@ -4359,15 +4376,13 @@ impl DeclaredRoute {
     /// Why the gateway cannot be used, if its family is not the
     /// destination's (#476). The apply dropped such a gateway and the diff
     /// still compared it, so the route was installed without one and
-    /// replaced on every apply. IPv4-via-IPv6 (RFC 5549) is `RTA_VIA`,
-    /// which nlink does not model.
+    /// replaced on every apply. An IPv4 route via an IPv6 gateway is
+    /// RFC 5549's, sent as `RTA_VIA` since 0.32 (#516); the other way round
+    /// the kernel has no use for.
     pub(crate) fn gateway_family_mismatch(&self) -> Option<String> {
         let gateway = self.gateway?;
-        (gateway.is_ipv4() != self.destination.is_ipv4()).then(|| {
-            format!(
-                "gateway {gateway} is not of the destination's family \
-                 (an IPv4 route via IPv6 needs RTA_VIA, which nlink does not model)"
-            )
+        (gateway.is_ipv4() && self.destination.is_ipv6()).then(|| {
+            format!("gateway {gateway} is IPv4, and an IPv6 route takes an IPv6 gateway")
         })
     }
 
@@ -4608,6 +4623,14 @@ impl RouteBuilder {
     /// [`NetworkConfig::nexthop`]: in place of a gateway and device.
     pub fn nhid(mut self, id: u32) -> Self {
         self.attrs.nhid = Some(id);
+        self
+    }
+
+    /// Push these MPLS labels on what the route carries, outermost first
+    /// (`ip route … encap mpls 100/200`, #516). Needs the `mpls_iptunnel`
+    /// module, and a gateway or device.
+    pub fn encap_mpls(mut self, labels: &[u32]) -> Self {
+        self.attrs.mpls_encap = labels.to_vec();
         self
     }
 
@@ -5861,10 +5884,13 @@ mod plan_228_tests {
             matches!(typo, Err(RouteParseError::InvalidGateway(ref g)) if g == "10.0.0.1x"),
             "{typo:?}"
         );
-        let v6_for_v4 = NetworkConfig::new().route("10.0.0.0/8", |r| r.via("fd00::1"));
+        // An IPv4 route via an IPv6 gateway is RFC 5549's, sent as RTA_VIA
+        // since 0.32 (#516); the other way round is refused.
+        assert!(NetworkConfig::new().route("10.0.0.0/8", |r| r.via("fd00::1").dev("eth0")).is_ok());
+        let v4_for_v6 = NetworkConfig::new().route("fd00:1::/64", |r| r.via("10.0.0.1"));
         assert!(
-            matches!(v6_for_v4, Err(RouteParseError::InvalidGateway(_))),
-            "{v6_for_v4:?}"
+            matches!(v4_for_v6, Err(RouteParseError::InvalidGateway(_))),
+            "{v4_for_v6:?}"
         );
         assert!(
             NetworkConfig::new()
@@ -6337,6 +6363,37 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("veth_peer_netns"), "{err}");
+    }
+
+    #[test]
+    fn mpls_encap_and_via_routes_roundtrip_and_validate() {
+        let cfg = NetworkConfig::new()
+            .route("10.1.0.0/16", |r| r.via("10.0.0.2").dev("eth0").encap_mpls(&[100, 200]))
+            .unwrap()
+            .route("10.2.0.0/16", |r| r.via("fd00::2").dev("eth0"))
+            .unwrap();
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""encap-mpls":[100,200]"#), "{json}");
+        assert!(json.contains(r#""gateway":"fd00::2""#), "{json}");
+        for (cfg, says) in [
+            (
+                NetworkConfig::new()
+                    .route("10.1.0.0/16", |r| r.via("10.0.0.2").encap_mpls(&[1 << 20]))
+                    .unwrap(),
+                "past 1048575",
+            ),
+            (
+                NetworkConfig::new()
+                    .route("10.1.0.0/16", |r| r.encap_mpls(&[100]))
+                    .unwrap(),
+                "needs a gateway or device",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
     }
 
     #[test]
@@ -6975,13 +7032,18 @@ mod serde_roundtrip_tests {
     fn json_gateways_and_hash_policies_are_checked() {
         // `from_json_str` validates, so it is refused at parse time.
         let err = NetworkConfig::from_json_str(
-            r#"{ "routes": [ { "destination": "10.1.0.0/16", "gateway": "fd00::1" } ] }"#,
+            r#"{ "routes": [ { "destination": "fd00:1::/64", "gateway": "10.0.0.1" } ] }"#,
         )
-        .expect_err("v6 gateway for a v4 route");
+        .expect_err("v4 gateway for a v6 route");
         assert!(
-            err.to_string().contains("not of the destination's family"),
+            err.to_string().contains("an IPv6 route takes an IPv6 gateway"),
             "{err}"
         );
+        // RFC 5549: an IPv4 route via an IPv6 gateway (#516).
+        NetworkConfig::from_json_str(
+            r#"{ "routes": [ { "destination": "10.1.0.0/16", "gateway": "fd00::1", "dev": "eth0" } ] }"#,
+        )
+        .expect("v6 gateway for a v4 route");
 
         let bond = NetworkConfig::new().link("bond0", |l| {
             l.bond().xmit_hash_policy(BondXmitHashPolicy::Layer34)

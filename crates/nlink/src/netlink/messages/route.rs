@@ -24,7 +24,17 @@ mod attr_ids {
     /// Plan 202 — multipath nexthop chain (`RTA_MULTIPATH`).
     pub const RTA_MULTIPATH: u16 = 9;
     pub const RTA_TABLE: u16 = 15;
+    /// A gateway of another family (`RTA_VIA`, RFC 5549): `struct rtvia`.
+    pub const RTA_VIA: u16 = 18;
     pub const RTA_PREF: u16 = 20;
+    /// The lightweight tunnel encapsulation's type (`LWTUNNEL_ENCAP_*`).
+    pub const RTA_ENCAP_TYPE: u16 = 21;
+    /// The encapsulation, a nest of its type's attributes.
+    pub const RTA_ENCAP: u16 = 22;
+    /// `LWTUNNEL_ENCAP_MPLS`.
+    pub const LWTUNNEL_ENCAP_MPLS: u16 = 1;
+    /// `MPLS_IPTUNNEL_DST`: the label stack, one big-endian entry each.
+    pub const MPLS_IPTUNNEL_DST: u16 = 1;
     pub const RTA_EXPIRES: u16 = 23;
     /// The nexthop object a route uses (`RTA_NH_ID`, kernel 5.3+).
     pub const RTA_NH_ID: u16 = 30;
@@ -74,6 +84,13 @@ pub struct RouteMessage {
     /// The route's metrics (`RTA_METRICS`): path MTU, advertised MSS, …
     /// `None` when the route has none (#516).
     pub(crate) metrics: Option<crate::netlink::route::RouteMetrics>,
+    /// A gateway of the other family (`RTA_VIA`): an IPv4 route via an
+    /// IPv6 gateway, RFC 5549 (#516).
+    pub(crate) via: Option<IpAddr>,
+    /// The encapsulation's type (`RTA_ENCAP_TYPE`, `LWTUNNEL_ENCAP_*`).
+    pub(crate) encap_type: Option<u16>,
+    /// The labels an MPLS encapsulation pushes, outermost first (#516).
+    pub(crate) mpls_labels: Option<Vec<u32>>,
 }
 
 /// One nexthop parsed from an `RTA_MULTIPATH` chain. Plan 202.
@@ -224,6 +241,24 @@ impl RouteMessage {
     /// can be `None` for a route that does go out of an interface.
     pub fn nh_id(&self) -> Option<u32> {
         self.nh_id
+    }
+
+    /// A gateway of the other family (`RTA_VIA`): an IPv4 route via an
+    /// IPv6 gateway, RFC 5549 (#516). [`gateway`](Self::gateway) is the
+    /// route's own family's.
+    pub fn via(&self) -> Option<&IpAddr> {
+        self.via.as_ref()
+    }
+
+    /// The lightweight tunnel encapsulation's type (`RTA_ENCAP_TYPE`,
+    /// `LWTUNNEL_ENCAP_*`), when the route has one.
+    pub fn encap_type(&self) -> Option<u16> {
+        self.encap_type
+    }
+
+    /// The labels an MPLS encapsulation pushes, outermost first (#516).
+    pub fn mpls_encap_labels(&self) -> Option<&[u32]> {
+        self.mpls_labels.as_deref()
     }
 
     // =========================================================================
@@ -399,6 +434,8 @@ impl FromNetlink for RouteMessage {
             ..Default::default()
         };
 
+        let mut encap: Option<&[u8]> = None;
+
         // Parse attributes
         while !input.is_empty() && input.len() >= 4 {
             // 0.19 N9 — nla_len/nla_type are host-order, not LE.
@@ -465,6 +502,25 @@ impl FromNetlink for RouteMessage {
                 attr_ids::RTA_EXPIRES if attr_data.len() >= 4 => {
                     msg.expires = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
+                attr_ids::RTA_VIA if attr_data.len() >= 2 => {
+                    let family = u16::from_ne_bytes([attr_data[0], attr_data[1]]);
+                    let addr = &attr_data[2..];
+                    msg.via = match i32::from(family) {
+                        libc::AF_INET => <[u8; 4]>::try_from(addr.get(..4).unwrap_or_default())
+                            .ok()
+                            .map(IpAddr::from),
+                        libc::AF_INET6 => <[u8; 16]>::try_from(addr.get(..16).unwrap_or_default())
+                            .ok()
+                            .map(IpAddr::from),
+                        _ => None,
+                    };
+                }
+                attr_ids::RTA_ENCAP_TYPE if attr_data.len() >= 2 => {
+                    msg.encap_type = Some(u16::from_ne_bytes([attr_data[0], attr_data[1]]));
+                }
+                // The kernel puts RTA_ENCAP before RTA_ENCAP_TYPE, so the
+                // nest is kept and read once the type is known.
+                attr_ids::RTA_ENCAP => encap = Some(attr_data),
                 attr_ids::RTA_NH_ID if attr_data.len() >= 4 => {
                     msg.nh_id = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
@@ -486,8 +542,35 @@ impl FromNetlink for RouteMessage {
             }
         }
 
+        // An MPLS encapsulation's label stack (#516).
+        if msg.encap_type == Some(attr_ids::LWTUNNEL_ENCAP_MPLS)
+            && let Some(nest) = encap
+        {
+            msg.mpls_labels = Some(mpls_labels(nest));
+        }
+
         Ok(msg)
     }
+}
+
+/// The labels in an MPLS encapsulation nest (`MPLS_IPTUNNEL_DST`), each
+/// entry's top 20 bits, outermost first.
+fn mpls_labels(nest: &[u8]) -> Vec<u32> {
+    let mut labels = Vec::new();
+    let mut rest = nest;
+    while rest.len() >= 4 {
+        let len = usize::from(u16::from_ne_bytes([rest[0], rest[1]]));
+        let kind = u16::from_ne_bytes([rest[2], rest[3]]);
+        if len < 4 || len > rest.len() {
+            break;
+        }
+        if kind == attr_ids::MPLS_IPTUNNEL_DST {
+            let (entries, _) = rest[4..len].as_chunks::<4>();
+            labels.extend(entries.iter().map(|e| u32::from_be_bytes(*e) >> 12));
+        }
+        rest = &rest[((len + 3) & !3).min(rest.len())..];
+    }
+    labels
 }
 
 /// Walk an `RTA_MULTIPATH` payload (`data`) and parse each
@@ -590,6 +673,8 @@ impl ToNetlink for RouteMessage {
             + u32_attr(self.expires)
             + self.multipath.as_deref().map_or(0, multipath_attr_size)
             + u32_attr(self.nh_id)
+            + self.via.as_ref().map_or(0, |v| nla_size(2 + ip_len(v)))
+            + self.mpls_labels.as_ref().map_or(0, |l| nla_size(nla_size(4 * l.len())) + nla_size(2))
     }
 
     fn write_to(&self, buf: &mut Vec<u8>) -> Result<usize> {
@@ -638,6 +723,30 @@ impl ToNetlink for RouteMessage {
         if let Some(nh_id) = self.nh_id {
             write_attr_u32(buf, attr_ids::RTA_NH_ID, nh_id);
         }
+        if let Some(via) = &self.via {
+            let family = match via {
+                IpAddr::V4(_) => libc::AF_INET as u16,
+                IpAddr::V6(_) => libc::AF_INET6 as u16,
+            };
+            let mut data = family.to_ne_bytes().to_vec();
+            match via {
+                IpAddr::V4(a) => data.extend_from_slice(&a.octets()),
+                IpAddr::V6(a) => data.extend_from_slice(&a.octets()),
+            }
+            write_attr_raw(buf, attr_ids::RTA_VIA, &data);
+        }
+        if let Some(labels) = &self.mpls_labels {
+            let last = labels.len().saturating_sub(1);
+            let entries: Vec<u8> = labels
+                .iter()
+                .enumerate()
+                .flat_map(|(i, l)| (l << 12 | u32::from(i == last) << 8).to_be_bytes())
+                .collect();
+            let mut nest = Vec::new();
+            write_attr_raw(&mut nest, attr_ids::MPLS_IPTUNNEL_DST, &entries);
+            write_attr_raw(buf, attr_ids::RTA_ENCAP, &nest);
+            write_attr_raw(buf, attr_ids::RTA_ENCAP_TYPE, &attr_ids::LWTUNNEL_ENCAP_MPLS.to_ne_bytes());
+        }
 
         Ok(buf.len() - start)
     }
@@ -665,6 +774,22 @@ fn multipath_attr_size(nexthops: &[ParsedNextHop]) -> usize {
         .map(|nh| (8 + nh.gateway.as_ref().map_or(0, ip_attr_size) + 3) & !3)
         .sum();
     (4 + body + 3) & !3
+}
+
+fn ip_len(addr: &IpAddr) -> usize {
+    match addr {
+        IpAddr::V4(_) => 4,
+        IpAddr::V6(_) => 16,
+    }
+}
+
+/// An attribute with `data` as its payload, padded to 4 bytes.
+fn write_attr_raw(buf: &mut Vec<u8>, attr_type: u16, data: &[u8]) {
+    let len = 4 + data.len();
+    buf.extend_from_slice(&(len as u16).to_ne_bytes());
+    buf.extend_from_slice(&attr_type.to_ne_bytes());
+    buf.extend_from_slice(data);
+    buf.resize(buf.len() + (((len + 3) & !3) - len), 0);
 }
 
 fn write_attr_u32(buf: &mut Vec<u8>, attr_type: u16, value: u32) {
@@ -968,7 +1093,34 @@ mod tests {
         assert_eq!(parsed.priority, Some(100));
     }
 
+    /// An IPv4 route via an IPv6 gateway (`RTA_VIA`) and an MPLS
+    /// encapsulation's labels come back as written (#516); the kernel puts
+    /// `RTA_ENCAP` before `RTA_ENCAP_TYPE`, as `write_to` does.
+    #[test]
+    fn via_and_mpls_encap_roundtrip() {
+        use std::net::Ipv6Addr;
+        let mut msg = RouteMessageBuilder::new()
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 8)
+            .oif(7)
+            .build();
+        msg.via = Some(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)));
+        msg.encap_type = Some(attr_ids::LWTUNNEL_ENCAP_MPLS);
+        msg.mpls_labels = Some(vec![100, 200, 0xF_FFFF]);
+        let mut buf = Vec::new();
+        let written = msg.write_to(&mut buf).unwrap();
+        assert_eq!(msg.netlink_len(), written);
+        let parsed = RouteMessage::parse(&mut buf.as_slice()).unwrap();
+        assert_eq!(parsed.via(), msg.via.as_ref());
+        assert_eq!(parsed.gateway(), None);
+        assert_eq!(parsed.encap_type(), Some(attr_ids::LWTUNNEL_ENCAP_MPLS));
+        assert_eq!(parsed.mpls_encap_labels(), Some(&[100, 200, 0xF_FFFF][..]));
+        // The bottom entry has its S bit, and no TTL.
+        let entries = &buf[buf.len() - 8 - 3 * 4..buf.len() - 8];
+        assert_eq!(&entries[8..], &(0xF_FFFFu32 << 12 | 1 << 8).to_be_bytes());
+    }
+
     /// `netlink_len` is what `write_to` writes, for every attribute and
+    /// family mix.    /// `netlink_len` is what `write_to` writes, for every attribute and
     /// family mix. It left out five attributes, so `to_bytes` sized its
     /// buffer short for any route carrying them (#439).
     #[test]

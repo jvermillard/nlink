@@ -1788,9 +1788,11 @@ async fn add_route(
         IpAddr::V4(dst) => {
             let mut config = Ipv4Route::from_addr(dst, route.prefix_len).protocol(protocol);
 
-            // Set gateway
-            if let Some(IpAddr::V4(gw)) = route.gateway {
-                config = config.gateway(gw);
+            // Set gateway: an IPv6 one is RTA_VIA (RFC 5549, #516)
+            match route.gateway {
+                Some(IpAddr::V4(gw)) => config = config.gateway(gw),
+                Some(IpAddr::V6(gw)) => config = config.gateway_v6(gw),
+                None => {}
             }
 
             // Set device
@@ -1827,6 +1829,11 @@ async fn add_route(
             }
             if !route.attrs.multipath.is_empty() {
                 config = config.multipath(multipath_hops(&route.attrs.multipath));
+            }
+            if !route.attrs.mpls_encap.is_empty() {
+                config = config.mpls_encap(
+                    crate::netlink::mpls::MplsEncap::new().labels(&route.attrs.mpls_encap),
+                );
             }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
@@ -1874,6 +1881,11 @@ async fn add_route(
             }
             if !route.attrs.multipath.is_empty() {
                 config = config.multipath(multipath_hops(&route.attrs.multipath));
+            }
+            if !route.attrs.mpls_encap.is_empty() {
+                config = config.mpls_encap(
+                    crate::netlink::mpls::MplsEncap::new().labels(&route.attrs.mpls_encap),
+                );
             }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to

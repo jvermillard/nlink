@@ -472,6 +472,8 @@ pub struct Ipv4Route {
     prefix_len: u8,
     /// Gateway address
     gateway: Option<Ipv4Addr>,
+    /// An IPv6 gateway (`RTA_VIA`, RFC 5549)
+    via6: Option<Ipv6Addr>,
     /// Preferred source address
     prefsrc: Option<Ipv4Addr>,
     /// Output interface reference
@@ -524,6 +526,7 @@ impl Ipv4Route {
             destination: dest,
             prefix_len,
             gateway: None,
+            via6: None,
             prefsrc: None,
             dev: None,
             route_type: RouteType::Unicast,
@@ -547,6 +550,7 @@ impl Ipv4Route {
             destination,
             prefix_len,
             gateway: None,
+            via6: None,
             prefsrc: None,
             dev: None,
             route_type: RouteType::Unicast,
@@ -567,6 +571,16 @@ impl Ipv4Route {
     /// Set the gateway address.
     pub fn gateway(mut self, gateway: Ipv4Addr) -> Self {
         self.gateway = Some(gateway);
+        self.via6 = None;
+        self.multipath = None;
+        self
+    }
+
+    /// Route via an IPv6 gateway, as `ip route add … via inet6 <gw>` does
+    /// (RFC 5549; `RTA_VIA`, kernel 5.2), in place of an IPv4 one (#516).
+    pub fn gateway_v6(mut self, gateway: Ipv6Addr) -> Self {
+        self.via6 = Some(gateway);
+        self.gateway = None;
         self.multipath = None;
         self
     }
@@ -755,7 +769,11 @@ impl Ipv4Route {
             RouteType::Local | RouteType::Nat => RouteScope::Host,
             RouteType::Broadcast | RouteType::Multicast | RouteType::Anycast => RouteScope::Link,
             RouteType::Unicast | RouteType::Unspec => {
-                if self.gateway.is_some() || self.multipath.is_some() || self.nexthop_id.is_some() {
+                if self.gateway.is_some()
+                    || self.via6.is_some()
+                    || self.multipath.is_some()
+                    || self.nexthop_id.is_some()
+                {
                     RouteScope::Universe
                 } else {
                     RouteScope::Link
@@ -810,6 +828,12 @@ impl RouteConfig for Ipv4Route {
         // RTA_GATEWAY
         if let Some(gw) = self.gateway {
             builder.append_attr(RtaAttr::Gateway as u16, &gw.octets());
+        }
+        // RTA_VIA: an IPv6 gateway, `struct rtvia` (#516)
+        if let Some(gw) = self.via6 {
+            let mut via = (libc::AF_INET6 as u16).to_ne_bytes().to_vec();
+            via.extend_from_slice(&gw.octets());
+            builder.append_attr(RtaAttr::Via as u16, &via);
         }
 
         // RTA_PREFSRC
@@ -944,6 +968,12 @@ impl RouteConfig for Ipv4Route {
         // RTA_GATEWAY (kernel matches strictly)
         if let Some(gw) = self.gateway {
             builder.append_attr(RtaAttr::Gateway as u16, &gw.octets());
+        }
+        // RTA_VIA: an IPv6 gateway, `struct rtvia` (#516)
+        if let Some(gw) = self.via6 {
+            let mut via = (libc::AF_INET6 as u16).to_ne_bytes().to_vec();
+            via.extend_from_slice(&gw.octets());
+            builder.append_attr(RtaAttr::Via as u16, &via);
         }
 
         // RTA_PREFSRC
