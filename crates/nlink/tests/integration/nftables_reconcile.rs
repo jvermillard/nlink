@@ -2035,3 +2035,99 @@ async fn gap_deltas_report_a_table_deleted_during_an_overflow() -> nlink::Result
     })
     .await
 }
+
+/// What a diff would do, without the kernel's handles: the same changes,
+/// however the rules happen to be numbered.
+fn diff_shape(d: &nlink::netlink::nftables::config::NftablesDiff) -> Vec<String> {
+    let mut shape = Vec::new();
+    shape.extend(d.tables_to_add.iter().map(|t| format!("+table {}", t.name())));
+    shape.extend(d.tables_to_delete.iter().map(|(f, n)| format!("-table {f} {n}")));
+    shape.extend(d.chains_to_add.iter().map(|(t, _, c)| format!("+chain {t} {}", c.name())));
+    shape.extend(d.chains_to_modify.iter().map(|(t, _, c)| format!("~chain {t} {}", c.name())));
+    shape.extend(d.chains_to_delete.iter().map(|(t, _, c)| format!("-chain {t} {c}")));
+    shape.extend(d.rules_to_add.iter().map(|a| format!("+rule {:?}", a.rule.handle_key())));
+    shape.extend(d.rules_to_delete.iter().map(|(t, _, c, _)| format!("-rule {t} {c}")));
+    shape.extend(d.rules_to_replace.iter().map(|r| format!("~rule {:?}", r.4.handle_key())));
+    shape.extend(d.rules_to_move.iter().map(|m| format!(">rule {:?}", m.rule.handle_key())));
+    shape.extend(d.sets_to_add.iter().map(|(t, _, s)| format!("+set {t} {}", s.name())));
+    shape.extend(d.sets_to_delete.iter().map(|(t, _, s)| format!("-set {t} {s}")));
+    shape.extend(d.sets_to_update.iter().map(|(t, _, s)| format!("~set {t} {}", s.name())));
+    shape.extend(d.set_elements_to_add.iter().map(|c| format!("+{} elements {}", c.elements.len(), c.set.name())));
+    shape.extend(d.set_elements_to_remove.iter().map(|c| format!("-{} elements {}", c.elements.len(), c.set.name())));
+    shape.extend(d.objects_to_add.iter().map(|(t, _, o)| format!("+object {t} {}", o.name())));
+    shape.extend(d.objects_to_update.iter().map(|(t, _, o)| format!("~object {t} {}", o.name())));
+    shape.extend(d.objects_to_delete.iter().map(|(t, _, o, _)| format!("-object {t} {o}")));
+    shape.sort();
+    shape
+}
+
+/// #527: the diff runs offline. With `before` applied, what the kernel
+/// diff says `after` changes is what `after.diff_against(&before)` says
+/// without the kernel — rule edits, removals and inserts, a policy, set
+/// elements both ways, an object's quota, a set and a chain gone — and
+/// each config diffs empty against its own simulated echo as it does
+/// against the kernel's.
+#[tokio::test]
+async fn the_offline_diff_is_the_kernel_diff() -> nlink::Result<()> {
+    use nlink::netlink::nftables::config::RulesetSnapshot;
+    use nlink::netlink::nftables::object::ObjectConfig;
+    use nlink::netlink::nftables::{QuotaExpr, SetElement};
+    use std::net::Ipv4Addr;
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_quota");
+
+    let ip = |n| Ipv4Addr::new(10, 0, 0, n);
+    let config = |v2: bool| {
+        NftablesConfig::new().table("t", Family::Inet, move |t| {
+            let t = t
+                .chain("input", move |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                        .policy(if v2 { Policy::Drop } else { Policy::Accept })
+                })
+                .set("hosts", move |s| {
+                    let s = s.key_type(SetKeyType::Ipv4Addr).ipv4(ip(1)).ipv4(ip(2));
+                    if v2 { s.ipv4(ip(3)) } else { s.ipv4(ip(4)) }
+                })
+                .object(
+                    "budget",
+                    ObjectConfig::Quota(QuotaExpr::new(if v2 { 2_000_000 } else { 1_000_000 })),
+                )
+                .rule_keyed("input", "ssh", move |r| {
+                    r.match_tcp_dport(if v2 { 2222 } else { 22 }).accept()
+                })
+                .rule_keyed("input", "hosts", |r| r.match_saddr_in_set("hosts").accept());
+            if v2 {
+                t.rule_keyed("input", "dns", |r| r.match_udp_dport(53).accept())
+            } else {
+                t.chain("old", |c| c)
+                    .set("gone", |s| s.key_type(SetKeyType::InetService).element(SetElement::port(80)))
+                    .rule_keyed("input", "web", |r| r.match_tcp_dport(80).accept())
+            }
+        })
+    };
+    let (before, after) = (config(false), config(true));
+
+    let ns = TestNamespace::new("nft-offline")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        before.diff(&conn).await?.apply(&conn).await?;
+        let options = NftDiffOptions::default();
+        let online = after.diff(&conn).await?;
+        let offline = after.diff_against(&before, &options)?;
+        assert_eq!(diff_shape(&online), diff_shape(&offline), "online:\n{online}\noffline:\n{offline}");
+        assert!(online.change_count() >= 9, "the test should change plenty: {online}");
+
+        for config in [&before, &after] {
+            let echo = config.diff_snapshot(&RulesetSnapshot::from_config(config), &options)?;
+            assert!(echo.is_empty(), "{echo}");
+        }
+        // The kernel's own snapshot, read once, diffs as diff() does.
+        let snapshot = after.snapshot(&conn).await?;
+        assert!(snapshot.generation.is_some());
+        assert_eq!(diff_shape(&after.diff_snapshot(&snapshot, &options)?), diff_shape(&online));
+        Ok(())
+    })
+    .await
+}

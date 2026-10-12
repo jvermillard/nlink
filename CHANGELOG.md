@@ -1958,6 +1958,40 @@ All notable changes to this project will be documented in this file.
     - Unit tests decode a packet laid out as the kernel builds one, and
       check the bind's `res_id`.
 
+- **The nftables diff runs offline: `RulesetSnapshot` and a pure diff
+  (#527, first part).**
+  - **Why.** `NftablesConfig::diff` read the kernel as it went. nlink-lab
+    could not diff an old topology against a new one without root, and
+    could not unit-test a planner built on the diff.
+  - **The snapshot.** The reads are now a value, `RulesetSnapshot`:
+    - every table, chain and flowtable;
+    - the objects, sets and rules of the declared tables;
+    - the elements of the declared sets.
+  - **The new calls.**
+    - `NftablesConfig::snapshot(conn)` reads one between two reads of the
+      generation, and reads again if a commit landed between them.
+    - `diff_snapshot(&snapshot, options)` is the diff as a pure function
+      of it. `diff()` is now `snapshot` followed by `diff_snapshot`.
+    - `RulesetSnapshot::from_config(&cfg)` simulates the state applying
+      `cfg` leaves, as the kernel would report it.
+    - `cfg.diff_against(&previous, options)` therefore says what going
+      from one config to another would change, with no kernel and no
+      generation to hold.
+  - **Unread elements.** A snapshot that did not read a set's elements
+    makes the diff fail, rather than taking the set for empty.
+  - **Tests.**
+    - **Online equals offline.** A root test applies one config, then
+      checks that the kernel diff of a second config has the same shape as
+      the second config's `diff_against` the first. The second config edits,
+      removes and inserts rules, changes a policy, moves set elements both
+      ways, changes a quota, and drops a set and a chain.
+    - **Round trips.** Each config diffs empty against its own simulated
+      echo. The kernel's snapshot diffs as `diff()` does.
+    - **Unit.** The same checks run with no kernel, plus the unread-elements
+      error.
+    - **Red run.** With the rule keys left out of the simulation, all of
+      them fail.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

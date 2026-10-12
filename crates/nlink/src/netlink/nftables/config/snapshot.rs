@@ -1,0 +1,391 @@
+//! What the declarative diff reads, as a value (#527).
+//!
+//! [`NftablesConfig::diff`] used to read the kernel as it went. The reads
+//! are now a [`RulesetSnapshot`] — taken from the kernel, between two reads
+//! of the ruleset generation, or simulated from a config — and
+//! [`NftablesConfig::diff_snapshot`] is a pure function of it. So a diff
+//! runs without the kernel: [`NftablesConfig::diff_against`] says what
+//! going from one config to another would change, without root and without
+//! a namespace, and a planner built on it can be unit-tested.
+
+use std::collections::HashMap;
+
+use super::super::object::{ObjectConfig, ObjectInfo, ObjectState};
+use super::super::types::{
+    ChainInfo, Family, Flowtable, RuleInfo, SetElement, SetFlags, SetInfo, Table,
+};
+use super::types::{DeclaredSet, NftablesConfig, SetElementMode};
+use crate::netlink::error::{Error, Result};
+use crate::netlink::{Connection, Nftables};
+
+/// The kernel's nftables state as the declarative diff sees it (#527):
+/// every table, chain and flowtable, and the objects, sets, set elements
+/// and rules of the tables a config declares.
+///
+/// Take one from the kernel with [`NftablesConfig::snapshot`], or simulate
+/// the state a config would leave with [`from_config`](Self::from_config),
+/// and diff a config against it with [`NftablesConfig::diff_snapshot`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct RulesetSnapshot {
+    /// The ruleset generation it was read at; `None` for one simulated
+    /// from a config. A diff from it commits only at that generation.
+    pub generation: Option<u32>,
+    /// Every table.
+    pub tables: Vec<Table>,
+    /// Every chain.
+    pub chains: Vec<ChainInfo>,
+    /// Every flowtable.
+    pub flowtables: Vec<Flowtable>,
+    /// The objects of the tables read.
+    pub objects: Vec<ObjectInfo>,
+    /// The sets of the tables read, anonymous ones included.
+    pub sets: Vec<SetInfo>,
+    /// Elements by `(family, table, set)`, interval ranges paired as
+    /// [`list_set_elements`](Connection::list_set_elements) pairs them. A
+    /// set whose elements were not read is absent.
+    pub elements: HashMap<(Family, String, String), Vec<SetElement>>,
+    /// The rules of the tables read, in chain order.
+    pub rules: Vec<RuleInfo>,
+}
+
+impl RulesetSnapshot {
+    pub(crate) fn objects_in(&self, table: &str, family: Family) -> Vec<ObjectInfo> {
+        self.objects
+            .iter()
+            .filter(|o| o.table == table && o.family == family)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn sets_in(&self, table: &str, family: Family) -> Vec<SetInfo> {
+        self.sets
+            .iter()
+            .filter(|s| s.table == table && s.family == family)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn rules_in(&self, table: &str, family: Family) -> Vec<RuleInfo> {
+        self.rules
+            .iter()
+            .filter(|r| r.table == table && r.family == family)
+            .cloned()
+            .collect()
+    }
+
+    /// The elements of a set the diff needs; an error when the snapshot
+    /// did not read them, rather than a diff that takes the set for empty.
+    pub(crate) fn elements_of(&self, family: Family, table: &str, set: &str) -> Result<Vec<SetElement>> {
+        self.elements
+            .get(&(family, table.to_string(), set.to_string()))
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidMessage(format!(
+                    "nftables snapshot: the elements of set {family} {table} {set} were not read"
+                ))
+            })
+    }
+
+    /// The state applying `config` to an empty ruleset leaves, as the
+    /// kernel would report it (#527): its tables, chains, flowtables,
+    /// objects with zeroed counters, sets with their declared elements
+    /// (ranges merged where an interval set merges them), and rules
+    /// carrying their keys, in declared order, with handles counted from 1.
+    ///
+    /// Diffing another config against it is what applying that config
+    /// after this one would change: see
+    /// [`NftablesConfig::diff_against`].
+    pub fn from_config(config: &NftablesConfig) -> Self {
+        let mut snapshot = Self::default();
+        let mut handle = 0u64;
+        let mut next = || {
+            handle += 1;
+            handle
+        };
+        for table in &config.tables {
+            let (family, name) = (table.family(), table.name().to_string());
+            snapshot.tables.push(Table {
+                name: name.clone(),
+                family,
+                flags: table.flags(),
+                use_count: 0,
+                handle: next(),
+                comment: table.comment().map(str::to_string),
+            });
+            for chain in table.chains() {
+                let base = chain.hook().is_some();
+                snapshot.chains.push(ChainInfo {
+                    table: name.clone(),
+                    name: chain.name().to_string(),
+                    family,
+                    hook: chain.hook().map(|h| h.number(family)),
+                    priority: chain.priority().map(|p| p.to_i32()).or(base.then_some(0)),
+                    chain_type: chain.chain_type(),
+                    device: chain.device().map(str::to_string),
+                    devices: chain.device().map(str::to_string).into_iter().collect(),
+                    // A base chain without a policy accepts.
+                    policy: chain
+                        .policy()
+                        .map(|p| p.to_u32())
+                        .or(base.then(|| super::super::types::Policy::Accept.to_u32())),
+                    handle: next(),
+                    comment: chain.comment().map(str::to_string),
+                });
+            }
+            for flowtable in table.flowtables() {
+                snapshot.flowtables.push(Flowtable {
+                    family,
+                    table: name.clone(),
+                    name: flowtable.name().to_string(),
+                    devs: flowtable.devs().to_vec(),
+                    priority: flowtable.priority(),
+                    flags: flowtable.flags(),
+                    use_count: 0,
+                    handle: next(),
+                });
+            }
+            for object in table.objects() {
+                snapshot.objects.push(ObjectInfo {
+                    table: name.clone(),
+                    name: object.name().to_string(),
+                    family,
+                    handle: next(),
+                    use_count: 0,
+                    state: match object.config() {
+                        ObjectConfig::Counter => ObjectState::Counter { packets: 0, bytes: 0 },
+                        ObjectConfig::Quota(q) => ObjectState::Quota {
+                            bytes: q.bytes,
+                            consumed: 0,
+                            over: q.over,
+                            depleted: false,
+                        },
+                        ObjectConfig::Limit(l) => ObjectState::Limit(l.clone()),
+                    },
+                    comment: None,
+                });
+            }
+            for set in table.sets() {
+                snapshot.sets.push(set_info(set, &name, family, next()));
+                snapshot
+                    .elements
+                    .insert((family, name.clone(), set.name().to_string()), set.wire_elements());
+            }
+            for rule in super::rules::effective_rules(table.rules()) {
+                let key = rule.handle_key().map(str::to_string);
+                let comment = rule.body().comment.clone();
+                snapshot.rules.push(RuleInfo {
+                    table: name.clone(),
+                    chain: rule.chain().to_string(),
+                    family,
+                    handle: next(),
+                    position: None,
+                    comment_text: super::super::userdata::rule_comment_text(key.as_deref(), comment.as_deref()),
+                    userdata_raw: super::super::userdata::encode_rule_userdata(key.as_deref(), comment.as_deref())
+                        .ok()
+                        .flatten(),
+                    key,
+                    expression_bytes: super::diff::lower_to_expression_bytes(rule.body()),
+                });
+            }
+        }
+        snapshot
+    }
+}
+
+/// A declared set as the kernel reports it.
+fn set_info(set: &DeclaredSet, table: &str, family: Family, handle: u64) -> SetInfo {
+    use super::super::SetDataType;
+    let data_type = set.data_type();
+    SetInfo {
+        table: table.to_string(),
+        name: set.name().to_string(),
+        family,
+        flags: set.wire_flags(),
+        key_type: set.key_type().type_id(),
+        key_len: set.key_type().len(),
+        handle,
+        size: set.size(),
+        timeout: set.timeout(),
+        gc_interval: set.gc_interval(),
+        data_type: data_type.and_then(|d| d.type_id()),
+        data_len: data_type.and_then(|d| d.len()),
+        object_type: data_type.and_then(|d| match d {
+            SetDataType::Object(t) => Some(*t as u32),
+            _ => None,
+        }),
+        comment: set.comment.clone(),
+    }
+}
+
+impl NftablesConfig {
+    /// Read what [`diff_snapshot`](Self::diff_snapshot) needs from the
+    /// kernel (#527): every table, chain and flowtable, and the objects,
+    /// sets and rules of the tables this config declares — with the
+    /// elements of its declared sets, except where nothing is declared to
+    /// add or remove. Taken between two reads of the ruleset generation,
+    /// and again if a commit landed in between.
+    pub async fn snapshot(&self, conn: &Connection<Nftables>) -> Result<RulesetSnapshot> {
+        const ATTEMPTS: usize = 3;
+        let mut attempt = 0;
+        loop {
+            let before = conn.generation().await?;
+            let mut snapshot = self.read(conn).await?;
+            snapshot.generation = Some(before);
+            attempt += 1;
+            if attempt == ATTEMPTS || conn.generation().await? == before {
+                return Ok(snapshot);
+            }
+            tracing::debug!(attempt, "nftables snapshot: the ruleset changed under it; again");
+        }
+    }
+
+    async fn read(&self, conn: &Connection<Nftables>) -> Result<RulesetSnapshot> {
+        let mut snapshot = RulesetSnapshot {
+            tables: conn.list_tables().await?,
+            chains: conn.list_chains().await?,
+            flowtables: conn.list_flowtables().await?,
+            ..Default::default()
+        };
+        for declared in &self.tables {
+            let (family, name) = (declared.family(), declared.name());
+            if !snapshot.tables.iter().any(|t| t.family == family && t.name == name) {
+                continue;
+            }
+            snapshot.objects.extend(conn.list_objects_in(name, family).await?);
+            let sets = conn.list_sets_in(name, family).await?;
+            for set in declared.sets() {
+                let exists = sets
+                    .iter()
+                    .any(|s| s.name == set.name() && !s.flags.contains(SetFlags::ANONYMOUS));
+                // What the packet path put in a set nothing is declared
+                // into or removed from is not the diff's to read.
+                let object_map = matches!(set.data_type(), Some(super::super::SetDataType::Object(_)));
+                let needed = !(set.element_mode() == SetElementMode::Ensure
+                    && set.elements().is_empty()
+                    && !object_map);
+                if exists && needed {
+                    let elements = conn.list_set_elements(name, set.name(), family).await?;
+                    snapshot
+                        .elements
+                        .insert((family, name.to_string(), set.name().to_string()), elements);
+                }
+            }
+            snapshot.sets.extend(sets);
+            snapshot.rules.extend(conn.list_rules(name, family).await?);
+        }
+        Ok(snapshot)
+    }
+
+    /// What going from `previous` to this config would change (#527),
+    /// without the kernel: the diff against
+    /// [`RulesetSnapshot::from_config(previous)`](RulesetSnapshot::from_config).
+    /// It assumes the kernel holds exactly what `previous` declares — no
+    /// foreign tables, no elements the packet path added — and its
+    /// [`apply`](super::NftablesDiff::apply) does not check the
+    /// generation.
+    pub fn diff_against(&self, previous: &NftablesConfig, options: &super::NftDiffOptions) -> Result<super::NftablesDiff> {
+        self.diff_snapshot(&RulesetSnapshot::from_config(previous), options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+    use crate::netlink::nftables::config::NftDiffOptions;
+    use crate::netlink::nftables::expr::{LimitExpr, QuotaExpr};
+    use crate::netlink::nftables::types::{
+        ChainName, ChainType, Hook, LimitUnit, Policy, Priority, SetKeyType, Verdict,
+    };
+
+    fn ip(last: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, last)
+    }
+
+    /// A config with one of everything the diff compares.
+    fn lab(ssh_port: u16, with_hosts: bool) -> NftablesConfig {
+        NftablesConfig::new()
+            .table("f", Family::Inet, |t| {
+                let t = t
+                    .comment("lab")
+                    .chain("input", |c| {
+                        c.hook(Hook::Input)
+                            .priority(Priority::Filter)
+                            .chain_type(ChainType::Filter)
+                            .policy(Policy::Drop)
+                    })
+                    .chain("sub", |c| c)
+                    .set("nets", |s| {
+                        s.key_type(SetKeyType::Ipv4Addr)
+                            .interval()
+                            .element(SetElement::ipv4_range(ip(1), ip(9)))
+                            .element(SetElement::ipv4_range(ip(10), ip(20)))
+                    })
+                    .set("verdicts", |s| {
+                        s.key_type(SetKeyType::InetService)
+                            .vmap()
+                            .element(SetElement::port(22).verdict(Verdict::Accept))
+                    })
+                    .object("hits", ObjectConfig::Counter)
+                    .object("budget", ObjectConfig::Quota(QuotaExpr::new(1_000_000)))
+                    .object("pace", ObjectConfig::Limit(LimitExpr::packets(10, LimitUnit::Second)))
+                    .rule_keyed("input", "ssh", move |r| r.match_tcp_dport(ssh_port).accept())
+                    .rule("input", |r| r.match_saddr_in_set("nets").counter().accept())
+                    .rule_keyed("input", "dns", |r| {
+                        r.match_udp_dport(53).jump(ChainName::new("sub").unwrap())
+                    });
+                if with_hosts {
+                    t.set("hosts", |s| s.key_type(SetKeyType::Ipv4Addr).ipv4(ip(30)).ipv4(ip(31)))
+                } else {
+                    t
+                }
+            })
+            .table("n", Family::Ip, |t| {
+                t.chain("post", |c| {
+                    c.hook(Hook::Postrouting).priority(Priority::SrcNat).chain_type(ChainType::Nat)
+                })
+                .rule_keyed("post", "masq", |r| r.masquerade())
+            })
+    }
+
+    /// The simulated echo is what the diff reads from the kernel after an
+    /// apply: a config diffs empty against its own.
+    #[test]
+    fn a_config_diffs_empty_against_its_own_echo() {
+        let cfg = lab(22, true);
+        let diff = cfg
+            .diff_snapshot(&RulesetSnapshot::from_config(&cfg), &NftDiffOptions::default())
+            .unwrap();
+        assert!(diff.is_empty(), "{diff}");
+    }
+
+    /// Offline, the diff says what going from one config to the next does.
+    #[test]
+    fn diff_against_says_what_a_change_would_do() {
+        let options = NftDiffOptions::default();
+        let diff = lab(2222, false).diff_against(&lab(22, true), &options).unwrap();
+        assert_eq!(diff.rules_to_replace.len(), 1, "{diff}");
+        assert_eq!(diff.rules_to_replace[0].4.handle_key(), Some("ssh"));
+        assert_eq!(diff.sets_to_delete, [("f".to_string(), Family::Inet, "hosts".to_string())]);
+        assert_eq!(diff.change_count(), 2, "{diff}");
+        assert_eq!(diff.generation, None, "an offline diff has no generation to hold");
+
+        // And back.
+        let back = lab(22, true).diff_against(&lab(2222, false), &options).unwrap();
+        assert_eq!(back.sets_to_add.len(), 1, "{back}");
+        assert_eq!(back.rules_to_replace.len(), 1, "{back}");
+    }
+
+    /// A snapshot that did not read a set's elements makes the diff fail,
+    /// rather than take the set for empty and re-add everything.
+    #[test]
+    fn unread_elements_are_an_error_not_an_empty_set() {
+        let cfg = lab(22, true);
+        let mut snapshot = RulesetSnapshot::from_config(&cfg);
+        snapshot.elements.clear();
+        let err = cfg.diff_snapshot(&snapshot, &NftDiffOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("were not read"), "{err}");
+    }
+}
