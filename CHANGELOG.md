@@ -400,6 +400,22 @@ All notable changes to this project will be documented in this file.
     VXLAN device that is not a bridge port fails that with `EOPNOTSUPP`.
     A root test pins it.
 
+- **`del_rule_by_priority` and `flush_rules` delete any rule, not only
+  main-table lookups (#667).**
+  - **The cause.** `RuleBuilder` defaulted to action `lookup` and table
+    254, and its delete sent both. The kernel's `rule_find` matches a
+    delete's action and table when they are set. So
+    `del_rule_by_priority` found only a rule that looked up the main
+    table. Any other rule was `ENOENT`: another table, a blackhole, a
+    prohibit.
+  - **The flush.** `flush_rules` ignored that error and left those rules
+    in place. It now returns any error other than "already gone".
+  - **The fix.** A delete now sends only the action and table that were
+    set. An add looks the main table up by default, as before.
+  - **Drop rules.** A drop rule is now added with no table, as `ip rule`
+    adds it, where it used to be sent table 254.
+  - **Tests.** Root tests cover each case, and fail without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

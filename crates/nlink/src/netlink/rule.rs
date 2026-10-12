@@ -63,8 +63,11 @@ pub struct RuleBuilder {
     oif: Option<String>,
     fwmark: Option<u32>,
     fwmask: Option<u32>,
-    table: u32,
-    action: FibRuleAction,
+    /// Unset: main for an add that looks a table up, none otherwise, and
+    /// none for a delete — which then matches any table (#667).
+    table: Option<u32>,
+    /// Unset: a lookup for an add, any action for a delete (#667).
+    action: Option<FibRuleAction>,
     ipproto: Option<u8>,
     sport: Option<(u16, u16)>,
     dport: Option<(u16, u16)>,
@@ -84,8 +87,8 @@ impl RuleBuilder {
             oif: None,
             fwmark: None,
             fwmask: None,
-            table: 254, // main
-            action: FibRuleAction::ToTbl,
+            table: None,
+            action: None,
             ipproto: None,
             sport: None,
             dport: None,
@@ -195,26 +198,26 @@ impl RuleBuilder {
 
     /// Set the routing table to lookup.
     pub fn table(mut self, table: u32) -> Self {
-        self.table = table;
-        self.action = FibRuleAction::ToTbl;
+        self.table = Some(table);
+        self.action = Some(FibRuleAction::ToTbl);
         self
     }
 
     /// Set the action to blackhole (drop packets silently).
     pub fn blackhole(mut self) -> Self {
-        self.action = FibRuleAction::Blackhole;
+        self.action = Some(FibRuleAction::Blackhole);
         self
     }
 
     /// Set the action to unreachable (return ICMP unreachable).
     pub fn unreachable(mut self) -> Self {
-        self.action = FibRuleAction::Unreachable;
+        self.action = Some(FibRuleAction::Unreachable);
         self
     }
 
     /// Set the action to prohibit (return ICMP prohibited).
     pub fn prohibit(mut self) -> Self {
-        self.action = FibRuleAction::Prohibit;
+        self.action = Some(FibRuleAction::Prohibit);
         self
     }
 
@@ -278,9 +281,23 @@ impl RuleBuilder {
         let mut hdr = FibRuleHdr::new().with_family(self.family);
         hdr.src_len = self.src_len;
         hdr.dst_len = self.dst_len;
-        hdr.action = self.action as u8;
-        hdr.table = if self.table <= 255 {
-            self.table as u8
+        // An add looks the main table up unless told otherwise, as `ip rule
+        // add` does; a drop rule has no table. A delete sends only what was
+        // set: the kernel's `rule_find` matches the action and table when
+        // they are non-zero, so `lookup main` found nothing else (#667).
+        let (action, table) = if create {
+            let action = self.action.unwrap_or(FibRuleAction::ToTbl);
+            let table = match action {
+                FibRuleAction::ToTbl => self.table.unwrap_or(254),
+                _ => self.table.unwrap_or(0),
+            };
+            (action as u8, table)
+        } else {
+            (self.action.map_or(0, |a| a as u8), self.table.unwrap_or(0))
+        };
+        hdr.action = action;
+        hdr.table = if table <= 255 {
+            table as u8
         } else {
             0
         };
@@ -335,8 +352,8 @@ impl RuleBuilder {
         }
 
         // Add table if > 255
-        if self.table > 255 {
-            builder.append_attr_u32(FraAttr::Table as u16, self.table);
+        if table > 255 {
+            builder.append_attr_u32(FraAttr::Table as u16, table);
         }
 
         // Add IP protocol
@@ -369,5 +386,32 @@ impl RuleBuilder {
         }
 
         Ok(builder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(action, table)` from the `fib_rule_hdr` after the 16-byte
+    /// `nlmsghdr`: family, dst_len, src_len, tos, table, res1, res2, action.
+    fn action_and_table(b: MessageBuilder) -> (u8, u8) {
+        let bytes = b.finish();
+        (bytes[16 + 7], bytes[16 + 4])
+    }
+
+    /// An add looks the main table up by default and a drop rule has no
+    /// table; a delete sends only what was set, so it matches any rule at
+    /// the priority (#667).
+    #[test]
+    fn action_and_table_are_sent_as_ip_rule_sends_them() {
+        let add = |r: RuleBuilder| action_and_table(r.build().unwrap());
+        let del = |r: RuleBuilder| action_and_table(r.build_delete().unwrap());
+        assert_eq!(add(RuleBuilder::v4().priority(1)), (FibRuleAction::ToTbl as u8, 254));
+        assert_eq!(add(RuleBuilder::v4().table(100)), (FibRuleAction::ToTbl as u8, 100));
+        assert_eq!(add(RuleBuilder::v4().prohibit()), (FibRuleAction::Prohibit as u8, 0));
+        assert_eq!(del(RuleBuilder::v4().priority(1)), (0, 0));
+        assert_eq!(del(RuleBuilder::v4().table(100)), (FibRuleAction::ToTbl as u8, 100));
+        assert_eq!(del(RuleBuilder::v4().blackhole()), (FibRuleAction::Blackhole as u8, 0));
     }
 }
