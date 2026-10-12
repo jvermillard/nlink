@@ -861,6 +861,19 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_nexthop"))
     }
 
+    /// Delete a nexthop if it exists (#718). `Ok(true)` when it was
+    /// deleted, `Ok(false)` when there was no nexthop `id`: the kernel
+    /// answers that with `ENOENT`. One still in use is an error, as for
+    /// [`del_nexthop`](Self::del_nexthop).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_nexthop_if_exists"))]
+    pub async fn del_nexthop_if_exists(&self, id: u32) -> Result<bool> {
+        match self.del_nexthop(id).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Add a nexthop group.
     ///
     /// # Example

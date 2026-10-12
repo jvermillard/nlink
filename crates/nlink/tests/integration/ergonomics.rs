@@ -112,6 +112,43 @@ async fn del_if_exists_family_swallows_absence_and_reports_deletion() -> nlink::
     Ok(())
 }
 
+/// #718: the deletes that had no `_if_exists` form. Each deletes what is
+/// there (`Ok(true)`), then answers `Ok(false)` for what is not, which the
+/// kernel reports as `ENOENT`.
+#[tokio::test]
+async fn neighbours_rules_and_nexthops_delete_if_they_exist() -> nlink::Result<()> {
+    use nlink::netlink::neigh::Neighbor;
+    use nlink::netlink::nexthop::NexthopBuilder;
+    use nlink::netlink::rule::RuleBuilder;
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("del-if-exists")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    conn.set_link_up("d0").await?;
+    let ifindex = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+
+    let target: std::net::Ipv4Addr = "10.98.0.9".parse().unwrap();
+    let neighbour = || Neighbor::with_index_v4(ifindex, target);
+    conn.add_neighbor(neighbour().lladdr([2, 0, 0, 0, 0, 9]).permanent())
+        .await?;
+    assert!(conn.del_neighbor_if_exists(neighbour()).await?);
+    assert!(!conn.del_neighbor_if_exists(neighbour()).await?);
+
+    let rule = || RuleBuilder::v4().priority(4321).table(100);
+    conn.add_rule(rule()).await?;
+    assert!(conn.del_rule_if_exists(rule()).await?);
+    assert!(!conn.del_rule_if_exists(rule()).await?);
+
+    // A blackhole nexthop hangs off `lo`, which has to be up.
+    conn.set_link_up("lo").await?;
+    conn.add_nexthop(NexthopBuilder::new(77).blackhole()).await?;
+    assert!(conn.del_nexthop_if_exists(77).await?);
+    assert!(!conn.del_nexthop_if_exists(77).await?);
+    Ok(())
+}
+
 #[tokio::test]
 async fn wireguard_diff_reports_missing_device_and_ensure_creates_it() -> nlink::Result<()> {
     require_root!();

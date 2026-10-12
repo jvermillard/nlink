@@ -295,3 +295,39 @@ async fn add_sa_with_offload_attr_id_locked_by_constants_gate() -> Result<()> {
     //   - crates/nlink/src/netlink/xfrm.rs `xfrm_offload_kernel_constants`
     Ok(())
 }
+
+/// #718: an SA or SP that is there is deleted (`Ok(true)`); one that is not
+/// answers `Ok(false)`. xfrm reports a missing SA as `ESRCH`, which reads as
+/// not found only on an xfrm SA request.
+#[tokio::test]
+async fn sas_and_sps_delete_if_they_exist() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("xfrm_user");
+    with_timeout(async {
+        let ns = TestNamespace::new("xfrm-if-exists")?;
+        let xfrm = xfrm_in_ns(&ns)?;
+        let src: IpAddr = "10.0.0.1".parse().unwrap();
+        let dst: IpAddr = "10.0.0.2".parse().unwrap();
+
+        xfrm.add_sa(make_test_sa(src, dst, 0x3333_3333, 3)).await?;
+        let missing = xfrm
+            .del_sa(src, dst, 0x4444_4444, IpsecProtocol::Esp)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.errno(), Some(libc::ESRCH), "{missing:?}");
+        assert!(missing.is_not_found(), "{missing:?}");
+        assert!(xfrm.del_sa_if_exists(src, dst, 0x3333_3333, IpsecProtocol::Esp).await?);
+        assert!(!xfrm.del_sa_if_exists(src, dst, 0x3333_3333, IpsecProtocol::Esp).await?);
+
+        xfrm.add_sp(make_test_sp(libc::AF_INET as u16, src, dst, PolicyDirection::Out))
+            .await?;
+        let sel = XfrmSelector {
+            family: libc::AF_INET as u16,
+            ..Default::default()
+        };
+        assert!(xfrm.del_sp_if_exists(sel, PolicyDirection::Out).await?);
+        assert!(!xfrm.del_sp_if_exists(sel, PolicyDirection::Out).await?);
+        Ok(())
+    })
+    .await
+}

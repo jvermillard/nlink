@@ -2446,6 +2446,16 @@ All notable changes to this project will be documented in this file.
   qdisc verbs (`conn.tc(dev).qdisc(parent).create(..)` and the rest) name
   their slot.
 
+- **`del_*_if_exists` for neighbours, rules, nexthops and xfrm SAs and SPs
+  (#718).** `del_neighbor_if_exists`, `del_rule_if_exists`,
+  `del_nexthop_if_exists`, `Connection::<Xfrm>::del_sa_if_exists` and
+  `del_sp_if_exists` answer `Ok(true)` when they deleted something and
+  `Ok(false)` when there was nothing to delete, like the route, address,
+  link and TC ones. The kernel reports a missing neighbour, rule, nexthop
+  or policy as `ENOENT`, and a missing SA as `ESRCH`. `is_not_found()` now
+  reads `ESRCH` as not found for an xfrm SA delete, get or update, and only
+  on xfrm: on rtnetlink those message types are link requests.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
