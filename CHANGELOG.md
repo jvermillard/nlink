@@ -606,6 +606,15 @@ All notable changes to this project will be documented in this file.
     `EADDRNOTAVAIL` over xfrm and generic netlink; neither is
     `NotFound`. Without the protocol check, the test fails.
 
+- **TC docs gave wrong handles and units (#723).**
+  - `RateLimiter`'s docs said its leaf class is `1:10` with default `0x10`.
+    The minor is decimal 10, so it is `1:a`, default `0xa`, leaf `a:` in
+    tc(8)'s hex notation.
+  - `ChokeConfig`'s fields and example called its limits bytes. `sch_choke`
+    counts packets, as its setters already said.
+
+  The installed trees are unchanged.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

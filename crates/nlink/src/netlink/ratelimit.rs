@@ -48,7 +48,7 @@
 //! ```text
 //! Egress:
 //!   eth0 -> HTB root (1:) -> class 1:1 (rate = ceil = the ceiling)
-//!                         -> class 1:10 (the rate, borrowing up to the ceiling) -> fq_codel
+//!                         -> class 1:a (the rate, borrowing up to the ceiling) -> fq_codel
 //!
 //! Ingress:
 //!   eth0 ingress -> matchall filter -> mirred egress redirect -> ifb_eth0 -> HTB -> fq_codel
@@ -88,6 +88,9 @@ use super::{
 ///
 /// `RateLimiter` installs no filters, so this default class is the *only* thing
 /// standing between traffic and the wire (#258).
+///
+/// It is decimal 10: the class is `1:a` and the leaf `a:` in tc(8)'s hex
+/// notation (#723).
 const LEAF_CLASS_MINOR: u16 = 10;
 
 // ============================================================================
@@ -377,7 +380,7 @@ impl RateLimiter {
             }
             None if opts.dry_run => {
                 // Whole ingress branch pending: link + tag + up + shape
-                // (root, 1:1, 1:10, leaf). The hook and filter are counted
+                // (root, 1:1, 1:a, leaf). The hook and filter are counted
                 // below.
                 report.changes_made += 7;
                 report.root_modified = true;
@@ -443,8 +446,8 @@ impl RateLimiter {
     }
 
     /// Converge one device's egress tree to the helper's canonical
-    /// shape: HTB root `1:` (default `0x10`) → class `1:1` → class
-    /// `1:10` → fq_codel leaf `10:`. Returns `true` when a wrong-kind
+    /// shape: HTB root `1:` (default `0xa`) → class `1:1` → class
+    /// `1:a` → fq_codel leaf `a:`. Returns `true` when a wrong-kind
     /// root triggered the destructive `fallback_to_apply` rebuild (the
     /// caller must stop reconciling — the rebuild already converged
     /// everything).
@@ -500,7 +503,7 @@ impl RateLimiter {
             }
         }
 
-        // Classes 1:1 and 1:10.
+        // Classes 1:1 and 1:a.
         for (classid, parent, cfg) in [
             (class_1_1, root_handle, &outer),
             (class_1_10, class_1_1, &leaf_class),
@@ -534,7 +537,7 @@ impl RateLimiter {
             }
         }
 
-        // fq_codel leaf under 1:10.
+        // fq_codel leaf under 1:a.
         match tree.leaf_for(class_1_10) {
             None => {
                 if !opts.dry_run {
@@ -830,7 +833,7 @@ enum Ifb {
 /// `rate R, ceil C` there, the leaf's ceiling was out of reach and
 /// [`RateLimiter::burst_to`] did nothing (measured: 1.1 Mbit/s through a
 /// `1mbit`-to-`8mbit` limiter). `1:1` takes the ceiling as its rate; the
-/// leaf `1:10` is guaranteed the rate and borrows up to the ceiling
+/// leaf `1:a` is guaranteed the rate and borrows up to the ceiling
 /// (#490).
 fn limit_classes(limit: &RateLimit) -> (HtbClassConfig, HtbClassConfig) {
     let ceil = limit.ceil.unwrap_or(limit.rate);
@@ -851,13 +854,13 @@ fn fq_codel_leaf(latency: Option<Duration>) -> FqCodelConfig {
     FqCodelConfig::new().target(latency.unwrap_or(Duration::from_millis(5)))
 }
 
-/// The fq_codel leaf a limit builds under `1:10`.
+/// The fq_codel leaf a limit builds under `1:a`.
 fn leaf_config(limit: &RateLimit) -> FqCodelConfig {
     fq_codel_leaf(limit.latency).build()
 }
 
 /// Build a limit's tree on a device from scratch: HTB `1:` (default class
-/// `0x10`), `1:1`, `1:10`, and the fq_codel leaf `10:`.
+/// `0xa`), `1:1`, `1:a`, and the fq_codel leaf `a:`.
 async fn build_htb(conn: &Connection<Route>, ifindex: u32, limit: &RateLimit) -> Result<()> {
     // Whatever is at the root goes; if it cannot, the add says why.
     let _ = conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await;
