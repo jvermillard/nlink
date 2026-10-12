@@ -112,6 +112,57 @@ pub trait EventSource: ProtocolState + private::Sealed {
     /// Returns a vector of parsed events. Multiple events may be present
     /// in a single netlink message batch.
     fn parse_events(data: &[u8]) -> Vec<Self::Event>;
+
+    /// [`parse_events`](Self::parse_events), each event with the
+    /// [`EventMeta`] of the message it came from (#523): the datagram is
+    /// parsed one message at a time.
+    fn parse_events_with_meta(data: &[u8]) -> Vec<(EventMeta, Self::Event)> {
+        let mut out = Vec::new();
+        let mut rest = data;
+        while rest.len() >= super::message::NLMSG_HDRLEN {
+            let len = u32::from_ne_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            if len < super::message::NLMSG_HDRLEN || len > rest.len() {
+                break;
+            }
+            let meta = EventMeta {
+                kind: u16::from_ne_bytes([rest[4], rest[5]]),
+                seq: u32::from_ne_bytes([rest[8], rest[9], rest[10], rest[11]]),
+                portid: u32::from_ne_bytes([rest[12], rest[13], rest[14], rest[15]]),
+            };
+            out.extend(Self::parse_events(&rest[..len]).into_iter().map(|e| (meta, e)));
+            rest = &rest[((len + 3) & !3).min(rest.len())..];
+        }
+        out
+    }
+}
+
+/// An event with the [`EventMeta`] of its notification.
+type MetaEvent<P> = (EventMeta, <P as EventSource>::Event);
+
+/// Where an event came from (#523): the header of the notification it
+/// was parsed from.
+///
+/// A change a request caused is notified with the request's port id and
+/// sequence number — the requesting socket's, `ip`'s, `nft`'s, this
+/// process's own — and one the kernel originated (a link losing carrier,
+/// an expiring address, a learned neighbour) with port id 0. So a watcher
+/// can tell its own changes from others', and drift from kernel noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct EventMeta {
+    /// The originating socket's port id; 0 for the kernel.
+    pub portid: u32,
+    /// The originating request's sequence number; 0 for the kernel.
+    pub seq: u32,
+    /// The message type (`RTM_NEWLINK`, …).
+    pub kind: u16,
+}
+
+impl EventMeta {
+    /// Whether the kernel originated the change, rather than a request.
+    pub fn is_kernel(&self) -> bool {
+        self.portid == 0
+    }
 }
 
 // ============================================================================
@@ -147,7 +198,7 @@ pub trait EventSource: ProtocolState + private::Sealed {
 pub struct EventSubscription<'a, P: EventSource> {
     conn: &'a Connection<P>,
     buffer: Vec<u8>,
-    pending: Vec<P::Event>,
+    pending: Vec<(EventMeta, P::Event)>,
     /// #134 — frame source: the request lock + socket (mutex mode) or a
     /// driver-routed channel (dispatcher mode). Both keep concurrent
     /// streams/dumps on a shared `Arc<Connection>` from racing recv.
@@ -221,11 +272,11 @@ fn poll_event_backend<P: EventSource>(
     backend: &mut EventBackend,
     conn: &Connection<P>,
     buffer: &mut Vec<u8>,
-    pending: &mut Vec<P::Event>,
+    pending: &mut Vec<(EventMeta, P::Event)>,
     terminated: &mut bool,
     netns_watch: &mut Option<NetnsWatch>,
     cx: &mut Context<'_>,
-) -> Poll<Option<Result<P::Event>>> {
+) -> Poll<Option<Result<MetaEvent<P>>>> {
     if let Some(event) = pending.pop() {
         return Poll::Ready(Some(Ok(event)));
     }
@@ -307,7 +358,7 @@ fn poll_event_backend<P: EventSource>(
         };
 
         *buffer = data;
-        *pending = P::parse_events(buffer);
+        *pending = P::parse_events_with_meta(buffer);
         tracing::trace!(
             protocol = std::any::type_name::<P>(),
             events = pending.len(),
@@ -321,20 +372,61 @@ fn poll_event_backend<P: EventSource>(
     }
 }
 
+impl<'a, P: EventSource> EventSubscription<'a, P> {
+    /// This stream, each event with the [`EventMeta`] of its notification
+    /// (#523): who caused it.
+    pub fn with_meta(self) -> WithMeta<Self> {
+        WithMeta(self)
+    }
+
+    fn poll_with_meta(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<MetaEvent<P>>>> {
+        poll_event_backend(
+            &mut self.backend,
+            self.conn,
+            &mut self.buffer,
+            &mut self.pending,
+            &mut self.terminated,
+            &mut self.netns_watch,
+            cx,
+        )
+    }
+}
+
 impl<P: EventSource> Stream for EventSubscription<'_, P> {
     type Item = Result<P::Event>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        poll_event_backend(
-            &mut this.backend,
-            this.conn,
-            &mut this.buffer,
-            &mut this.pending,
-            &mut this.terminated,
-            &mut this.netns_watch,
-            cx,
-        )
+        self.get_mut()
+            .poll_with_meta(cx)
+            .map(|item| item.map(|r| r.map(|(_, event)| event)))
+    }
+}
+
+/// An event stream whose items carry their [`EventMeta`] (#523); from
+/// [`EventSubscription::with_meta`] or [`OwnedEventStream::with_meta`].
+#[derive(Debug)]
+pub struct WithMeta<S>(S);
+
+impl<S> WithMeta<S> {
+    /// The stream without the metadata.
+    pub fn into_inner(self) -> S {
+        self.0
+    }
+}
+
+impl<P: EventSource> Stream for WithMeta<EventSubscription<'_, P>> {
+    type Item = Result<(EventMeta, P::Event)>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().0.poll_with_meta(cx)
+    }
+}
+
+impl<P: EventSource> Stream for WithMeta<OwnedEventStream<P>> {
+    type Item = Result<(EventMeta, P::Event)>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().0.poll_with_meta(cx)
     }
 }
 
@@ -371,7 +463,7 @@ impl<P: EventSource> Unpin for EventSubscription<'_, P> {}
 pub struct OwnedEventStream<P: EventSource> {
     conn: Connection<P>,
     buffer: Vec<u8>,
-    pending: Vec<P::Event>,
+    pending: Vec<(EventMeta, P::Event)>,
     /// #134 — frame source; see [`EventSubscription::backend`]. In mutex
     /// mode this is the owned request-lock guard (0.19 Finding B); in
     /// dispatcher mode it's the driver-routed event channel.
@@ -410,20 +502,33 @@ impl<P: EventSource> OwnedEventStream<P> {
     }
 }
 
+impl<P: EventSource> OwnedEventStream<P> {
+    /// This stream, each event with the [`EventMeta`] of its notification
+    /// (#523): who caused it.
+    pub fn with_meta(self) -> WithMeta<Self> {
+        WithMeta(self)
+    }
+
+    fn poll_with_meta(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<MetaEvent<P>>>> {
+        poll_event_backend(
+            &mut self.backend,
+            &self.conn,
+            &mut self.buffer,
+            &mut self.pending,
+            &mut self.terminated,
+            &mut self.netns_watch,
+            cx,
+        )
+    }
+}
+
 impl<P: EventSource> Stream for OwnedEventStream<P> {
     type Item = Result<P::Event>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        poll_event_backend(
-            &mut this.backend,
-            &this.conn,
-            &mut this.buffer,
-            &mut this.pending,
-            &mut this.terminated,
-            &mut this.netns_watch,
-            cx,
-        )
+        self.get_mut()
+            .poll_with_meta(cx)
+            .map(|item| item.map(|r| r.map(|(_, event)| event)))
     }
 }
 
@@ -755,6 +860,17 @@ impl EventSource for KobjectUevent {
     fn parse_events(data: &[u8]) -> Vec<Uevent> {
         // Uevent messages don't have netlink headers, parse directly
         Uevent::parse(data).into_iter().collect()
+    }
+
+    /// The whole datagram, as [`parse_events`](Self::parse_events): a
+    /// uevent has no netlink header, so no metadata past the kernel's.
+    fn parse_events_with_meta(data: &[u8]) -> Vec<(EventMeta, Uevent)> {
+        let meta = EventMeta {
+            portid: 0,
+            seq: 0,
+            kind: 0,
+        };
+        Self::parse_events(data).into_iter().map(|e| (meta, e)).collect()
     }
 }
 
@@ -1523,6 +1639,37 @@ mod tests {
         // ... but write NO payload bytes. Iter advances past
         // the header, then sees the buffer is too short.
         frame
+    }
+
+    /// Two notifications in one datagram: each event gets its own
+    /// message's port id, sequence number and type (#523).
+    #[test]
+    fn events_carry_the_meta_of_their_own_message() {
+        let nsid = |id: i32| {
+            // rtgenmsg, padded, then NETNSA_NSID.
+            let mut p = vec![0u8; 4];
+            p.extend_from_slice(&8u16.to_ne_bytes());
+            p.extend_from_slice(&1u16.to_ne_bytes());
+            p.extend_from_slice(&id.to_ne_bytes());
+            p
+        };
+        let mut datagram = Vec::new();
+        for (kind, seq, pid, id) in [(NlMsgType::RTM_NEWNSID, 7, 4242, 1), (NlMsgType::RTM_DELNSID, 0, 0, 2)] {
+            let mut frame = build_nl_frame(kind, &nsid(id));
+            frame[8..12].copy_from_slice(&(seq as u32).to_ne_bytes());
+            frame[12..16].copy_from_slice(&(pid as u32).to_ne_bytes());
+            datagram.extend(frame);
+        }
+        let events = Route::parse_events_with_meta(&datagram);
+        let metas: Vec<(u16, u32, u32, bool)> = events.iter().map(|(m, _)| (m.kind, m.seq, m.portid, m.is_kernel())).collect();
+        assert_eq!(
+            metas,
+            [(NlMsgType::RTM_NEWNSID, 7, 4242, false), (NlMsgType::RTM_DELNSID, 0, 0, true)]
+        );
+        assert!(matches!(events[0].1, NetworkEvent::NewNsId(_)));
+        assert!(matches!(events[1].1, NetworkEvent::DelNsId(_)));
+        // The same events as the datagram parsed whole.
+        assert_eq!(Route::parse_events(&datagram).len(), 2);
     }
 
     #[test]

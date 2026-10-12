@@ -1479,6 +1479,30 @@ All notable changes to this project will be documented in this file.
       `default` and the interface.
     - Unit tests cover the parser and `Family`'s names.
 
+- **Event metadata: who caused a change (#523, second part).**
+  - **`with_meta()`.** `EventSubscription::with_meta()` and
+    `OwnedEventStream::with_meta()` yield each event with an `EventMeta`
+    from its notification's header: `portid`, `seq` and `kind` (the
+    message type).
+  - **Telling changes apart.**
+    - A change a request caused carries the requester's port id and
+      sequence number. That can be this process (`conn.socket().pid()`),
+      `ip`, or `nft`.
+    - A change the kernel originated carries port id 0
+      (`EventMeta::is_kernel()`).
+    - So a watcher can skip its own changes, and tell drift from kernel
+      noise.
+    - Not every notification names its requester: a new link is reported
+      with port id 0 whoever made it.
+  - **Parsing.** The streams parse a datagram one message at a time,
+    through a new default `EventSource::parse_events_with_meta`. Uevents,
+    which have no netlink header, parse whole.
+  - **Tests.**
+    - A root test checks an address's port id and sequence number, and a
+      kernel-reported carrier change (port id 0).
+    - A unit test checks two messages in one datagram, each with its own
+      metadata.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

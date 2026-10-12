@@ -266,7 +266,7 @@ pub use netlink::namespace::NETNS_RUN_DIR;
 // transparently.
 pub use netlink::ChainWalk;
 // Stream-based event API
-pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
+pub use netlink::{EventMeta, EventSource, EventSubscription, OwnedEventStream, WithMeta};
 // Protocol state types
 pub use netlink::{Generic, Nftables, Route, Wireguard};
 // Strongly-typed unit types (rate, byte, percent values used at TC API
