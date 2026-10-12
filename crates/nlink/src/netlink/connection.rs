@@ -1,6 +1,6 @@
 //! High-level netlink connection with request/response handling.
 
-use std::{os::unix::io::RawFd, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
 use tracing::{instrument, warn};
 
@@ -328,45 +328,30 @@ where
         })
     }
 
-    /// Create a connection in a network namespace:
-    /// [`new_in_namespace`](Self::new_in_namespace) taking an I/O-safe
-    /// borrowed fd (`impl AsFd`: a `NamespaceFd`, a `File`, …), so the
-    /// fd provably outlives the call (#186).
-    ///
-    /// ```no_run
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// use nlink::{Connection, Route};
-    /// use nlink::netlink::namespace;
-    ///
-    /// let ns = namespace::open("myns")?;
-    /// let conn = Connection::<Route>::new_in_namespace_fd(&ns)?;
-    /// let links = conn.get_links().await?;
-    /// # let _ = links;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// [`new_in_namespace`](Self::new_in_namespace), which takes `AsFd`
+    /// itself now (#532).
+    #[deprecated(since = "0.32.0", note = "`new_in_namespace` takes `impl AsFd` now (#532)")]
     pub fn new_in_namespace_fd(ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
-        use std::os::fd::AsRawFd;
-        Self::new_in_namespace(ns_fd.as_fd().as_raw_fd())
+        Self::new_in_namespace(ns_fd)
     }
 
     /// Create a connection that operates in a specific network namespace.
     ///
     /// The namespace is specified by an open file descriptor to a namespace file
-    /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`). The fd only
-    /// has to stay open for the call; [`new_in_namespace_fd`](Self::new_in_namespace_fd)
-    /// takes an owned or borrowed one, so the compiler checks that.
+    /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`): a `File`, a
+    /// [`NamespaceFd`](super::namespace::NamespaceFd), a
+    /// [`Netns`](super::namespace::Netns), anything `AsFd`. It only has to
+    /// stay open for the call.
     ///
     /// # Example
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use std::fs::File;
-    /// use std::os::unix::io::AsRawFd;
     /// use nlink::netlink::{Connection, Route};
     ///
     /// let ns_file = File::open("/var/run/netns/myns")?;
-    /// let conn = Connection::<Route>::new_in_namespace(ns_file.as_raw_fd())?;
+    /// let conn = Connection::<Route>::new_in_namespace(&ns_file)?;
     ///
     /// // All operations now occur in the "myns" namespace
     /// let links = conn.get_links().await?;
@@ -374,7 +359,9 @@ where
     /// # }
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
-    pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
+    pub fn new_in_namespace(ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
+        let ns_fd = ns_fd.as_fd();
+        tracing::Span::current().record("ns_fd", std::os::fd::AsRawFd::as_raw_fd(&ns_fd));
         let socket = NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?;
         let dispatcher = Dispatcher::new();
         socket.install_dispatcher(dispatcher.clone());
@@ -642,7 +629,7 @@ impl<P: ProtocolState> Connection<P> {
     {
         match self.socket.origin_netns() {
             Some(fd) => {
-                let mut socket = NetlinkSocket::new_in_namespace_fd(Q::PROTOCOL, fd.as_ref())?;
+                let mut socket = NetlinkSocket::new_in_namespace(Q::PROTOCOL, fd.as_ref())?;
                 socket.set_namespace(fd.clone(), self.socket.namespace_marker().cloned());
                 Ok(Connection::from_parts(socket, Q::default()))
             }
@@ -658,7 +645,7 @@ impl<P: ProtocolState> Connection<P> {
     {
         let socket = match self.socket.origin_netns() {
             Some(fd) => {
-                let mut socket = NetlinkSocket::new_in_namespace_fd(Q::PROTOCOL, fd.as_ref())?;
+                let mut socket = NetlinkSocket::new_in_namespace(Q::PROTOCOL, fd.as_ref())?;
                 socket.set_namespace(fd.clone(), self.socket.namespace_marker().cloned());
                 socket
             }
@@ -776,7 +763,7 @@ impl<P: ProtocolState> Connection<P> {
     pub(crate) fn route_sibling(&self) -> Result<Connection<super::protocol::Route>> {
         use super::protocol::Route;
         match self.socket.netns_fd() {
-            Ok(ns) => Connection::<Route>::new_in_namespace_fd(ns),
+            Ok(ns) => Connection::<Route>::new_in_namespace(ns),
             Err(refused) => {
                 let here = Connection::<Route>::new()?;
                 match (self.socket.netns_cookie(), here.socket.netns_cookie()) {
@@ -3819,16 +3806,15 @@ impl Connection<Route> {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use std::fs::File;
-    /// use std::os::unix::io::AsRawFd;
     ///
     /// let ns_file = File::open("/var/run/netns/myns")?;
-    /// let nsid = conn.get_nsid(ns_file.as_raw_fd()).await?;
+    /// let nsid = conn.get_nsid(&ns_file).await?;
     /// println!("Namespace ID: {}", nsid);
     /// # Ok(())
     /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nsid"))]
-    pub async fn get_nsid(&self, ns_fd: RawFd) -> Result<u32> {
+    pub async fn get_nsid(&self, ns_fd: impl std::os::fd::AsFd) -> Result<u32> {
         let mut builder = ack_request(RTM_GETNSID);
 
         // The one-byte rtgenmsg, which `append` pads to four: the kernel
@@ -3837,7 +3823,7 @@ impl Connection<Route> {
         builder.append(&RtGenMsg::new());
 
         // Add NETNSA_FD attribute
-        builder.append_attr_u32(netnsa::FD, ns_fd as u32);
+        builder.append_attr_u32(netnsa::FD, std::os::fd::AsRawFd::as_raw_fd(&ns_fd.as_fd()) as u32);
 
         let response = self.send_request(builder).await?;
 
@@ -3914,7 +3900,7 @@ impl Connection<Route> {
     /// has one (`EEXIST`); each namespace gets at most one id per peer
     /// namespace.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_nsid"))]
-    pub async fn set_nsid(&self, ns_fd: RawFd, nsid: i32) -> Result<()> {
+    pub async fn set_nsid(&self, ns_fd: impl std::os::fd::AsFd, nsid: i32) -> Result<()> {
         let mut builder = ack_request(RTM_NEWNSID);
 
         // rtgenmsg header (1 byte + 3 padding).
@@ -3922,7 +3908,7 @@ impl Connection<Route> {
 
         // NETNSA_NSID carries an i32; -1 means "auto-allocate".
         builder.append_attr_u32(netnsa::NSID, nsid as u32);
-        builder.append_attr_u32(netnsa::FD, ns_fd as u32);
+        builder.append_attr_u32(netnsa::FD, std::os::fd::AsRawFd::as_raw_fd(&ns_fd.as_fd()) as u32);
 
         self.send_ack(builder).await
     }

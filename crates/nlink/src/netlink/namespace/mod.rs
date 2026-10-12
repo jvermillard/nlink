@@ -479,10 +479,9 @@ pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 /// use nlink::netlink::{Connection, Route};
-/// use std::os::fd::AsRawFd;
 ///
 /// let ns = namespace::open("myns")?;
-/// let conn = Connection::<Route>::new_in_namespace(ns.as_raw_fd())?;
+/// let conn = Connection::<Route>::new_in_namespace(&ns)?;
 /// # Ok(())
 /// # }
 /// ```

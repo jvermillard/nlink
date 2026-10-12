@@ -578,11 +578,10 @@ impl Netns {
         use crate::netlink::{NetworkEvent, Route, RtnetlinkGroup};
 
         let here = Connection::<Route>::new()?;
-        let fd = self.fd.as_raw_fd();
-        let nsid = match here.get_nsid(fd).await? {
+        let nsid = match here.get_nsid(&self.fd).await? {
             NSID_NOT_ASSIGNED => {
-                here.set_nsid(fd, -1).await?;
-                here.get_nsid(fd).await?
+                here.set_nsid(&self.fd, -1).await?;
+                here.get_nsid(&self.fd).await?
             }
             nsid => nsid,
         };

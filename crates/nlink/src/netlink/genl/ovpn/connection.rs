@@ -24,7 +24,7 @@
 //! [`NetlinkSocket::send_with_fds`](crate::netlink::NetlinkSocket::send_with_fds)
 //! primitive still ships for protocols that do.)
 
-use std::os::fd::RawFd;
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 
 use super::Ovpn;
 use crate::{
@@ -194,8 +194,9 @@ impl Connection<Ovpn> {
     /// A general [`NetlinkSocket::send_with_fds`](crate::netlink::NetlinkSocket::send_with_fds)
     /// SCM_RIGHTS primitive still ships for protocols that genuinely
     /// consume passed fds.
-    pub async fn attach_socket(&self, ifindex: u32, peer_id: u32, fd: RawFd) -> Result<()> {
-        self.attach_socket_inner(ifindex, peer_id, fd, None).await
+    pub async fn attach_socket(&self, ifindex: u32, peer_id: u32, fd: impl AsFd) -> Result<()> {
+        self.attach_socket_inner(ifindex, peer_id, fd.as_fd().as_raw_fd(), None)
+            .await
     }
 
     /// Attach a transport socket that lives in the network namespace
@@ -210,10 +211,10 @@ impl Connection<Ovpn> {
         &self,
         ifindex: u32,
         peer_id: u32,
-        fd: RawFd,
+        fd: impl AsFd,
         netnsid: i32,
     ) -> Result<()> {
-        self.attach_socket_inner(ifindex, peer_id, fd, Some(netnsid))
+        self.attach_socket_inner(ifindex, peer_id, fd.as_fd().as_raw_fd(), Some(netnsid))
             .await
     }
 

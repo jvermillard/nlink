@@ -122,7 +122,7 @@ async fn list_live_drops_a_stale_marker_that_list_still_reports() -> Result<()> 
 
     // And the I/O-safe constructor works on a real namespace fd.
     let fd = namespace::open(ns.name())?;
-    let conn = nlink::Connection::<nlink::Route>::new_in_namespace_fd(&fd)?;
+    let conn = nlink::Connection::<nlink::Route>::new_in_namespace(&fd)?;
     assert!(conn.get_links().await?.iter().any(|l| l.name() == Some("lo")));
     Ok(())
 }

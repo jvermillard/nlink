@@ -219,6 +219,24 @@ All notable changes to this project will be documented in this file.
 
   The WireGuard test fails without the re-plan.
 
+- **File descriptors are `impl AsFd` (#532).** Every public parameter that
+  took one as `RawFd` or `i32` now takes `impl AsFd`, so the compiler
+  checks that it is open. The guide has the list.
+  - **Where:** `get_nsid`, `set_nsid`, `set_link_netns_fd{,_by_index}`,
+    `Connection::new_in_namespace`, `NetlinkSocket::new_in_namespace`,
+    `set_wiphy_netns`, `Connection::<Ovpn>::attach_socket{,_in_netns}`,
+    `VethLink::peer_netns_fd`, `BpfFilter::new` and
+    `BpfAction::from_fd`. `NetlinkSocket::send_with_fds` takes
+    `&[BorrowedFd]`.
+  - **Builders.** `VethLink`, `BpfFilter` and `BpfAction` hold a
+    duplicate until the request is sent, so the caller's fd may close at
+    once. They used to keep the bare number.
+  - **New impls.** `TunTap` and `NetlinkSocket` implement `AsFd`.
+  - **Deprecated:** the two `new_in_namespace_fd` twins.
+  - **Fixed in passing:** the `ns_fd` field of
+    `Connection::new_in_namespace`'s span is now recorded.
+    `docs/observability.md` had always said it was.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

@@ -2907,12 +2907,11 @@ impl FilterConfig for TcindexFilter {
 ///
 /// ```no_run
 /// use nlink::netlink::filter::BpfFilter;
-/// use std::os::fd::RawFd;
 ///
 /// // Attach a BPF program by file descriptor. Loading it is the caller's
 /// // job — `aya` or `libbpf-rs` hand back the fd.
-/// # let bpf_fd: RawFd = 3;
-/// let filter = BpfFilter::new(bpf_fd)
+/// # let bpf_fd = std::fs::File::open("/dev/null").unwrap();
+/// let filter = BpfFilter::new(&bpf_fd)
 ///     .name("my_classifier")
 ///     .direct_action()
 ///     .build();
@@ -2938,7 +2937,15 @@ pub struct BpfFilter {
 
 impl BpfFilter {
     /// Create a new BPF filter with the given program file descriptor.
-    pub fn new(fd: i32) -> Self {
+    ///
+    /// The fd is duplicated, so the caller's can be closed; the duplicate
+    /// is closed with the last clone of the filter (#532).
+    pub fn new(fd: impl std::os::fd::AsFd) -> Self {
+        Self::with_fd(super::bpf_fd::ProgFd::dup(fd))
+    }
+
+    #[cfg(test)]
+    fn with_raw_fd(fd: i32) -> Self {
         Self::with_fd(super::bpf_fd::ProgFd::Raw(fd))
     }
 
@@ -3189,7 +3196,7 @@ impl FilterConfig for BpfFilter {
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Add file descriptor
-        builder.append_attr_u32(bpf::TCA_BPF_FD, self.fd.raw() as u32);
+        builder.append_attr_u32(bpf::TCA_BPF_FD, self.fd.raw()? as u32);
 
         // Add name if set
         if let Some(ref name) = self.name {
@@ -5702,13 +5709,13 @@ mod tests {
 
     #[test]
     fn test_bpf_filter_builder() {
-        let filter = BpfFilter::new(42)
+        let filter = BpfFilter::with_raw_fd(42)
             .name("my_prog")
             .direct_action()
             .priority(crate::FilterPriority::new(100))
             .chain(5);
 
-        assert_eq!(filter.fd.raw(), 42);
+        assert_eq!(filter.fd.raw().unwrap(), 42);
         assert_eq!(filter.name.as_deref(), Some("my_prog"));
         assert!(filter.direct_action);
         assert_eq!(filter.priority, 100);
@@ -5717,9 +5724,9 @@ mod tests {
 
     #[test]
     fn test_bpf_filter_defaults() {
-        let filter = BpfFilter::new(7);
+        let filter = BpfFilter::with_raw_fd(7);
 
-        assert_eq!(filter.fd.raw(), 7);
+        assert_eq!(filter.fd.raw().unwrap(), 7);
         assert!(filter.name.is_none());
         assert!(!filter.direct_action);
         assert_eq!(filter.priority, 0);
@@ -6146,7 +6153,7 @@ mod tests {
     #[test]
     fn bpf_parse_params_fd() {
         let f = BpfFilter::parse_params(&["fd", "42"]).unwrap();
-        assert_eq!(f.fd.raw(), 42);
+        assert_eq!(f.fd.raw().unwrap(), 42);
         assert!(!f.direct_action);
     }
 
@@ -6156,7 +6163,7 @@ mod tests {
             "fd", "10", "name", "my_prog", "classid", "1:5", "chain", "2", "da",
         ])
         .unwrap();
-        assert_eq!(f.fd.raw(), 10);
+        assert_eq!(f.fd.raw().unwrap(), 10);
         assert_eq!(f.name.as_deref(), Some("my_prog"));
         assert_eq!(f.classid, Some(TcHandle::new(1, 5).as_raw()));
         assert_eq!(f.chain, Some(2));
@@ -7409,7 +7416,7 @@ fn flower_set_protocol_supplies_the_ethertype() {
         Box::new(U32Filter::new()),
         Box::new(FlowerFilter::new()),
         Box::new(MatchallFilter::new()),
-        Box::new(BpfFilter::new(0)),
+        Box::new(BpfFilter::with_raw_fd(0)),
         Box::new(BasicFilter::new()),
         Box::new(FlowFilter::new()),
     ];

@@ -842,7 +842,6 @@ async fn a_multi_namespace_watch_follows_namespaces_until_they_go() -> Result<()
 #[tokio::test]
 async fn an_event_says_which_group_and_namespace_it_came_from() -> Result<()> {
     use nlink::netlink::EventMeta;
-    use std::os::fd::AsRawFd;
     nlink::require_root!();
     // NETLINK_LISTEN_ALL_NSID needs CAP_NET_BROADCAST, which the rootless
     // CI container is not granted.
@@ -853,7 +852,7 @@ async fn an_event_says_which_group_and_namespace_it_came_from() -> Result<()> {
     let b = TestNamespace::new("meta-nsid-b")?;
     let watch = a.connection()?;
     let b_fd = std::fs::File::open(format!("/var/run/netns/{}", b.name()))?;
-    watch.set_nsid(b_fd.as_raw_fd(), 42).await?;
+    watch.set_nsid(&b_fd, 42).await?;
     watch.listen_all_nsid(true)?;
     watch.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
     let mut events = watch.events().await.with_meta();

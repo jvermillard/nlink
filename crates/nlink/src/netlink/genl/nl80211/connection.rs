@@ -667,13 +667,14 @@ impl Connection<Nl80211> {
     /// let ns_fd = namespace::open("my-namespace")?;
     ///
     /// // Move phy0 to the namespace
-    /// nl.set_wiphy_netns(phys[0].index, ns_fd.as_raw_fd()).await?;
+    /// nl.set_wiphy_netns(phys[0].index, &ns_fd).await?;
     /// # Ok(())
     /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns"))]
-    pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {
-        self.move_wiphy(wiphy, WiphyNetns::Fd(netns_fd))
+    pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: impl std::os::fd::AsFd) -> Result<()> {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&netns_fd.as_fd());
+        self.move_wiphy(wiphy, WiphyNetns::Fd(fd))
             .await
             .map_err(|e| e.with_context("set_wiphy_netns"))
     }

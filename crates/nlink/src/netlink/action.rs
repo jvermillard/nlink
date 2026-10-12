@@ -4536,7 +4536,15 @@ impl BpfAction {
     /// The descriptor must reference a BPF program of type `BPF_PROG_TYPE_SCHED_ACT`.
     /// Loading is the caller's responsibility — use `aya` or `libbpf-rs`.
     /// Default verdict is `TC_ACT_PIPE` (continue to next action).
-    pub fn from_fd(fd: i32) -> Self {
+    ///
+    /// The fd is duplicated, so the caller's can be closed; the duplicate
+    /// is closed with the last clone of the action (#532).
+    pub fn from_fd(fd: impl std::os::fd::AsFd) -> Self {
+        Self::with_fd(super::bpf_fd::ProgFd::dup(fd))
+    }
+
+    #[cfg(test)]
+    fn with_raw_fd(fd: i32) -> Self {
         Self::with_fd(super::bpf_fd::ProgFd::Raw(fd))
     }
 
@@ -4633,7 +4641,8 @@ impl BpfAction {
                         ));
                     }
                     let fd_u = action_parse_u32("bpf", "fd", s)?;
-                    source = Some(Self::from_fd(fd_u as i32));
+                    // A number the caller holds open, as tc(8) would.
+                    source = Some(Self::with_fd(super::bpf_fd::ProgFd::Raw(fd_u as i32)));
                     i += 2;
                 }
                 "name" => {
@@ -4687,7 +4696,7 @@ impl ActionConfig for BpfAction {
 
         let parms = bpf_act::TcActBpf::new(self.action);
         builder.append_attr(bpf_act::TCA_ACT_BPF_PARMS, parms.as_bytes());
-        builder.append_attr_u32(bpf_act::TCA_ACT_BPF_FD, self.fd.raw() as u32);
+        builder.append_attr_u32(bpf_act::TCA_ACT_BPF_FD, self.fd.raw()? as u32);
         if let Some(ref name) = self.name {
             builder.append_attr_str(bpf_act::TCA_ACT_BPF_NAME, name);
         }
@@ -5692,24 +5701,24 @@ mod tests {
 
     #[test]
     fn test_bpf_action_default_pipe() {
-        let bpf = BpfAction::from_fd(42);
+        let bpf = BpfAction::with_raw_fd(42);
         assert_eq!(bpf.action, action::TC_ACT_PIPE);
-        assert_eq!(bpf.fd.raw(), 42);
+        assert_eq!(bpf.fd.raw().unwrap(), 42);
         assert!(bpf.name.is_none());
         assert_eq!(ActionConfig::kind(&bpf), "bpf");
     }
 
     #[test]
     fn test_bpf_action_verdict_helpers() {
-        assert_eq!(BpfAction::from_fd(1).ok().action, action::TC_ACT_OK);
-        assert_eq!(BpfAction::from_fd(1).drop().action, action::TC_ACT_SHOT);
-        assert_eq!(BpfAction::from_fd(1).pipe().action, action::TC_ACT_PIPE);
-        assert_eq!(BpfAction::from_fd(1).verdict(7).action, 7);
+        assert_eq!(BpfAction::with_raw_fd(1).ok().action, action::TC_ACT_OK);
+        assert_eq!(BpfAction::with_raw_fd(1).drop().action, action::TC_ACT_SHOT);
+        assert_eq!(BpfAction::with_raw_fd(1).pipe().action, action::TC_ACT_PIPE);
+        assert_eq!(BpfAction::with_raw_fd(1).verdict(7).action, 7);
     }
 
     #[test]
     fn test_bpf_action_with_name() {
-        let bpf = BpfAction::from_fd(10).name("my_bpf").build();
+        let bpf = BpfAction::with_raw_fd(10).name("my_bpf").build();
         assert_eq!(bpf.name.as_deref(), Some("my_bpf"));
     }
 
@@ -5722,7 +5731,7 @@ mod tests {
 
     #[test]
     fn test_bpf_action_writes_attrs() {
-        let bpf = BpfAction::from_fd(42).name("trace").build();
+        let bpf = BpfAction::with_raw_fd(42).name("trace").build();
         let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
         let start = builder.len();
         ActionConfig::write_options(&bpf, &mut builder).unwrap();
@@ -6615,21 +6624,21 @@ mod tests {
     #[test]
     fn bpf_parse_params_fd_basic() {
         let a = BpfAction::parse_params(&["fd", "42"]).unwrap();
-        let b = BpfAction::from_fd(42);
+        let b = BpfAction::with_raw_fd(42);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
     #[test]
     fn bpf_parse_params_fd_with_name() {
         let a = BpfAction::parse_params(&["fd", "7", "name", "trace"]).unwrap();
-        let b = BpfAction::from_fd(7).name("trace");
+        let b = BpfAction::with_raw_fd(7).name("trace");
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
     #[test]
     fn bpf_parse_params_fd_with_verdict() {
         let a = BpfAction::parse_params(&["fd", "1", "verdict", "drop"]).unwrap();
-        let b = BpfAction::from_fd(1).verdict(action::TC_ACT_SHOT);
+        let b = BpfAction::with_raw_fd(1).verdict(action::TC_ACT_SHOT);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
