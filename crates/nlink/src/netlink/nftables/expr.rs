@@ -104,6 +104,17 @@ pub enum Expr {
     CtSet { key: CtKey, sreg: Register },
     /// Load routing data into a register (`rt mtu`, `rt classid`, …).
     Rt { dreg: Register, key: RtKey },
+    /// Compare a register with a range of values, both ends included
+    /// (`tcp dport 1000-2000`, `!= 1000-2000`). The values are in network
+    /// byte order: a host-order field goes through a
+    /// [`Byteorder`](Self::Byteorder) first. Built by
+    /// [`Rule::match_range`](super::types::Rule::match_range) (#528).
+    Range {
+        sreg: Register,
+        op: RangeOp,
+        from: Vec<u8>,
+        to: Vec<u8>,
+    },
     /// Convert `len` bytes of `sreg`, in `size`-byte (2, 4 or 8) units,
     /// between host and network byte order into `dreg`.
     Byteorder {
@@ -684,6 +695,18 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
                 form == WireForm::Echo,
             );
             builder.nest_end(data);
+        }
+        Expr::Range { sreg, op, from, to } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "range");
+            let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_RANGE_SREG, sreg.wire());
+            builder.append_attr_u32_be(NFTA_RANGE_OP, *op as u32);
+            for (attr, value) in [(NFTA_RANGE_FROM_DATA, from), (NFTA_RANGE_TO_DATA, to)] {
+                let nest = builder.nest_start(attr | 0x8000);
+                builder.append_attr(NFTA_DATA_VALUE, value);
+                builder.nest_end(nest);
+            }
+            builder.nest_end(expr_data);
         }
         Expr::Cmp { sreg, op, data } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "cmp");
@@ -1365,6 +1388,19 @@ pub enum RuleExpr {
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
     },
+    /// `range` — a register within (or, `Neq`, outside) `from..=to`, both
+    /// in network byte order.
+    #[non_exhaustive]
+    Range {
+        /// Register compared.
+        sreg: Register,
+        /// In or out of the range.
+        op: RangeOp,
+        /// The first value.
+        from: Vec<u8>,
+        /// The last value.
+        to: Vec<u8>,
+    },
     /// `limit` — a packet- or byte-rate limit.
     Limit(LimitExpr),
     /// `log` — to syslog at the default level, or to an `nflog` group. One
@@ -1476,6 +1512,7 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "quota" => parse_quota(data),
         "objref" => parse_objref(data),
         "limit" => parse_limit_attrs(data).map(RuleExpr::Limit),
+        "range" => parse_range(data),
         "log" => parse_log(data),
         "reject" => parse_reject(data),
         "masq" => parse_masq(data),
@@ -1560,6 +1597,29 @@ pub(crate) fn parse_limit_attrs(data: &[u8]) -> Option<LimitExpr> {
         limit = limit.over();
     }
     Some(limit)
+}
+
+fn parse_range(data: &[u8]) -> Option<RuleExpr> {
+    let value = |nest: &[u8]| {
+        AttrIter::new(nest)
+            .find(|(attr, _)| attr & 0x7FFF == NFTA_DATA_VALUE)
+            .map(|(_, v)| v.to_vec())
+    };
+    let mut from = None;
+    let mut to = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr & 0x7FFF {
+            NFTA_RANGE_FROM_DATA => from = value(payload),
+            NFTA_RANGE_TO_DATA => to = value(payload),
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Range {
+        sreg: Register::from_u32(u32_attr(data, NFTA_RANGE_SREG)?)?,
+        op: RangeOp::from_u32(u32_attr(data, NFTA_RANGE_OP)?)?,
+        from: from?,
+        to: to?,
+    })
 }
 
 fn parse_log(data: &[u8]) -> Option<RuleExpr> {
@@ -2563,6 +2623,45 @@ mod decode_tests {
         );
         assert_eq!(IcmpxCode::from_u8(3), Some(IcmpxCode::AdminProhibited));
         assert_eq!(IcmpxCode::from_u8(4), None);
+    }
+
+    /// #528: a range is behind its field's guard, compares network-order
+    /// bytes, and turns a host-order field around first.
+    #[test]
+    fn ranges_encode_as_nft_does() {
+        use super::super::types::{PacketField, RangeOp, Rule};
+        let rule = Rule::new("t", "c").match_range(PacketField::TcpDport, 1000u16, 2000u16);
+        assert_eq!(rule.error, None);
+        let exprs = parse_expressions(&encode(&rule.exprs));
+        assert!(matches!(&exprs[..2], [RuleExpr::Meta { key: MetaKey::L4Proto, .. }, RuleExpr::Cmp { .. }]), "{exprs:?}");
+        assert_eq!(
+            exprs.last(),
+            Some(&RuleExpr::Range { sreg: Register::R0, op: RangeOp::Eq, from: vec![0x03, 0xe8], to: vec![0x07, 0xd0] })
+        );
+
+        let rule = Rule::new("t", "c").match_range_not(PacketField::Mark, 0x10u32, 0x20u32);
+        let exprs = parse_expressions(&encode(&rule.exprs));
+        assert!(matches!(exprs[1], RuleExpr::Byteorder { op: ByteorderOp::Hton, len: 4, size: 4, .. }), "{exprs:?}");
+        assert_eq!(
+            exprs[2],
+            RuleExpr::Range { sreg: Register::R0, op: RangeOp::Neq, from: vec![0, 0, 0, 0x10], to: vec![0, 0, 0, 0x20] }
+        );
+
+        for (rule, want) in [
+            (Rule::new("t", "c").match_range(PacketField::TcpDport, 2000u16, 1000u16), "runs backwards"),
+            (Rule::new("t", "c").match_range(PacketField::Ip4Saddr, 1u16, 2u16), "cannot hold"),
+            (
+                Rule::new("t", "c").match_range(
+                    PacketField::Ip4Saddr,
+                    std::net::Ipv6Addr::LOCALHOST,
+                    std::net::Ipv6Addr::LOCALHOST,
+                ),
+                "cannot hold",
+            ),
+        ] {
+            let error = rule.error.unwrap_or_default();
+            assert!(error.starts_with("range: ") && error.contains(want), "{error:?}");
+        }
     }
 
     /// What these decoders cannot carry demotes to `Unknown`, never to a

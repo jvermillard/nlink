@@ -486,3 +486,88 @@ async fn byte_limits_and_icmpx_codes_reconcile_and_list() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #528: ranges and the `!=`/`IpAddr` matchers reconcile, `nft` lists the
+/// ranges as it writes them, and the ranges `nft` itself installs decode
+/// as `RuleExpr::Range`.
+#[tokio::test]
+async fn ranges_and_negations_reconcile_and_match_nft() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{PacketField, RangeOp, RuleExpr};
+    use std::net::IpAddr;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-echo-range")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("r", Family::Inet, |t| {
+            t.chain("input", |c| {
+                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+            })
+            .rule_keyed("input", "dports", |r| {
+                r.match_range(PacketField::TcpDport, 1000u16, 2000u16).accept()
+            })
+            .rule_keyed("input", "not-dports", |r| {
+                r.match_range_not(PacketField::UdpDport, 3000u16, 3010u16).accept()
+            })
+            .rule_keyed("input", "saddrs", |r| {
+                r.match_range(PacketField::Ip4Saddr, ip("10.0.0.1"), ip("10.0.0.9")).accept()
+            })
+            .rule_keyed("input", "daddrs6", |r| {
+                r.match_range_not(PacketField::Ip6Daddr, ip("fd00::1"), ip("fd00::ff")).accept()
+            })
+            .rule_keyed("input", "marks", |r| r.match_range(PacketField::Mark, 0x10u32, 0x20u32).accept())
+            .rule_keyed("input", "generic", |r| {
+                r.match_saddr(ip("192.0.2.0"), 24)
+                    .match_daddr_not(ip("2001:db8::"), 32)
+                    .match_tcp_sport_not(22)
+                    .match_mark_not(7)
+                    .match_l4proto_not(17)
+                    .accept()
+            })
+        });
+        assert_reconciles(&conn, &cfg).await?;
+        let listed = ns.exec("nft", &["list", "table", "inet", "r"])?;
+        for want in [
+            "tcp dport 1000-2000",
+            "udp dport != 3000-3010",
+            "ip saddr 10.0.0.1-10.0.0.9",
+            "ip6 daddr != fd00::1-fd00::ff",
+            "meta mark 0x00000010-0x00000020",
+            "tcp sport != 22",
+            "meta mark != 0x00000007",
+        ] {
+            assert!(listed.contains(want), "nft does not list {want:?}:\n{listed}");
+        }
+
+        // And what nft writes, nlink reads.
+        ns.exec("nft", &["add rule inet r input udp sport 5000-6000 meta mark != 0x1-0x2 accept"])?;
+        let exprs: Vec<RuleExpr> = conn
+            .list_rules("r", Family::Inet)
+            .await?
+            .into_iter()
+            .flat_map(|r| r.expressions())
+            .collect();
+        let range = |op, from: Vec<u8>, to: Vec<u8>| {
+            exprs.iter().any(|e| {
+                matches!(e, RuleExpr::Range { op: o, from: f, to: t, .. } if *o == op && *f == from && *t == to)
+            })
+        };
+        assert!(range(RangeOp::Neq, vec![0, 0, 0, 1], vec![0, 0, 0, 2]), "{exprs:?}");
+        // nft 1.1 writes a port range as `range`; 1.0.6 (bookworm) as a
+        // `cmp gte` and a `cmp lte`, which decode as they are.
+        let cmp = |op, data: Vec<u8>| {
+            exprs
+                .iter()
+                .any(|e| matches!(e, RuleExpr::Cmp { op: o, data: d, .. } if *o == op && *d == data))
+        };
+        assert!(
+            range(RangeOp::Eq, vec![0x13, 0x88], vec![0x17, 0x70])
+                || (cmp(CmpOp::Gte, vec![0x13, 0x88]) && cmp(CmpOp::Lte, vec![0x17, 0x70])),
+            "{exprs:?}"
+        );
+        Ok(())
+    })
+    .await
+}
