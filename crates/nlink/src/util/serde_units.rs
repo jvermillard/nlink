@@ -4,6 +4,9 @@
 //!   bits per second, and the declarative `rate_bps` nlink had before 0.32
 //!   meant bytes, so there is no number both would agree on.
 //! - A [`Bytes`] is `"32kib"`, or on input a bare number of bytes.
+//! - A [`Packets`] is a bare number of packets, or on input `"1000p"`, as
+//!   tc(8) writes it (#643). The documents that had packet limits before
+//!   0.32 wrote numbers, so they still read.
 //! - A [`Percent`] is `"1.5%"`, or on input a bare number of percent. A
 //!   value outside `0..=100`, or not a number, is refused rather than
 //!   clamped: a document that says 150 % is wrong, not 100 %.
@@ -17,7 +20,7 @@ use std::{fmt, time::Duration};
 
 use serde::{Deserializer, Serializer, de};
 
-use super::{bytes::Bytes, parse, percent::Percent, rate::Rate};
+use super::{bytes::Bytes, packets::Packets, parse, percent::Percent, rate::Rate};
 
 impl serde::Serialize for Rate {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -38,6 +41,38 @@ impl<'de> serde::Deserialize<'de> for Rate {
             }
         }
         d.deserialize_str(V)
+    }
+}
+
+impl serde::Serialize for Packets {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u32(self.as_u32())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Packets {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl de::Visitor<'_> for V {
+            type Value = Packets;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a number of packets, or a count such as \"1000p\"")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Packets, E> {
+                Packets::parse(v).map_err(E::custom)
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Packets, E> {
+                u32::try_from(v)
+                    .map(Packets::new)
+                    .map_err(|_| E::custom(format!("a packet count is at most {}: {v}", u32::MAX)))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Packets, E> {
+                u32::try_from(v)
+                    .map(Packets::new)
+                    .map_err(|_| E::custom(format!("not a packet count: {v}")))
+            }
+        }
+        d.deserialize_any(V)
     }
 }
 
@@ -185,7 +220,7 @@ mod schema {
 
     use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 
-    use super::{Bytes, Percent, Rate};
+    use super::{Bytes, Packets, Percent, Rate};
 
     impl JsonSchema for Rate {
         fn schema_name() -> Cow<'static, str> {
@@ -207,6 +242,18 @@ mod schema {
             json_schema!({
                 "type": ["string", "integer"],
                 "description": "A size, as tc(8) writes it (\"32kib\", \"1mb\"), or a number of bytes.",
+            })
+        }
+    }
+
+    impl JsonSchema for Packets {
+        fn schema_name() -> Cow<'static, str> {
+            "Packets".into()
+        }
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            json_schema!({
+                "type": ["integer", "string"],
+                "description": "A number of packets, or a count as tc(8) writes it (\"1000p\").",
             })
         }
     }
@@ -274,6 +321,19 @@ mod tests {
             r#"{"rate":"100mbit","size":"32kib","loss":"1.5%","delay":"10ms","jitter":"1499.968us"}"#
         );
         assert_eq!(serde_json::from_str::<Units>(&json).unwrap(), u);
+    }
+
+    /// #643: a packet count is a number, as the documents before 0.32 wrote
+    /// it, and reads tc(8)'s `1000p` too.
+    #[test]
+    fn packets_are_numbers_and_read_tc_text() {
+        assert_eq!(serde_json::to_string(&Packets::new(1000)).unwrap(), "1000");
+        for doc in ["1000", r#""1000p""#, r#""1000""#] {
+            assert_eq!(serde_json::from_str::<Packets>(doc).unwrap(), Packets::new(1000), "{doc}");
+        }
+        for doc in ["-1", "4294967296", r#""1000kb""#, "1.5"] {
+            assert!(serde_json::from_str::<Packets>(doc).is_err(), "{doc}");
+        }
     }
 
     #[test]

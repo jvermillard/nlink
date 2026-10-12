@@ -25,7 +25,7 @@ use crate::{
         tc_options::NetemLossModel,
     },
     util::{
-        Bytes, Percent, Rate,
+        Bytes, Packets, Percent, Rate,
         serde_units::{duration, option_duration},
     },
 };
@@ -130,7 +130,7 @@ pub(super) struct NetemRepr {
     rate_cell_overhead: Option<i32>,
     /// Packets.
     #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<u32>,
+    limit: Option<Packets>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ecn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,7 +172,7 @@ pub(super) struct SlotRepr {
     )]
     max_delay: Duration,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    packets: Option<u32>,
+    packets: Option<Packets>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bytes: Option<u32>,
 }
@@ -277,7 +277,7 @@ pub(super) struct HtbRepr {
     #[serde(skip_serializing_if = "Option::is_none")]
     r2q: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    direct_qlen: Option<u32>,
+    direct_qlen: Option<Packets>,
 }
 
 impl From<&HtbQdiscConfig> for HtbRepr {
@@ -309,7 +309,7 @@ impl From<HtbRepr> for HtbQdiscConfig {
 pub(super) struct FqCodelRepr {
     /// Packets.
     #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<u32>,
+    limit: Option<Packets>,
     #[serde(with = "option_duration", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "schemars",
@@ -456,7 +456,7 @@ pub(super) struct SfqRepr {
     perturb: Option<Duration>,
     /// Packets.
     #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<u32>,
+    limit: Option<Packets>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quantum: Option<Bytes>,
     #[serde(skip_serializing)]
@@ -485,7 +485,7 @@ impl TryFrom<SfqRepr> for SfqConfig {
             c.perturb = i32::try_from(secs(p))
                 .map_err(|_| format!("sfq `perturb` {p:?} is past {} seconds", i32::MAX))?;
         }
-        c.limit = r.limit.unwrap_or(0);
+        c.limit = r.limit.unwrap_or_default();
         c.quantum = r.quantum.map_or(0, Bytes::as_u32_saturating);
         Ok(c)
     }

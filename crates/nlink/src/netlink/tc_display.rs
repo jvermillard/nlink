@@ -527,9 +527,9 @@ mod tests {
             .gap(3)
             .rate(Rate::mbit(1))
             .rate_overhead(20, 53, 5)
-            .limit(500)
+            .limit(crate::util::Packets::new(500))
             .ecn(true)
-            .slot(NetemSlot::new(ms(1), ms(2)).packets(5).bytes(3000))
+            .slot(NetemSlot::new(ms(1), ms(2)).packets(crate::util::Packets::new(5)).bytes(3000))
             .seed(42)
     }
 

@@ -304,7 +304,7 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
 
     // Queue limit. NetemConfig::new() defaults to 1000; live qopt.limit
     // is the same field and is always echoed.
-    if desired.limit != live_opts.limit {
+    if desired.limit.as_u32() != live_opts.limit {
         return false;
     }
 
@@ -329,7 +329,7 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
         (Some(d), Some(l))
             if nanos(d.min_delay) == l.min_delay_ns
                 && nanos(d.max_delay) == l.max_delay_ns
-                && limit(d.max_packets, l.max_packets)
+                && limit(d.max_packets.map(crate::util::Packets::as_u32), l.max_packets)
                 && limit(d.max_bytes, l.max_bytes)
                 && l.dist_delay_ns == 0
                 && l.dist_jitter_ns == 0 => {}
@@ -757,7 +757,7 @@ mod tests {
                 .rate_overhead(20, 53, 5)
                 .ecn(true)
                 .seed(42)
-                .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)).packets(5))
+                .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)).packets(crate::util::Packets::new(5)))
         };
         assert!(netem_matches(&base(), &make_netem_msg(base())));
         for (what, other) in [
@@ -797,12 +797,12 @@ mod tests {
         let unlimited = make_netem_msg(NetemConfig::new().slot(slot));
         for n in [0, i32::MAX as u32, u32::MAX] {
             assert!(
-                netem_matches(&NetemConfig::new().slot(slot.packets(n)), &unlimited),
+                netem_matches(&NetemConfig::new().slot(slot.packets(crate::util::Packets::new(n))), &unlimited),
                 "{n}"
             );
         }
         assert!(!netem_matches(
-            &NetemConfig::new().slot(slot.packets(5)),
+            &NetemConfig::new().slot(slot.packets(crate::util::Packets::new(5))),
             &unlimited
         ));
     }

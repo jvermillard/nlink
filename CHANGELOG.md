@@ -313,6 +313,23 @@ All notable changes to this project will be documented in this file.
   longer stores `message`, the `strerror` text of its errno: `Display`
   computes it.
 
+- **Packet counts take `Packets` (#643).** `nlink::Packets(u32)` is to
+  packet limits what `Bytes` is to byte limits. Each packet-counted setter
+  takes it:
+  - the `limit` of netem, fq_codel, codel, fq, sfq, choke, pie, fq_pie,
+    pfifo, skbprio, sfb and hhf;
+  - choke's `min` and `max`, and fq's `flow_limit`;
+  - HTB's `direct_qlen`, and netem's slot `packets`;
+  - the declarative `QdiscBuilder::limit`.
+
+  The matching public fields take it too, so a byte count passed where the
+  kernel counts packets, or the other way round, is a compile error.
+  `Packets` displays as tc(8) writes it (`1000p`), parses with or without
+  the `p`, converts from `u32`, and serializes as a plain number, so
+  declarative documents read and write as before. The tc(8) parse is
+  unchanged. The parsed `tc_options` views stay raw, as their byte and rate
+  fields do, and the `flows` counts stay `u32`, since they count queues.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

@@ -5214,7 +5214,7 @@ impl QdiscBuilder {
     /// sfq caps its limit at 127 × 128 = 16256 packets (`sfq_change()`,
     /// default depth times default flows); the diff compares against the
     /// capped value, so declaring more installs 16256.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         match &mut self.qdisc_type {
             Some(QdiscSpec::Netem(c)) => c.limit = packets,
             Some(QdiscSpec::FqCodel(c)) => c.limit = Some(packets),
@@ -5834,7 +5834,7 @@ mod plan_228_tests {
         use crate::netlink::tc::{FqCodelConfig, PrioConfig, SfqConfig};
         let q = QdiscBuilder::new("eth0")
             .fq_codel()
-            .limit(1200)
+            .limit(crate::util::Packets::new(1200))
             .target(Duration::from_millis(5))
             .interval(Duration::from_millis(100))
             .flows(1024)
@@ -5843,7 +5843,7 @@ mod plan_228_tests {
             .build()
             .unwrap();
         let by_hand = FqCodelConfig::new()
-            .limit(1200)
+            .limit(crate::util::Packets::new(1200))
             .target(Duration::from_millis(5))
             .interval(Duration::from_millis(100))
             .flows(1024)
@@ -5854,11 +5854,11 @@ mod plan_228_tests {
         let q = QdiscBuilder::new("eth0")
             .sfq()
             .perturb(Duration::from_secs(10))
-            .limit(200)
+            .limit(crate::util::Packets::new(200))
             .quantum(1514)
             .build()
             .unwrap();
-        let by_hand = SfqConfig::new().perturb(10).limit(200).quantum(1514);
+        let by_hand = SfqConfig::new().perturb(10).limit(crate::util::Packets::new(200)).quantum(1514);
         assert_eq!(q.qdisc_type, QdiscSpec::Sfq(by_hand));
 
         let q = QdiscBuilder::new("eth0").prio().bands(4).build().unwrap();
@@ -5992,13 +5992,13 @@ mod plan_228_tests {
 
         // `limit` and `quantum` are shared across kinds by design; each
         // must land on the kind in hand and nowhere else.
-        let netem = QdiscBuilder::new("eth0").netem().limit(50).build().unwrap();
-        assert_eq!(netem_of(&netem).limit, 50);
+        let netem = QdiscBuilder::new("eth0").netem().limit(crate::util::Packets::new(50)).build().unwrap();
+        assert_eq!(netem_of(&netem).limit, crate::util::Packets::new(50));
         // tbf's limit is a byte count with its own setter; the packet
         // `limit` must not land on it — and is an error rather than lost.
         let errors = QdiscBuilder::new("eth0")
             .tbf(Rate::mbit(1), Bytes::kib(4))
-            .limit(50)
+            .limit(crate::util::Packets::new(50))
             .build()
             .unwrap_err();
         assert!(errors[0].starts_with("`.limit()`"), "{errors:?}");
@@ -6048,7 +6048,7 @@ mod plan_228_tests {
             .reorder_correlation_pct(Percent::new(50.0))
             .gap(5)
             .rate(Rate::mbit(100))
-            .limit(2000)
+            .limit(crate::util::Packets::new(2000))
             .build()
             .unwrap();
         let by_hand = NetemConfig::new()
@@ -6065,7 +6065,7 @@ mod plan_228_tests {
             .reorder_correlation(Percent::new(50.0))
             .gap(5)
             .rate(Rate::mbit(100))
-            .limit(2000);
+            .limit(crate::util::Packets::new(2000));
         assert_eq!(q.qdisc_type, QdiscSpec::Netem(by_hand));
     }
 }
@@ -6148,7 +6148,7 @@ mod serde_roundtrip_tests {
             .delay(Duration::from_millis(100))
             .loss(Percent::new(1.5))
             .rate(Rate::mbit(100))
-            .limit(500);
+            .limit(crate::util::Packets::new(500));
         assert_eq!(back.qdiscs()[0].qdisc_type, QdiscSpec::Netem(want));
 
         let pre_0_28 = r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"tbf":
