@@ -436,3 +436,53 @@ async fn nat_ranges_and_flags_reconcile_and_list_as_nft_writes_them() -> nlink::
     })
     .await
 }
+
+/// #528: byte-rate limits — in a rule, `over`, and as a named limit — and
+/// the named ICMPX reject codes reconcile, and `nft` lists them as written.
+#[tokio::test]
+async fn byte_limits_and_icmpx_codes_reconcile_and_list() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{IcmpxCode, LimitExpr, LimitUnit};
+    use nlink::Bytes;
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_limit", "nft_reject_inet");
+
+    let ns = TestNamespace::new("nft-echo-bytes")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("b", Family::Inet, |t| {
+            t.chain("input", |c| {
+                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+            })
+            .object("tenk", nlink::netlink::nftables::ObjectConfig::Limit(LimitExpr::bytes(Bytes::kib(10), LimitUnit::Second).burst(2048)))
+            .rule_keyed("input", "bytes", |r| {
+                r.match_tcp_dport(1)
+                    .expr(LimitExpr::bytes(Bytes::mib(10), LimitUnit::Second))
+                    .accept()
+            })
+            .rule_keyed("input", "bytes-over", |r| {
+                r.match_tcp_dport(2)
+                    .expr(LimitExpr::bytes(Bytes::kib(1), LimitUnit::Minute).burst(4096).over())
+                    .drop()
+            })
+            .rule_keyed("input", "host", |r| r.match_tcp_dport(3).reject_icmpx(IcmpxCode::HostUnreachable))
+            .rule_keyed("input", "admin", |r| r.match_tcp_dport(4).reject_icmpx(IcmpxCode::AdminProhibited))
+            .rule_keyed("input", "noroute", |r| r.match_tcp_dport(5).reject_icmpx(IcmpxCode::NoRoute))
+        });
+        assert_reconciles(&conn, &cfg).await?;
+
+        let listed = ns.exec("nft", &["list", "table", "inet", "b"])?;
+        for want in [
+            "limit rate 10 mbytes/second",
+            "limit rate over 1 kbytes/minute burst 4 kbytes",
+            "rate 10 kbytes/second burst 2 kbytes",
+            "icmpx",
+            "host-unreachable",
+            "admin-prohibited",
+            "no-route",
+        ] {
+            assert!(listed.contains(want), "nft does not list {want:?}:\n{listed}");
+        }
+        Ok(())
+    })
+    .await
+}

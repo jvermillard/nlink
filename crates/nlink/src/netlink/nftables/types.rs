@@ -579,6 +579,60 @@ impl std::ops::BitOrAssign for CtState {
     }
 }
 
+/// What a [`LimitExpr`](super::expr::LimitExpr) counts (`NFTA_LIMIT_TYPE`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum LimitKind {
+    /// `NFT_LIMIT_PKTS`: packets per unit.
+    Packets = 0,
+    /// `NFT_LIMIT_PKT_BYTES`: bytes per unit.
+    Bytes = 1,
+}
+
+impl LimitKind {
+    /// The kind of an `NFTA_LIMIT_TYPE` value.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Packets),
+            1 => Some(Self::Bytes),
+            _ => None,
+        }
+    }
+}
+
+/// The code of a family-independent reject (`reject with icmpx …`),
+/// which the kernel turns into the ICMP or ICMPv6 code that means it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum IcmpxCode {
+    /// `no-route`.
+    NoRoute = 0,
+    /// `port-unreachable`, what a plain `reject` sends.
+    PortUnreachable = 1,
+    /// `host-unreachable`.
+    HostUnreachable = 2,
+    /// `admin-prohibited`.
+    AdminProhibited = 3,
+}
+
+impl IcmpxCode {
+    /// The code of an `NFTA_REJECT_ICMP_CODE` value, in an ICMPX reject.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::NoRoute),
+            1 => Some(Self::PortUnreachable),
+            2 => Some(Self::HostUnreachable),
+            3 => Some(Self::AdminProhibited),
+            _ => None,
+        }
+    }
+}
+
 /// Rate limit unit.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -2020,6 +2074,15 @@ impl Rule {
         self
     }
 
+    /// Byte-rate limit: `limit rate <rate> bytes/<unit>`, no burst (#528).
+    /// For a burst or `over`, push a
+    /// [`LimitExpr::bytes`](super::expr::LimitExpr::bytes) with
+    /// [`expr`](Self::expr).
+    pub fn limit_bytes(mut self, rate: crate::Bytes, unit: LimitUnit) -> Self {
+        self.exprs.push(super::expr::LimitExpr::bytes(rate, unit).into());
+        self
+    }
+
     /// Masquerade (source NAT using outgoing interface address).
     pub fn masquerade(mut self) -> Self {
         self.exprs.push(super::expr::MasqExpr::new().into());
@@ -2935,6 +2998,15 @@ impl Rule {
     pub fn reject_icmp(mut self, code: u8) -> Self {
         self.push_nfproto_ipv4();
         self.reject_with(super::NFT_REJECT_ICMP_UNREACH, code)
+    }
+
+    /// Reject with a family-independent unreachable (#528) — `nft`'s
+    /// `reject with icmpx <code>` — which the kernel sends as the ICMP or
+    /// ICMPv6 code that means it. [`reject`](Self::reject) is
+    /// `reject_icmpx(IcmpxCode::PortUnreachable)`. For `inet`, `bridge` and
+    /// `netdev` tables.
+    pub fn reject_icmpx(self, code: IcmpxCode) -> Self {
+        self.reject_with(super::NFT_REJECT_ICMPX_UNREACH, code as u8)
     }
 
     /// Reject with an ICMPv6 unreachable of `code` (4 is port

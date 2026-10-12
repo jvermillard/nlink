@@ -976,3 +976,42 @@ async fn nat_ranges_rewrite_traffic_as_declared() -> nlink::Result<()> {
     assert!(!arrivals(&pair, 7004, 7005, 5)?.is_empty(), "the redirect did not reach :7005");
     Ok(())
 }
+
+/// #528: a byte-rate limit counts bytes. 100 bytes a second with a
+/// 100-byte burst lets a handful of ~33-byte datagrams through, then
+/// `over` drops the rest; the same numbers as a packet limit — 100 a
+/// second, a burst of 100 — let all 50 through.
+#[tokio::test]
+async fn a_byte_limit_drops_by_bytes() -> nlink::Result<()> {
+    use nlink::Bytes;
+    use nlink::netlink::nftables::{LimitExpr, LimitUnit};
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_limit", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nft-bytes", 94).await?;
+    let with = |limit: LimitExpr| {
+        NftablesConfig::new().table("f", Family::Inet, |t| {
+            t.chain("in", |c| {
+                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+            })
+            .rule_keyed("in", "limit", move |r| r.match_udp_dport(7100).expr(limit).drop())
+        })
+    };
+    let nft = pair.b.connection_for::<Nftables>()?;
+    let dst = SocketAddr::from((pair.b_addr, 7100));
+
+    let packets = with(LimitExpr::packets(100, LimitUnit::Second).burst(100).over());
+    packets.diff(&nft).await?.apply(&nft).await?;
+    let delivered = crate::common::traffic::deliver_udp(&pair.a, &pair.b, dst, 50);
+    assert_eq!(delivered, 50, "100 packets/s, burst 100, drops none of 50");
+
+    let bytes = with(LimitExpr::bytes(Bytes::new(100), LimitUnit::Second).burst(100).over());
+    bytes.diff(&nft).await?.apply(&nft).await?;
+    let delivered = crate::common::traffic::deliver_udp(&pair.a, &pair.b, dst, 50);
+    assert!(
+        (1..=15).contains(&delivered),
+        "100 bytes/s, burst 100: {delivered} of 50 datagrams got through"
+    );
+    Ok(())
+}

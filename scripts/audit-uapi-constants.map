@@ -133,6 +133,14 @@ PayloadBase = NFT_PAYLOAD
     Network -> NETWORK_HEADER
     Transport -> TRANSPORT_HEADER
 NatType = NFT_NAT
+LimitKind = NFT_LIMIT
+    Packets -> PKTS
+    Bytes -> PKT_BYTES
+IcmpxCode = NFT_REJECT_ICMPX
+    NoRoute -> NO_ROUTE
+    PortUnreachable -> PORT_UNREACH
+    HostUnreachable -> HOST_UNREACH
+    AdminProhibited -> ADMIN_PROHIBITED
 RtKey = NFT_RT
     TcpMss -> TCPMSS
 ByteorderOp = NFT_BYTEORDER
