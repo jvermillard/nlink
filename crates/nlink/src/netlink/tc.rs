@@ -8799,7 +8799,8 @@ impl Connection<Route> {
 
     /// Delete the qdisc at `parent` (and `handle`) only if it is a `kind`;
     /// the kernel refuses another (`tc_get_qdisc` compares `TCA_KIND`). The
-    /// error says what is there, and an empty slot is `QdiscNotFound`.
+    /// error says what is there, and an empty slot is
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound).
     pub async fn del_qdisc_kind_by_index(
         &self,
         ifindex: u32,
@@ -8831,10 +8832,13 @@ impl Connection<Route> {
             builder.append_attr_str(TcaAttr::Kind as u16, kind);
         }
 
-        let not_found = || Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
-            kind: kind.map_or_else(|| handle.unwrap_or(parent).to_string(), str::to_string),
-            interface: format!("ifindex {ifindex}"),
-        });
+        let not_found = || {
+            Error::not_found(crate::ErrorObject::Qdisc {
+                dev: format!("ifindex {ifindex}"),
+                parent: Some(parent.to_string()),
+                kind: kind.map(str::to_string),
+            })
+        };
         let Err(e) = self.send_ack(builder).await else {
             return Ok(());
         };
@@ -9168,9 +9172,10 @@ impl Connection<Route> {
         .await
         .map_err(|e| {
             if e.is_not_found() {
-                Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
-                    kind,
-                    interface: format!("ifindex {ifindex}"),
+                Error::not_found(crate::ErrorObject::Qdisc {
+                    dev: format!("ifindex {ifindex}"),
+                    parent: Some(parent.to_string()),
+                    kind: Some(kind),
                 })
             } else {
                 e.with_context(format!(

@@ -306,7 +306,13 @@ impl Restartable for crate::netlink::Nftables {
 
 /// Whether no restart can get past `e`: the namespace is gone.
 pub(crate) fn ends_restarting(e: &crate::Error) -> bool {
-    e.is_namespace_deleted() || matches!(e.detail(), crate::ErrorDetail::NamespaceNotFound { .. })
+    e.is_namespace_deleted()
+        || matches!(
+            e.detail(),
+            crate::ErrorDetail::NotFound {
+                object: crate::ErrorObject::Namespace { .. }
+            }
+        )
 }
 
 impl<P: Restartable> crate::Connection<P> {

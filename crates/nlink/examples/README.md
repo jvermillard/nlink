@@ -331,21 +331,21 @@ loop {
 ### Error handling with semantic checks
 
 ```rust
-use nlink::netlink::Error;
+use nlink::{ErrorObject, TcHandle};
 
 // Helper methods for common error checks
-match conn.del_qdisc("eth0", "root").await {
+match conn.del_qdisc("eth0", TcHandle::ROOT).await {
     Ok(()) => println!("Deleted"),
     Err(e) if e.is_not_found() => println!("Nothing to delete"),
     Err(e) if e.is_permission_denied() => println!("Need root"),
     Err(e) => return Err(e),
 }
 
-// Typed error variants (promoted from kernel ENOENT)
-match conn.change_qdisc("eth0", "root", netem).await {
+// What was not found, from `Error::object()` (promoted from kernel ENOENT)
+match conn.change_qdisc("eth0", TcHandle::ROOT, netem.clone()).await {
     Ok(()) => {}
-    Err(Error::QdiscNotFound { .. }) => conn.add_qdisc("eth0", netem).await?,
-    Err(Error::InterfaceNotFound { .. }) => eprintln!("Interface gone"),
+    Err(e) if matches!(e.object(), Some(ErrorObject::Link { .. })) => eprintln!("Interface gone"),
+    Err(e) if e.is_not_found() => conn.add_qdisc("eth0", netem).await?,
     Err(e) => return Err(e),
 }
 

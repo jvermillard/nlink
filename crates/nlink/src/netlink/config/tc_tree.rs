@@ -848,7 +848,7 @@ async fn apply_tree(
     };
     let leaf = |at: TcHandle, kind: Option<&str>| crate::ErrorObject::Qdisc {
         dev: diff.dev.clone(),
-        parent: at.to_string(),
+        parent: Some(at.to_string()),
         kind: kind.map(str::to_string),
     };
     let mut changes = 0;

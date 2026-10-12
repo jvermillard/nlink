@@ -108,8 +108,8 @@ pub enum ErrorObject {
         /// The link.
         dev: String,
         /// Where it hangs, in tc(8) notation: `root`, `ingress`, `1:a`
-        /// (#718).
-        parent: String,
+        /// (#718), where the code that failed knew it.
+        parent: Option<String>,
         /// Its kind: `htb`, `netem`, …, where the code that failed knew it.
         kind: Option<String>,
     },
@@ -157,6 +157,11 @@ pub enum ErrorObject {
     /// A network namespace: its name, or the path it was opened by.
     Namespace {
         /// The name or path.
+        name: String,
+    },
+    /// A generic-netlink family, by name (#718).
+    GenlFamily {
+        /// Its name: `wireguard`, `nl80211`, ….
         name: String,
     },
     /// An nftables table (#718).
@@ -229,12 +234,16 @@ impl std::fmt::Display for ErrorObject {
             Self::Fdb { dev, mac } => write!(f, "fdb {mac} on {dev}"),
             Self::Rule { priority } => write!(f, "rule {priority}"),
             Self::Nexthop { id } => write!(f, "nexthop {id}"),
-            Self::Qdisc {
-                dev,
-                parent,
-                kind: Some(kind),
-            } => write!(f, "qdisc {kind} at {parent} on {dev}"),
-            Self::Qdisc { dev, parent, .. } => write!(f, "qdisc at {parent} on {dev}"),
+            Self::Qdisc { dev, parent, kind } => {
+                f.write_str("qdisc")?;
+                if let Some(kind) = kind {
+                    write!(f, " {kind}")?;
+                }
+                if let Some(parent) = parent {
+                    write!(f, " at {parent}")?;
+                }
+                write!(f, " on {dev}")
+            }
             Self::TcClass { dev, classid } => write!(f, "class {classid} on {dev}"),
             Self::TcFilter {
                 dev,
@@ -247,6 +256,7 @@ impl std::fmt::Display for ErrorObject {
             Self::WireguardPeer { dev, public_key } => write!(f, "peer {public_key} on {dev}"),
             Self::Sysctl { key } => write!(f, "sysctl {key}"),
             Self::Namespace { name } => write!(f, "namespace {name}"),
+            Self::GenlFamily { name } => write!(f, "GENL family {name}"),
             Self::NftTable { family, name } => write!(f, "nftables table {family} {name}"),
             Self::NftChain {
                 family,
@@ -294,12 +304,11 @@ impl std::fmt::Display for Error {
             // `add_link(d0): File exists (errno 17)`.
             ErrorDetail::Kernel {
                 errno,
-                message,
                 ext_ack,
                 ext_ack_offset,
                 ..
             } if !self.0.context.is_empty() => f.write_str(&format_kernel_tail(
-                message,
+                &strerror(*errno),
                 *errno,
                 ext_ack.as_deref(),
                 *ext_ack_offset,
@@ -337,13 +346,18 @@ impl std::error::Error for Error {
 
 impl From<ErrorDetail> for Error {
     fn from(detail: ErrorDetail) -> Self {
+        // A missing interface is one detail, however it was found missing
+        // (#718).
+        let detail = match detail {
+            ErrorDetail::Interface(IfError::NotFound(name)) => ErrorDetail::NotFound {
+                object: ErrorObject::Link { name },
+            },
+            detail => detail,
+        };
         // A detail that names its object says so in `object()` too.
         let object = match &detail {
             ErrorDetail::Sysctl { key, .. } => Some(ErrorObject::Sysctl { key: key.clone() }),
-            ErrorDetail::InterfaceNotFound { name } => Some(ErrorObject::Link { name: name.clone() }),
-            ErrorDetail::NamespaceNotFound { name } => {
-                Some(ErrorObject::Namespace { name: name.clone() })
-            }
+            ErrorDetail::NotFound { object } => Some(object.clone()),
             ErrorDetail::NamespaceDeleted { path } => Some(ErrorObject::Namespace {
                 name: path.display().to_string(),
             }),
@@ -402,13 +416,12 @@ pub enum ErrorDetail {
     /// [`ext_ack_offset`](Self::Kernel::ext_ack_offset)) populated by
     /// the kernel when `NETLINK_EXT_ACK` is enabled (on by default in
     /// nlink).
-    #[error("{}", format_kernel(message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
+    #[error("{}", format_kernel(&strerror(*errno), *errno, ext_ack.as_deref(), *ext_ack_offset))]
     #[non_exhaustive]
     Kernel {
-        /// The errno value from the kernel.
+        /// The errno value from the kernel. Its text, `strerror(errno)`,
+        /// is what `Display` shows; it is not stored (#718).
         errno: i32,
-        /// Human-readable error message (from `strerror(errno)`).
-        message: String,
         /// Kernel-supplied human-readable detail string from the
         /// `NLMSGERR_ATTR_MSG` TLV, when present. Often dramatically
         /// more actionable than the raw errno — for example,
@@ -568,18 +581,15 @@ pub enum ErrorDetail {
     #[error("validation failed: {}", format_validation_errors(.0))]
     Validation(Vec<ValidationErrorInfo>),
 
-    /// Interface not found.
-    #[error("interface not found: {name}")]
-    InterfaceNotFound {
-        /// The interface name that was not found.
-        name: String,
-    },
-
-    /// Namespace not found.
-    #[error("namespace not found: {name}")]
-    NamespaceNotFound {
-        /// The namespace name that was not found.
-        name: String,
+    /// What was looked for is not there (#718): an interface
+    /// ([`ErrorObject::Link`]), a namespace, a qdisc, a GENL family, ….
+    /// [`Error::object`] names it too. It was four details until 0.32
+    /// (`InterfaceNotFound`, `NamespaceNotFound`, `QdiscNotFound`,
+    /// `FamilyNotFound`), and reads as they did.
+    #[error("{}", not_found_message(object))]
+    NotFound {
+        /// What was looked for.
+        object: ErrorObject,
     },
 
     /// The network namespace an event stream's socket lives in was deleted
@@ -616,22 +626,6 @@ pub enum ErrorDetail {
     StackNotConverged {
         /// What the second plan found.
         remaining: Box<crate::facade::StackPlan>,
-    },
-
-    /// Qdisc not found.
-    #[error("qdisc not found: {kind} on {interface}")]
-    QdiscNotFound {
-        /// The qdisc kind (e.g., "netem", "htb").
-        kind: String,
-        /// The interface name.
-        interface: String,
-    },
-
-    /// Generic Netlink family not found.
-    #[error("GENL family not found: {name}")]
-    FamilyNotFound {
-        /// The family name that was not found.
-        name: String,
     },
 
     /// Operation timed out.
@@ -942,6 +936,22 @@ impl std::fmt::Display for ValidationErrorInfo {
     }
 }
 
+/// What [`ErrorDetail::NotFound`] says: what the four details it replaced
+/// said (#718), and the object's own name for the rest.
+fn not_found_message(object: &ErrorObject) -> String {
+    match object {
+        ErrorObject::Link { name } => format!("interface not found: {name}"),
+        ErrorObject::Namespace { name } => format!("namespace not found: {name}"),
+        ErrorObject::GenlFamily { name } => format!("GENL family not found: {name}"),
+        ErrorObject::Qdisc {
+            dev,
+            kind: Some(kind),
+            ..
+        } => format!("qdisc not found: {kind} on {dev}"),
+        other => format!("not found: {other}"),
+    }
+}
+
 /// Format validation errors for display.
 fn format_validation_errors(errors: &[ValidationErrorInfo]) -> String {
     errors
@@ -1049,10 +1059,8 @@ impl Error {
         ext_ack_offset: Option<u32>,
     ) -> Self {
         let errno = errno.abs();
-        let message = strerror(errno);
         ErrorDetail::Kernel {
             errno,
-            message,
             ext_ack,
             ext_ack_offset,
             request_type,
@@ -1173,6 +1181,25 @@ impl Error {
         self
     }
 
+    /// Name what the failed operation was done to in place of a less
+    /// precise name for the same kind of thing (#718): a caller that knows
+    /// the device by name refines what a layer below named by ifindex. A
+    /// [`NotFound`](ErrorDetail::NotFound) detail's object is refined too,
+    /// so the message says the same. An error that names another kind of
+    /// object keeps it.
+    pub(crate) fn refine_object(mut self, object: ErrorObject) -> Self {
+        let same_kind = |o: &ErrorObject| std::mem::discriminant(o) == std::mem::discriminant(&object);
+        if self.0.object.as_ref().is_none_or(same_kind) {
+            if let ErrorDetail::NotFound { object: found } = &mut self.0.detail
+                && same_kind(found)
+            {
+                *found = object.clone();
+            }
+            self.0.object = Some(object);
+        }
+        self
+    }
+
     /// What was being done, outermost first (#526): each
     /// [`with_context`](Self::with_context) and
     /// [`ResultExt::context`]. Empty for an error with none.
@@ -1216,28 +1243,37 @@ impl Error {
         ErrorDetail::NotSupported(message.into()).into()
     }
 
-    /// Create an interface not found error.
+    /// `object` is not there (#718): [`ErrorDetail::NotFound`].
+    pub fn not_found(object: ErrorObject) -> Self {
+        ErrorDetail::NotFound { object }.into()
+    }
+
+    /// An interface that is not there: [`ErrorDetail::NotFound`] of an
+    /// [`ErrorObject::Link`].
     pub fn interface_not_found(name: impl Into<String>) -> Self {
-        ErrorDetail::InterfaceNotFound { name: name.into() }.into()
+        Self::not_found(ErrorObject::Link { name: name.into() })
     }
 
-    /// Create a namespace not found error.
+    /// A namespace that is not there: [`ErrorDetail::NotFound`] of an
+    /// [`ErrorObject::Namespace`].
     pub fn namespace_not_found(name: impl Into<String>) -> Self {
-        ErrorDetail::NamespaceNotFound { name: name.into() }.into()
+        Self::not_found(ErrorObject::Namespace { name: name.into() })
     }
 
-    /// Create a qdisc not found error.
+    /// A qdisc of `kind` that `interface` does not have:
+    /// [`ErrorDetail::NotFound`] of an [`ErrorObject::Qdisc`].
     pub fn qdisc_not_found(kind: impl Into<String>, interface: impl Into<String>) -> Self {
-        ErrorDetail::QdiscNotFound {
-            kind: kind.into(),
-            interface: interface.into(),
-        }
-        .into()
+        Self::not_found(ErrorObject::Qdisc {
+            dev: interface.into(),
+            parent: None,
+            kind: Some(kind.into()),
+        })
     }
 
-    /// Create a GENL family not found error.
+    /// A GENL family the kernel does not have: [`ErrorDetail::NotFound`]
+    /// of an [`ErrorObject::GenlFamily`].
     pub fn family_not_found(name: impl Into<String>) -> Self {
-        ErrorDetail::FamilyNotFound { name: name.into() }.into()
+        Self::not_found(ErrorObject::GenlFamily { name: name.into() })
     }
 
     /// A short buffer: `expected` bytes needed, `actual` there.
@@ -1281,11 +1317,7 @@ impl Error {
     /// ```
     pub fn kind(&self) -> ErrorKind {
         match self.detail() {
-            ErrorDetail::Interface(IfError::NotFound(_))
-            | ErrorDetail::InterfaceNotFound { .. }
-            | ErrorDetail::NamespaceNotFound { .. }
-            | ErrorDetail::QdiscNotFound { .. }
-            | ErrorDetail::FamilyNotFound { .. } => ErrorKind::NotFound,
+            ErrorDetail::NotFound { .. } => ErrorKind::NotFound,
             ErrorDetail::NotSupported(_) => ErrorKind::NotSupported,
             ErrorDetail::Timeout => ErrorKind::Timeout,
             ErrorDetail::FrameTruncated { .. } | ErrorDetail::Truncated { .. } => ErrorKind::Truncated,
@@ -1343,9 +1375,7 @@ impl Error {
     /// the common [`Self::errno`] accessor that Plan 187 §2.5
     /// established as the canonical errno-shape merge point.
     ///
-    /// Plus the typed not-found variants
-    /// (`InterfaceNotFound`, `NamespaceNotFound`, `QdiscNotFound`,
-    /// `FamilyNotFound`, `Interface(IfError::NotFound)`).
+    /// Plus [`ErrorDetail::NotFound`], whatever was looked for (#718).
     ///
     /// Pre-0.19 this predicate matched the kernel variants directly,
     /// missing an I/O error carrying ENOENT, which sibling predicates
@@ -1359,11 +1389,7 @@ impl Error {
         }
         matches!(
             self.detail(),
-            ErrorDetail::Interface(IfError::NotFound(_))
-                | ErrorDetail::InterfaceNotFound { .. }
-                | ErrorDetail::NamespaceNotFound { .. }
-                | ErrorDetail::QdiscNotFound { .. }
-                | ErrorDetail::FamilyNotFound { .. }
+            ErrorDetail::NotFound { .. }
         )
     }
 
@@ -1903,18 +1929,38 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::NotFound);
     }
 
+    /// #718: a caller that knows the device by name refines a qdisc a layer
+    /// below named by ifindex, message and all; another kind of object, or
+    /// one that is there already, is kept.
+    #[test]
+    fn a_caller_refines_what_a_lower_layer_named() {
+        let slot = |dev: &str| ErrorObject::Qdisc {
+            dev: dev.into(),
+            parent: Some("root".into()),
+            kind: None,
+        };
+        let refined = Error::not_found(slot("ifindex 10")).refine_object(slot("dummy0"));
+        assert_eq!(refined.object(), Some(&slot("dummy0")));
+        assert_eq!(refined.to_string(), "not found: qdisc at root on dummy0");
+        let kernel = Error::from_errno(libc::EEXIST).refine_object(slot("dummy0"));
+        assert_eq!(kernel.object(), Some(&slot("dummy0")));
+        let link = Error::interface_not_found("eth9").refine_object(slot("eth9"));
+        assert_eq!(link.object(), Some(&ErrorObject::Link { name: "eth9".into() }));
+        assert_eq!(link.to_string(), "interface not found: eth9");
+    }
+
     /// #718: TC objects read as tc(8) would name them.
     #[test]
     fn tc_objects_read_like_tc() {
         let qdisc = ErrorObject::Qdisc {
             dev: "eth0".into(),
-            parent: "1:a".into(),
+            parent: Some("1:a".into()),
             kind: Some("fq_codel".into()),
         };
         assert_eq!(qdisc.to_string(), "qdisc fq_codel at 1:a on eth0");
         let slot = ErrorObject::Qdisc {
             dev: "eth0".into(),
-            parent: "root".into(),
+            parent: Some("root".into()),
             kind: None,
         };
         assert_eq!(slot.to_string(), "qdisc at root on eth0");
@@ -2053,24 +2099,23 @@ mod tests {
     fn test_is_not_found() {
         assert!(Error::from_errno(-2).is_not_found()); // ENOENT
         assert!(Error::from_errno(-19).is_not_found()); // ENODEV
+        assert!(Error::interface_not_found("eth0").is_not_found());
+        assert!(Error::namespace_not_found("test").is_not_found());
+        assert!(Error::qdisc_not_found("netem", "eth0").is_not_found());
+        assert!(Error::family_not_found("wireguard").is_not_found());
+        // However a missing interface was found missing, it is one detail
+        // (#718).
+        let via_ifname = Error::from(crate::util::ifname::IfError::NotFound("eth9".into()));
         assert!(
-            Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-                name: "eth0".into()
-            })
-            .is_not_found()
+            matches!(
+                via_ifname.detail(),
+                ErrorDetail::NotFound { object: ErrorObject::Link { name } } if name == "eth9"
+            ),
+            "{via_ifname:?}"
         );
-        assert!(
-            Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
-                name: "test".into()
-            })
-            .is_not_found()
-        );
-        assert!(
-            Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
-                kind: "netem".into(),
-                interface: "eth0".into()
-            })
-            .is_not_found()
+        assert_eq!(
+            via_ifname.object(),
+            Some(&ErrorObject::Link { name: "eth9".into() })
         );
     }
 
@@ -2150,26 +2195,31 @@ mod tests {
     fn test_dump_interrupted_does_not_match_unrelated_errors() {
         assert!(!Error::timeout().is_dump_interrupted());
         assert!(!Error::from_errno(-16).is_dump_interrupted()); // EBUSY
-        assert!(!Error::from(crate::netlink::ErrorDetail::InterfaceNotFound { name: "x".into() }).is_dump_interrupted());
+        assert!(!Error::interface_not_found("x").is_dump_interrupted());
     }
 
     #[test]
     fn test_error_messages() {
-        let err = Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-            name: "eth0".into(),
-        });
+        // The four details `NotFound` replaced read as they did (#718).
+        let err = Error::interface_not_found("eth0");
         assert_eq!(err.to_string(), "interface not found: eth0");
-
-        let err = Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
-            name: "myns".into(),
-        });
+        let err = Error::namespace_not_found("myns");
         assert_eq!(err.to_string(), "namespace not found: myns");
-
-        let err = Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
-            kind: "netem".into(),
-            interface: "docker0".into(),
-        });
+        let err = Error::qdisc_not_found("netem", "docker0");
         assert_eq!(err.to_string(), "qdisc not found: netem on docker0");
+        let err = Error::family_not_found("ovpn");
+        assert_eq!(err.to_string(), "GENL family not found: ovpn");
+        let err = Error::not_found(ErrorObject::TcClass {
+            dev: "eth0".into(),
+            classid: "1:a".into(),
+        });
+        assert_eq!(err.to_string(), "not found: class 1:a on eth0");
+        assert_eq!(err.kind(), ErrorKind::NotFound);
+        // The kernel's text is computed from the errno, as it was stored.
+        assert_eq!(
+            Error::from_errno(libc::ENOENT).to_string(),
+            "kernel error: No such file or directory (errno 2)"
+        );
     }
 
     // ---- Plan 182 — ext_ack / ext_ack_offset accessors ----
@@ -2178,7 +2228,6 @@ mod tests {
     fn ext_ack_returns_some_for_kernel_with_ack() {
         let err = Error::from(crate::netlink::ErrorDetail::Kernel {
             errno: 22,
-            message: "Invalid argument".into(),
             ext_ack: Some("attribute IFLA_MTU rejected: value 0 out of range".into()),
             ext_ack_offset: Some(24),
             request_type: None,
@@ -2207,7 +2256,6 @@ mod tests {
     fn ext_ack_returns_none_for_kernel_without_ack() {
         let err = Error::from(crate::netlink::ErrorDetail::Kernel {
             errno: 22,
-            message: "EINVAL".into(),
             ext_ack: None,
             ext_ack_offset: None,
             request_type: None,
@@ -2241,7 +2289,6 @@ mod tests {
     fn is_no_buffer_space_matches_kernel_enobufs() {
         let err = Error::from(crate::netlink::ErrorDetail::Kernel {
             errno: libc::ENOBUFS,
-            message: "ENOBUFS".into(),
             ext_ack: None,
             ext_ack_offset: None,
             request_type: None,

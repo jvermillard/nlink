@@ -61,11 +61,11 @@ async fn main() -> nlink::netlink::Result<()> {
 
     // These show how semantic errors appear
     let examples = [
-        Error::from(nlink::ErrorDetail::InterfaceNotFound {
-            name: "eth99".into(),
-        }),
-        Error::from(nlink::ErrorDetail::NamespaceNotFound {
-            name: "myns".into(),
+        Error::interface_not_found("eth99"),
+        Error::namespace_not_found("myns"),
+        Error::not_found(nlink::ErrorObject::TcClass {
+            dev: "eth0".into(),
+            classid: "1:a".into(),
         }),
     ];
 

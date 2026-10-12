@@ -300,6 +300,19 @@ All notable changes to this project will be documented in this file.
   headers and the YNL specs now. Struct sizes, `nft_verdict`, `nf_hook`
   and `DEVLINK_MCGRP_CONFIG_NAME` stay.
 
+- **One not-found detail (#718).** `ErrorDetail::InterfaceNotFound`,
+  `NamespaceNotFound`, `QdiscNotFound` and `FamilyNotFound` are now one
+  detail, `NotFound { object: ErrorObject }`. An `IfError::NotFound` converts
+  to it as well. `ErrorObject` gains `GenlFamily`. The messages read as they
+  did, `is_not_found()` and `kind()` are unchanged, and `Error::object()`
+  returns what was missing. `Error::not_found(object)` joins the existing
+  `interface_not_found`, `namespace_not_found`, `qdisc_not_found` and
+  `family_not_found`. A missing qdisc found by `change_qdisc`,
+  `del_qdisc_kind_by_index` or the verbs says its parent too.
+  `ErrorObject::Qdisc::parent` is an `Option`. `ErrorDetail::Kernel` no
+  longer stores `message`, the `strerror` text of its errno: `Display`
+  computes it.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

@@ -230,7 +230,7 @@ pub struct ConfigDiff {
     /// them — that do not exist, and that no veth or netkit pair in this
     /// apply creates as its peer. A typo, or a device not there yet. The
     /// apply fails on the first, before it changes anything, with
-    /// [`ErrorDetail::InterfaceNotFound`](crate::ErrorDetail::InterfaceNotFound). They
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound). They
     /// were skipped without a word (#475). So is a parent (VLAN, macvlan,
     /// VXLAN underlay) or master a declared link names that the config
     /// does not declare and that does not exist (#518).

@@ -447,11 +447,13 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
     };
     let qdisc = |q: &super::types::DeclaredQdisc| ErrorObject::Qdisc {
         dev: q.dev.clone(),
-        parent: match q.effective_parent() {
-            super::types::QdiscParent::Ingress => "ingress",
-            _ => "root",
-        }
-        .to_string(),
+        parent: Some(
+            match q.effective_parent() {
+                super::types::QdiscParent::Ingress => "ingress",
+                _ => "root",
+            }
+            .to_string(),
+        ),
         kind: Some(q.qdisc_type.kind().to_string()),
     };
     match step {

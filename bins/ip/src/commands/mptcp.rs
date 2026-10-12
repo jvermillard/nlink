@@ -246,7 +246,7 @@ async fn add_endpoint(conn: &Connection<Mptcp>, args: EndpointAddArgs) -> Result
         let ifindex = route
             .get_link_by_name(dev)
             .await?
-            .ok_or_else(|| nlink::Error::from(nlink::ErrorDetail::InterfaceNotFound { name: dev.clone() }))?
+            .ok_or_else(|| nlink::Error::interface_not_found(dev.clone()))?
             .ifindex();
         builder = builder.ifindex(ifindex);
     }

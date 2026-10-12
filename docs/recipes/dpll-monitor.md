@@ -301,8 +301,8 @@ while let Some(evt) = events.next().await {
 ```
 
 `subscribe_monitor()` returns
-an error whose detail is `ErrorDetail::FamilyNotFound { name:
-"dpll::monitor" }` (`e.is_not_found()`) if the kernel
+an error whose detail is `ErrorDetail::NotFound` of an
+`ErrorObject::GenlFamily { name: "dpll::monitor" }` (`e.is_not_found()`) if the kernel
 doesn't register the group (kernel too old, or DPLL driver
 doesn't expose monitor). Fall back to the polling loop above in
 that case.

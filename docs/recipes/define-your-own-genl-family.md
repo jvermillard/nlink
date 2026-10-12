@@ -240,8 +240,8 @@ in-tree families:
 
 - Resolution failure (kernel doesn't have the family registered
   — typically missing kernel module or feature disabled) →
-  an error whose detail is `ErrorDetail::FamilyNotFound { name }`. Use
-  `e.is_not_found()`.
+  an error whose detail is `ErrorDetail::NotFound` of an
+  `ErrorObject::GenlFamily { name }`. Use `e.is_not_found()`.
 - `EPERM` on send (your family requires CAP_NET_ADMIN or
   similar) → `e.is_permission_denied()`.
 - Malformed wire frames → `ErrorDetail::InvalidMessage` /

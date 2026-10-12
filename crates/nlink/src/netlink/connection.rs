@@ -524,7 +524,7 @@ impl<P: ProtocolState> Connection<P> {
     }
 
     /// An interface this connection's namespace has none of (#718):
-    /// [`ErrorDetail::InterfaceNotFound`](crate::ErrorDetail::InterfaceNotFound),
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound),
     /// carrying the namespace like the kernel's own errors.
     pub(crate) fn interface_not_found(&self, name: impl Into<String>) -> Error {
         self.socket.stamp(Error::interface_not_found(name))
@@ -2039,7 +2039,7 @@ impl Connection<Route> {
     /// miss a change the way a subscription opened too late can, and
     /// leaves no multicast socket behind.
     ///
-    /// Returns `Err(Timeout)` on deadline, and `Err(InterfaceNotFound)` if
+    /// Returns `Err(Timeout)` on deadline, and an interface not-found error if
     /// the interface goes away during the wait.
     ///
     /// # Namespace safety
@@ -2162,7 +2162,7 @@ impl Connection<Route> {
     /// indexed interface.
     ///
     /// Convenience wrapper around `get_link_by_*` + `LinkMessage::stats()`.
-    /// Returns `Err(InterfaceNotFound)` if no interface matches, and
+    /// Returns an interface not-found error if no interface matches, and
     /// `Err(InvalidMessage)` if the kernel response didn't include a
     /// stats attribute (rare — most interfaces always report stats).
     ///
@@ -2216,7 +2216,7 @@ impl Connection<Route> {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorDetail::InterfaceNotFound`](crate::ErrorDetail::InterfaceNotFound) if the interface name doesn't exist.
+    /// Returns [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) if the interface name doesn't exist.
     ///
     /// # Example
     ///
@@ -4076,9 +4076,7 @@ impl Connection<Generic> {
         // `FamilyNotFound`.
         let (seq, datagrams) = self.genl_request(builder).await.map_err(|e| {
             if e.errno() == Some(libc::ENOENT) {
-                self.socket.stamp(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
-                    name: name.to_string(),
-                }))
+                self.socket.stamp(Error::family_not_found(name))
             } else {
                 e
             }
@@ -4095,9 +4093,7 @@ impl Connection<Generic> {
                 return self.parse_family_attrs(&payload[GENL_HDRLEN..]);
             }
         }
-        Err(self.socket.stamp(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
-            name: name.to_string(),
-        })))
+        Err(self.socket.stamp(Error::family_not_found(name)))
     }
 
     /// Send a GENL request with `NLM_F_ACK` and read every datagram that
@@ -4605,7 +4601,7 @@ mod send_sync_tests {
             .get_family("no-such-family")
             .await
             .expect_err("unknown");
-        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::FamilyNotFound { .. }), "{err}");
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::NotFound { object: crate::ErrorObject::GenlFamily { .. } }), "{err}");
     }
 
     /// #496: `query_family` read the socket directly, so in dispatcher

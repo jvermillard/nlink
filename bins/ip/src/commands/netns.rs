@@ -350,9 +350,7 @@ fn identify_namespace(pid: &str) -> Result<()> {
 fn list_pids_in_namespace(name: &str) -> Result<()> {
     // A stale marker file is not a namespace (#348).
     if !namespace::is_namespace(name) {
-        return Err(nlink::netlink::Error::from(nlink::netlink::ErrorDetail::NamespaceNotFound {
-            name: name.to_string(),
-        }));
+        return Err(nlink::netlink::Error::namespace_not_found(name));
     }
 
     let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
@@ -465,9 +463,7 @@ fn monitor_namespaces() -> Result<()> {
 async fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
     // A stale marker file is not a namespace (#348).
     if !namespace::is_namespace(name) {
-        return Err(nlink::netlink::Error::from(nlink::netlink::ErrorDetail::NamespaceNotFound {
-            name: name.to_string(),
-        }));
+        return Err(nlink::netlink::Error::namespace_not_found(name));
     }
 
     let id: i32 = if nsid == "auto" {

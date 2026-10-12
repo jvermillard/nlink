@@ -210,7 +210,7 @@ pub const DEVLINK_PORT_FN_STATE_ACTIVE: u8 = 1;
 /// Pre-0.19 this was `"devlink"`, which is not a name the kernel
 /// registers in its CTRL_ATTR_MCAST_GROUPS table. Every
 /// `Connection::<Devlink>::subscribe()` call returned
-/// `Error::from(crate::netlink::ErrorDetail::FamilyNotFound { name: "devlink::devlink" })` — the
+/// a GENL-family-not-found error for `devlink::devlink` — the
 /// documented devlink event API was entirely non-functional on
 /// every kernel version. Plan 204 C4.
 pub const DEVLINK_MCGRP_NAME: &str = "config";
