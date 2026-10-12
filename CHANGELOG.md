@@ -2497,6 +2497,19 @@ All notable changes to this project will be documented in this file.
     place, the ERSPAN headers between type II and type III, and checks
     each step through `ip -d -j link`.
 
+- **A veth peer's MAC, MTU and state, in its namespace (#680).**
+  `LinkBuilder::veth_peer_address`, `veth_peer_mtu` and
+  `veth_peer_up`/`veth_peer_down` set the peer that `veth_peer_netns` puts
+  in another namespace, where no declaration in the config can name it.
+  The create sets the MAC and MTU in the peer's message (`VethLink` gains
+  `peer_mtu`), and brings the peer up there once the pair exists. After
+  that the diff reads the peer through a connection in its namespace:
+  `Snapshot` reads the links of each such namespace. Any change is a
+  `ConfigDiff::veth_peers_to_modify` entry, and a `Step::ModifyVethPeer`
+  that the apply runs there and the plan can invert. A peer in this
+  namespace is a link of its own, so validation refuses peer settings
+  without a peer namespace and says to declare the peer.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

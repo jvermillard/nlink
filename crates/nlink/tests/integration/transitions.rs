@@ -2039,6 +2039,54 @@ async fn a_veth_peer_lives_in_its_declared_namespace() -> nlink::Result<()> {
     Ok(())
 }
 
+/// A veth peer's MAC, MTU and state in its namespace, A→B→C (#680): step
+/// 1 creates the pair with them; step 2 changes all three in place, through
+/// a connection in the peer's namespace, and the pair keeps its ifindexes;
+/// step 3 declares none, and the peer keeps what it has. `ip link` in the
+/// peer's namespace shows each step.
+#[tokio::test]
+async fn a_veth_peer_is_set_in_its_namespace() -> nlink::Result<()> {
+    use nlink::netlink::namespace::NetnsRef;
+    require_root!();
+    nlink::require_modules!("veth");
+
+    let ns = TestNamespace::new("tr-peerset")?;
+    let b = TestNamespace::new("tr-peerset-b")?;
+    let there = NetnsRef::Named(b.name().to_string());
+    let step = |set: Option<(u8, u32, bool)>| {
+        let there = there.clone();
+        NetworkConfig::new().link("v0", move |l| {
+            let l = l.veth("p0").up().veth_peer_netns(there);
+            match set {
+                Some((last, mtu, up)) => {
+                    let l = l.veth_peer_address([2, 0, 0, 0, 0x68, last]).veth_peer_mtu(mtu);
+                    if up { l.veth_peer_up() } else { l.veth_peer_down() }
+                }
+                None => l,
+            }
+        })
+    };
+    let steps = [step(Some((1, 1400, true))), step(Some((2, 1300, false))), step(None)];
+    let want: [(&str, u32, bool); 3] =
+        [("02:00:00:00:68:01", 1400, true), ("02:00:00:00:68:02", 1300, false), ("02:00:00:00:68:02", 1300, false)];
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let p0 = &ip_json(&b, &["link", "show", "p0"])?[0];
+        let up = p0["flags"].as_array().is_some_and(|f| f.iter().any(|f| f == "UP"));
+        let have = (p0["address"].as_str(), p0["mtu"].as_u64(), up);
+        let (mac, mtu, want_up) = want[i];
+        if have != (Some(mac), Some(u64::from(mtu)), want_up) {
+            return Err(format!("step {}: p0 is {have:?}, want {:?}", i + 1, want[i]));
+        }
+        ifindexes.push((link_json(&ns, "v0")?["ifindex"].as_u64(), p0["ifindex"].as_u64()));
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "the peer changes in place");
+    assert_eq!(ifindexes[1], ifindexes[2]);
+    Ok(())
+}
+
 /// Declared nexthop objects and the routes through them, A→B→C→D (#516),
 /// each step applied with the one before as the previous config. Step 2
 /// gives a nexthop another gateway and its group other weights, in place.

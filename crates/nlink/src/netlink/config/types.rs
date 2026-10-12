@@ -625,6 +625,25 @@ impl NetworkConfig {
                             format!("peer: {e}"),
                         ));
                     }
+                    if let DeclaredLinkType::Veth {
+                        peer_netns,
+                        peer_address,
+                        peer_mtu,
+                        peer_state,
+                        ..
+                    } = &l.link_type
+                        && (peer_address.is_some() || peer_mtu.is_some() || !peer_state.is_unchanged())
+                        && peer_netns.as_ref().is_none_or(|n| n.is_default())
+                    {
+                        errors.push(ValidationErrorInfo::new(
+                            format!("links.{}", l.name),
+                            format!(
+                                "the peer's MAC, MTU and state are set in the peer's namespace \
+                                 (veth_peer_netns); a peer here is a link of its own: declare \
+                                 {peer} and set it there"
+                            ),
+                        ));
+                    }
                 }
                 DeclaredLinkType::Vlan { vlan_id, .. } if *vlan_id > 4094 => {
                     errors.push(ValidationErrorInfo::new(
@@ -1683,6 +1702,16 @@ impl DeclaredLink {
     }
 
     /// The namespace a veth's peer is declared in (#516).
+    /// Whether it is a veth whose peer's MAC, MTU or state is declared
+    /// (#680).
+    pub(crate) fn sets_veth_peer(&self) -> bool {
+        matches!(
+            &self.link_type,
+            DeclaredLinkType::Veth { peer_address, peer_mtu, peer_state, .. }
+                if peer_address.is_some() || peer_mtu.is_some() || !peer_state.is_unchanged()
+        )
+    }
+
     pub(crate) fn peer_netns(&self) -> Option<&crate::netlink::namespace::NetnsRef> {
         match &self.link_type {
             DeclaredLinkType::Veth { peer_netns, .. } => peer_netns.as_ref(),
@@ -1828,6 +1857,20 @@ pub enum DeclaredLinkType {
         /// is this namespace.
         #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
         peer_netns: Option<crate::netlink::namespace::NetnsRef>,
+        /// The peer's MAC, in its namespace (#680). A peer in this
+        /// namespace is declared as a link of its own instead.
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "mac_serde")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+        peer_address: Option<[u8; 6]>,
+        /// The peer's MTU, in its namespace (#680).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        peer_mtu: Option<u32>,
+        /// The peer's state, in its namespace (#680).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "LinkState::is_unchanged"))]
+        peer_state: LinkState,
     },
     /// Bridge interface.
     Bridge,
@@ -2044,6 +2087,13 @@ pub enum LinkState {
     /// Don't change the state.
     #[default]
     Unchanged,
+}
+
+impl LinkState {
+    /// `Unchanged`: nothing declared.
+    pub fn is_unchanged(&self) -> bool {
+        *self == Self::Unchanged
+    }
 }
 
 /// Macvlan mode.
@@ -2289,6 +2339,9 @@ impl LinkBuilder {
         self.link_type = DeclaredLinkType::Veth {
             peer: peer.to_string(),
             peer_netns: None,
+            peer_address: None,
+            peer_mtu: None,
+            peer_state: LinkState::Unchanged,
         };
         self
     }
@@ -2311,6 +2364,52 @@ impl LinkBuilder {
             *peer_netns = Some(netns);
         } else {
             self.wrong_kind("veth_peer_netns", "veth");
+        }
+        self
+    }
+
+    /// The MAC of a veth's peer in [`veth_peer_netns`](Self::veth_peer_netns)
+    /// (#680): set at create, and changed in place there.
+    ///
+    /// A peer in this namespace is a link of its own: declare it with
+    /// [`NetworkConfig::link`] and set it there.
+    pub fn veth_peer_address(mut self, mac: [u8; 6]) -> Self {
+        if let DeclaredLinkType::Veth { peer_address, .. } = &mut self.link_type {
+            *peer_address = Some(mac);
+        } else {
+            self.wrong_kind("veth_peer_address", "veth");
+        }
+        self
+    }
+
+    /// The MTU of a veth's peer in [`veth_peer_netns`](Self::veth_peer_netns)
+    /// (#680).
+    pub fn veth_peer_mtu(mut self, mtu: u32) -> Self {
+        if let DeclaredLinkType::Veth { peer_mtu, .. } = &mut self.link_type {
+            *peer_mtu = Some(mtu);
+        } else {
+            self.wrong_kind("veth_peer_mtu", "veth");
+        }
+        self
+    }
+
+    /// Bring a veth's peer in [`veth_peer_netns`](Self::veth_peer_netns) up
+    /// (#680).
+    pub fn veth_peer_up(self) -> Self {
+        self.veth_peer_state("veth_peer_up", LinkState::Up)
+    }
+
+    /// Keep a veth's peer in [`veth_peer_netns`](Self::veth_peer_netns)
+    /// down (#680).
+    pub fn veth_peer_down(self) -> Self {
+        self.veth_peer_state("veth_peer_down", LinkState::Down)
+    }
+
+    fn veth_peer_state(mut self, setter: &str, state: LinkState) -> Self {
+        if let DeclaredLinkType::Veth { peer_state, .. } = &mut self.link_type {
+            *peer_state = state;
+        } else {
+            self.wrong_kind(setter, "veth");
         }
         self
     }
@@ -6584,6 +6683,44 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("veth_peer_netns"), "{err}");
+    }
+
+    /// #680: a veth peer's MAC, MTU and state, set in its namespace,
+    /// round-trip; set for a peer here they are refused, since that peer is
+    /// a link of its own.
+    #[test]
+    fn a_veth_peers_settings_roundtrip_and_need_its_namespace() {
+        use crate::netlink::namespace::NetnsRef;
+        let cfg = NetworkConfig::new().link("v0", |l| {
+            l.veth("p0")
+                .veth_peer_netns(NetnsRef::Named("blue".into()))
+                .veth_peer_address([2, 0, 0, 0, 0, 1])
+                .veth_peer_mtu(1400)
+                .veth_peer_up()
+        });
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        assert!(
+            json.contains(
+                r#""peer_netns":{"named":"blue"},"peer_address":"02:00:00:00:00:01","peer_mtu":1400,"peer_state":"up""#
+            ),
+            "{json}"
+        );
+        for cfg in [
+            NetworkConfig::new().link("v0", |l| l.veth("p0").veth_peer_mtu(1400)),
+            NetworkConfig::new()
+                .link("v0", |l| l.veth("p0").veth_peer_netns(NetnsRef::Default).veth_peer_up()),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("a peer here is a link of its own: declare p0"), "{err}");
+        }
+        let err = NetworkConfig::new()
+            .link("d0", |l| l.dummy().veth_peer_mtu(1400))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("veth_peer_mtu"), "{err}");
     }
 
     #[test]
