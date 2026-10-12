@@ -2550,6 +2550,22 @@ All notable changes to this project will be documented in this file.
   `Step::TcTree` is refused on read for now, because a TC tree has no
   serialized form yet (#645). It is not read back empty.
 
+- **An undo puts back kind parameters, replaced qdiscs and TC trees (#649).**
+  `ApplyResult::undo()` used to report these as irreversible.
+  - **Kind parameters.** An in-place change records the live attributes it
+    replaces: for most kinds, the ones it sends. For the tunnels, whose
+    parms rebuild the configuration from the request, it records the whole
+    live set. The inverse sends them back.
+  - **Replaced qdiscs.** `Step::ReplaceQdisc { before, after }` carries the
+    live qdisc as a declaration (netem, fq_codel, HTB, TBF, sfq, prio,
+    ingress, clsact). The inverse replaces it back, or deletes the declared
+    qdisc where the kernel's default was there. A root removed for a
+    kernel-default declaration records the live qdisc too, so its undo adds
+    it again. One whose kind doesn't read back is now irreversible. It
+    used to claim an inverse that restored nothing.
+  - **TC trees.** A tree applied against the previous config's tree inverts
+    to that one.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

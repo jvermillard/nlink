@@ -930,6 +930,142 @@ async fn the_journal_of_an_apply_undoes_it() -> Result<()> {
     .await
 }
 
+/// Kind parameters changed in place are undone too (#649): a Geneve TTL,
+/// which the kernel changes attribute by attribute, and an ip6gre's ends
+/// and key, which its parms rebuild from the request. The undo sends back
+/// what each had, and A's diff is empty after it.
+#[tokio::test]
+async fn the_journal_undoes_kind_changes() -> Result<()> {
+    use std::net::Ipv6Addr;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "geneve", "ip6_gre");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("journal-kind")?;
+        let conn = conn_in_ns(&ns)?;
+        let a6 = |h: u16| Ipv6Addr::new(0xfd00, 0x97, 0, 0, 0, 0, 0, h);
+        let cfg = |ttl: u8, remote: u16, key: u32| {
+            NetworkConfig::new()
+                .link("gn0", move |l| {
+                    l.geneve(9).geneve_remote("10.97.0.2".parse().unwrap()).geneve_ttl(ttl)
+                })
+                .link("g61", move |l| {
+                    l.ip6gre().ip6tnl_local(a6(1)).ip6tnl_remote(a6(remote)).tunnel_key(key)
+                })
+        };
+        let (a, b) = (cfg(10, 2, 7), cfg(20, 3, 8));
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        let applied = b.diff(&conn).await?.apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(
+            applied.irreversible().map(|s| s.to_string()).collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "kind changes have inverses now"
+        );
+        assert!(b.diff(&conn).await?.is_empty());
+
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+        Ok(())
+    })
+    .await
+}
+
+/// A replaced qdisc is undone too (#649): the diff reads the live one back
+/// as a declaration, and the undo puts it back. Each kind is replaced both
+/// ways round (fq_codel, tbf, netem by htb, sfq, prio, and back), and a
+/// kernel-default root replaced by netem goes back to the default.
+#[tokio::test]
+async fn the_journal_undoes_replaced_qdiscs() -> Result<()> {
+    use nlink::{Bytes, Packets, Rate};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_fq_codel", "sch_tbf", "sch_netem", "sch_htb", "sch_sfq", "sch_prio");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("journal-qdisc")?;
+        let conn = conn_in_ns(&ns)?;
+        let links = |c: NetworkConfig| {
+            ["q0", "q1", "q2", "q3"].iter().fold(c, |c, d| c.link(d, |l| l.dummy().up()))
+        };
+        let a = links(NetworkConfig::new())
+            .qdisc("q0", |q| q.fq_codel().limit(Packets::new(1000)).flows(512))
+            .qdisc("q1", |q| q.tbf(Rate::mbit(10), Bytes::kib(32)).limit_bytes(Bytes::kib(64)))
+            .qdisc("q2", |q| q.netem().delay(std::time::Duration::from_millis(5)))
+            .qdisc("q3", |q| q.kernel_default());
+        let b = links(NetworkConfig::new())
+            .qdisc("q0", |q| q.htb().default_class(0x20))
+            .qdisc("q1", |q| q.sfq().perturb(std::time::Duration::from_secs(10)))
+            .qdisc("q2", |q| q.prio().bands(4))
+            .qdisc("q3", |q| q.netem().delay(std::time::Duration::from_millis(1)));
+        for (from, to) in [(&a, &b), (&b, &a)] {
+            let applied = from.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            let applied = to.diff(&conn).await?.apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            let stuck: Vec<String> = applied.irreversible().map(|s| s.to_string()).collect();
+            assert!(stuck.is_empty(), "replaced qdiscs have inverses: {stuck:?}");
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{undone:?}");
+            let back = from.diff(&conn).await?;
+            assert!(back.is_empty(), "the undo left:\n{back}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A TC tree changed against the previous config's is undone (#649): the
+/// undo applies the previous tree, removing what this one added. HTB
+/// classes and a filter change A→B, and the undo leaves A's diff empty.
+#[tokio::test]
+async fn the_journal_undoes_a_tc_tree() -> Result<()> {
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{EthProto, FilterPriority, Rate, TcHandle};
+    use std::sync::Arc;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("journal-tree")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        let tree = |rate: u64, extra: bool| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| {
+                    let t = t
+                        .class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(rate)))
+                        .filter(h(1, 0), FilterPriority::new(1), EthProto::IP, MatchallFilter::new().classid(h(1, 0x10)));
+                    if extra { t.class(h(1, 0), h(1, 0x20), HtbClassConfig::new(Rate::mbit(5))) } else { t }
+                })
+        };
+        let a = Arc::new(tree(10, false));
+        let b = tree(20, true);
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let applied = b
+            .diff_with_options(&conn, nlink::netlink::config::PlanOptions::default().previous(a.clone()))
+            .await?
+            .apply(&conn, nlink::ExecOptions::new())
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let stuck: Vec<String> = applied.irreversible().map(|s| s.to_string()).collect();
+        assert!(stuck.is_empty(), "a tree with a previous one has an inverse: {stuck:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+        Ok(())
+    })
+    .await
+}
+
 /// With the previous config, an apply removes exactly what that config
 /// declared and this one does not: an address, a route in a table nothing
 /// declares into any more, a qdisc. What nobody declared stays (#512).

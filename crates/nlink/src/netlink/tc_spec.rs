@@ -118,6 +118,56 @@ impl QdiscSpec {
         self.config().map_or("default", |c| c.kind())
     }
 
+    /// The spec a live qdisc is, for putting it back (#649): the kinds
+    /// [`matches`](Self::matches) reads, from their parsed options, and the
+    /// kernel's default root. `None` for another kind; the spec read back
+    /// [`matches`](Self::matches) the qdisc it came from.
+    pub(crate) fn from_live(live: &TcMessage) -> Option<Self> {
+        use crate::netlink::tc_options::QdiscOptions as O;
+        use crate::util::{Bytes, Packets, Rate};
+        if live.handle().as_raw() == 0 {
+            return Some(Self::KernelDefault);
+        }
+        let us = |v: u32| Duration::from_micros(u64::from(v));
+        Some(match (live.kind()?, live.options()) {
+            ("ingress", _) => Self::Ingress,
+            ("clsact", _) => Self::Clsact,
+            (_, Some(O::Netem(o))) => Self::Netem(NetemConfig::from(&o)),
+            (_, Some(O::FqCodel(o))) => Self::FqCodel(FqCodelConfig {
+                target: Some(us(o.target_us)),
+                interval: Some(us(o.interval_us)),
+                limit: Some(Packets::new(o.limit)),
+                flows: Some(o.flows),
+                quantum: Some(o.quantum),
+                ecn: Some(o.ecn),
+                ce_threshold: o.ce_threshold_us.map(us),
+                memory_limit: o.memory_limit,
+            }),
+            (_, Some(O::Htb(o))) => Self::Htb(HtbQdiscConfig {
+                default_class: o.default_class,
+                r2q: o.rate2quantum,
+                direct_qlen: o.direct_qlen.map(Packets::new),
+            }),
+            (_, Some(O::Tbf(o))) => Self::Tbf(TbfConfig {
+                rate: Rate::bytes_per_sec(o.rate),
+                peakrate: (o.peakrate != 0).then(|| Rate::bytes_per_sec(o.peakrate)),
+                burst: Bytes::new(u64::from(o.burst)),
+                mtu: o.mtu,
+                limit: Bytes::new(u64::from(o.limit)),
+            }),
+            (_, Some(O::Sfq(o))) => Self::Sfq(SfqConfig {
+                perturb: o.perturb_period,
+                limit: Packets::new(o.limit),
+                quantum: o.quantum,
+            }),
+            (_, Some(O::Prio(o))) => Self::Prio(PrioConfig {
+                bands: o.bands,
+                priomap: o.priomap,
+            }),
+            _ => return None,
+        })
+    }
+
     /// Whether `live` already is this qdisc: the same kind, with every
     /// parameter the spec sets as the kernel keeps it.
     ///
