@@ -2222,6 +2222,27 @@ All notable changes to this project will be documented in this file.
 
     Each takes an interface name, and each has a `_by_index` variant.
 
+- **Errors name what failed (#526).** `Error::object()` returns an
+  `ErrorObject`: the link, address, route, neighbour, FDB entry, rule,
+  nexthop, qdisc, TC tree, WireGuard device or peer, sysctl or namespace
+  the failed operation was done to.
+  - **A `NetworkConfig` apply** names the object of the step that failed.
+    A propagated error also gets the step's operation as context: `add
+    route 10.9.0.0/24: replace_route: Network is unreachable …`, where the
+    message used to name no route.
+  - **A WireGuard apply** names the device or peer, with `add/update/remove
+    peer <key> on <dev>` as context.
+  - **A sysctl, interface-not-found or namespace error** names its object
+    by itself.
+  - **`with_object`** adds one; the innermost object is kept.
+  - **`ApplyError`'s JSON** gains `kind`, `errno`, `ext-ack`, `context`
+    and `object` beside `operation` and `error`, so a consumer no longer
+    parses the errno out of a string.
+  - **Test.** A root test declares a route through an unreachable gateway.
+    The propagated error, and the `continue_on_error` one with its JSON,
+    must name the route. Before, `object()` was `None` and the message
+    named no route.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

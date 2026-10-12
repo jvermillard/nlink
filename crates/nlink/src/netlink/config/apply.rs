@@ -244,29 +244,66 @@ impl ApplyResult {
 }
 
 /// An error that occurred during configuration application.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+///
+/// With the `serde` feature it serializes as its operation and the error's
+/// message, plus the error's kind, errno, extended ack, context and object
+/// (#526):
+///
+/// ```json
+/// {"operation": "add route 10.9.0.0/24", "error": "kernel error: …",
+///  "kind": "network-unreachable", "errno": 101, "ext-ack": null,
+///  "context": [], "object": {"type": "route", "destination": "10.9.0.0/24", "table": null}}
+/// ```
+///
+/// Until 0.32 only the message was there, so a consumer that wanted the
+/// errno had to parse it out of a string.
 #[derive(Debug)]
 pub struct ApplyError {
     /// What operation was being performed.
     pub operation: String,
-    /// The underlying error. Plan 189: serialized as the
-    /// `Display` string rather than the structural enum
-    /// (the `Error` type is internally varied and not
-    /// shape-stable).
-    #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_error_as_display"))]
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    /// The underlying error.
     pub error: Error,
 }
 
+/// What [`ApplyError`] serializes as.
 #[cfg(feature = "serde")]
-fn serialize_error_as_display<S>(err: &Error, ser: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::Serialize as _;
-    err.to_string().serialize(ser)
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+struct ApplyErrorView {
+    operation: String,
+    error: String,
+    kind: crate::netlink::ErrorKind,
+    errno: Option<i32>,
+    ext_ack: Option<String>,
+    context: Vec<String>,
+    object: Option<crate::netlink::ErrorObject>,
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ApplyError {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
+        ApplyErrorView {
+            operation: self.operation.clone(),
+            error: self.error.to_string(),
+            kind: self.error.kind(),
+            errno: self.error.errno(),
+            ext_ack: self.error.ext_ack().map(str::to_string),
+            context: self.error.context().to_vec(),
+            object: self.error.object().cloned(),
+        }
+        .serialize(ser)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ApplyError {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ApplyError".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ApplyErrorView::json_schema(generator)
+    }
 }
 
 impl std::fmt::Display for ApplyError {
@@ -373,12 +410,72 @@ async fn execute_plan(plan: &Plan, conn: &Connection<Route>, options: ExecOption
             Ok(Outcome::Unchanged(summary)) => result.summary.extend(summary),
             Err(error) if options.continue_on_error => result.errors.push(ApplyError {
                 operation: step_operation(step),
-                error,
+                error: with_step_object(error, step),
             }),
-            Err(error) => return Err(error),
+            // Which step: its operation as context, and its object (#526).
+            // The bare error said `File exists` and nothing about which
+            // route or qdisc.
+            Err(error) => {
+                return Err(with_step_object(error, step).with_context(step_operation(step)));
+            }
         }
     }
     Ok(result)
+}
+
+/// `error`, naming what `step` was done to.
+fn with_step_object(error: Error, step: &Step) -> Error {
+    error.with_object(step_object(step))
+}
+
+/// What `step` is done to, as an error names it (#526).
+fn step_object(step: &Step) -> crate::netlink::ErrorObject {
+    use crate::netlink::ErrorObject;
+    let link = |name: &str| ErrorObject::Link {
+        name: name.to_string(),
+    };
+    let address = |a: &super::types::DeclaredAddress| ErrorObject::Address {
+        dev: a.dev.clone(),
+        address: format!("{}/{}", a.address, a.prefix_len),
+    };
+    let route = |r: &super::types::DeclaredRoute| ErrorObject::Route {
+        destination: format!("{}/{}", r.destination, r.prefix_len),
+        table: r.table,
+    };
+    let qdisc = |q: &super::types::DeclaredQdisc| ErrorObject::Qdisc {
+        dev: q.dev.clone(),
+        kind: q.qdisc_type.kind().to_string(),
+    };
+    match step {
+        Step::MissingLink { name } | Step::DeleteLink { name } => link(name),
+        Step::RefuseRemoval(r) | Step::RemoveLink(r) => link(&r.name),
+        Step::RefuseRecreate(r) | Step::DeleteForRecreate(r) => link(&r.name),
+        Step::RaiseMtuFirst { link: name, .. } => link(name),
+        Step::CreateLink(l) => link(&l.name),
+        Step::ModifyLink { name, .. } => link(name),
+        Step::PinBridgeMtu { bridge, .. } => link(bridge),
+        Step::HoldVlanDown { vlan } => link(vlan),
+        Step::AddAddress(a) | Step::ChangeAddress(a) | Step::DeleteAddress { address: a, .. } => {
+            address(a)
+        }
+        Step::RefuseRoute(c) => route(&c.route),
+        Step::ReplaceRoute { after: r, .. } | Step::DeleteRoute(r) => route(r),
+        Step::SetNeighbour { after: n, .. } | Step::DeleteNeighbour(n) => ErrorObject::Neighbour {
+            dev: n.dev.clone(),
+            destination: n.destination,
+        },
+        Step::SetFdb { after: e, .. } | Step::DeleteFdb(e) => ErrorObject::Fdb {
+            dev: e.dev.clone(),
+            mac: crate::util::addr::format_mac(&e.mac),
+        },
+        Step::AddRule(r) | Step::DeleteRule(r) => ErrorObject::Rule {
+            priority: r.priority,
+        },
+        Step::RefuseNexthop(c) => ErrorObject::Nexthop { id: c.nexthop.id },
+        Step::SetNexthop { after: n, .. } | Step::DeleteNexthop(n) => ErrorObject::Nexthop { id: n.id },
+        Step::DeleteQdisc(q) | Step::ReplaceQdisc(q) | Step::AddQdisc(q) => qdisc(q),
+        Step::TcTree { dev, .. } => ErrorObject::Tc { dev: dev.clone() },
+    }
 }
 
 /// The step as `ApplyError::operation` names it.

@@ -1497,13 +1497,20 @@ impl WireguardConfigDiff {
                     }
                     b
                 })
-                .await?;
+                .await
+                .map_err(|e| {
+                    e.with_object(crate::netlink::ErrorObject::WireguardDevice {
+                        name: ifname.clone(),
+                    })
+                    .with_context(format!("set wireguard device {ifname}"))
+                })?;
                 result.device_writes += 1;
             }
 
             for added in &changes.peers_to_add {
                 conn.set_peer_by_name(ifname, added.public_key, |b| added.apply_to_builder(b))
-                    .await?;
+                    .await
+                    .map_err(|e| peer_error(e, "add", ifname, &added.public_key))?;
                 result.peer_writes += 1;
             }
 
@@ -1528,18 +1535,32 @@ impl WireguardConfigDiff {
                 conn.set_peer_by_name(ifname, *pk, |b| {
                     declared_peer.apply_changes_to_builder(b, peer_changes, removal_supported)
                 })
-                .await?;
+                .await
+                .map_err(|e| peer_error(e, "update", ifname, pk))?;
                 result.peer_writes += 1;
             }
 
             for pk in &changes.peers_to_remove {
-                conn.del_peer_by_name(ifname, *pk).await?;
+                conn.del_peer_by_name(ifname, *pk)
+                    .await
+                    .map_err(|e| peer_error(e, "remove", ifname, pk))?;
                 result.peer_removals += 1;
             }
         }
 
         Ok(result)
     }
+}
+
+/// `e`, naming the peer it failed on (#526).
+fn peer_error(e: crate::netlink::Error, verb: &str, ifname: &str, key: &[u8; WG_KEY_LEN]) -> crate::netlink::Error {
+    let public_key = b64_encode_32(key);
+    let context = format!("{verb} peer {public_key} on {ifname}");
+    e.with_object(crate::netlink::ErrorObject::WireguardPeer {
+        dev: ifname.to_string(),
+        public_key,
+    })
+    .with_context(context)
 }
 
 /// No trailing newline, like `ConfigDiff`'s and `NftablesDiff`'s, so
