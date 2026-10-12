@@ -561,6 +561,28 @@ mod tests {
         assert_eq!(parsed.frequency_monitor, original.frequency_monitor);
     }
 
+    /// v7.x added `DPLL_TYPE_GENERIC` (3), which `DpllType` doesn't
+    /// have yet. A device of that type reads with `kind: None`; before
+    /// #727 its whole reply failed to parse, and so did the dump.
+    #[test]
+    fn a_device_of_a_newer_type_still_parses() {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        __rt::emit_u32_attr(&mut b, DpllAttr::Id as u16, 5);
+        __rt::emit_str_attr(&mut b, DpllAttr::ModuleName as u16, "zl3073x");
+        __rt::emit_u32_attr(&mut b, DpllAttr::Type as u16, 3);
+        __rt::emit_u32_attr(&mut b, DpllAttr::Mode as u16, DpllMode::Automatic as u32);
+        __rt::emit_u32_attr(&mut b, DpllAttr::ModeSupported as u16, DpllMode::Manual as u32);
+        __rt::emit_u32_attr(&mut b, DpllAttr::ModeSupported as u16, 99);
+        let parsed = DpllDeviceReply::from_bytes(&b.as_bytes()[start..])
+            .expect("a newer enum value must not fail the reply");
+        assert_eq!(parsed.id, 5);
+        assert_eq!(parsed.module_name, "zl3073x");
+        assert_eq!(parsed.kind, None);
+        assert_eq!(parsed.mode, Some(DpllMode::Automatic));
+        assert_eq!(parsed.mode_supported, vec![DpllMode::Manual]);
+    }
+
     #[test]
     fn device_reply_missing_attrs_yield_defaults_and_nones() {
         let parsed = DpllDeviceReply::from_bytes(&[]).expect("parse");

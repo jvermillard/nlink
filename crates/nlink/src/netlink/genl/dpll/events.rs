@@ -166,6 +166,25 @@ mod tests {
         full[16..].to_vec()
     }
 
+    /// A notification about a device of a type newer than `DpllType`
+    /// is delivered, with `kind: None`. Before #727 it was dropped.
+    #[test]
+    fn a_device_of_a_newer_type_is_still_announced() {
+        let payload = synth_payload(DpllCmd::DeviceCreateNtf, |b| {
+            __rt::emit_u32_attr(b, DpllAttr::Id as u16, 9);
+            __rt::emit_u32_attr(b, DpllAttr::Type as u16, 3); // DPLL_TYPE_GENERIC, v7.x
+            __rt::emit_u32_attr(b, DpllAttr::LockStatus as u16, DpllLockStatus::Locked as u32);
+        });
+        match parse_dpll_event(&payload).expect("the event must not be dropped") {
+            DpllEvent::DeviceCreated(dev) => {
+                assert_eq!(dev.id, 9);
+                assert_eq!(dev.kind, None);
+                assert_eq!(dev.lock_status, Some(DpllLockStatus::Locked));
+            }
+            other => panic!("expected DeviceCreated, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_device_change_with_full_state() {
         let payload = synth_payload(DpllCmd::DeviceChangeNtf, |b| {

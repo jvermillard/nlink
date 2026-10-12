@@ -645,6 +645,18 @@ All notable changes to this project will be documented in this file.
     - A root transition changes a keyed `ip daddr` from `4.0.5.0` to
       `4.0.6.0` and reads the result back with `nft`.
 
+- **An enum value newer than nlink no longer fails a whole GENL message
+  (#727).** `#[derive(GenlMessage)]` and `#[derive(NetlinkAttrs)]` returned
+  `InvalidMessage` when an enum-typed field carried a value its `GenlEnum`
+  had no variant for. Every other attribute in the frame was lost with it.
+  The YNL spec gate (#167) showed the case: v7.x adds `DPLL_TYPE_GENERIC`.
+  On a kernel with such a device, `get_devices` failed, and the DPLL event
+  stream dropped that device's notifications. An unknown value now reads as
+  an absent attribute: an `Option<E>` stays `None`, and a `Vec<E>` skips the
+  element. This is how the derives already treat unknown attributes and
+  unknown flag bits. It affects every enum field in dpll, ovpn and
+  net_shaper.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

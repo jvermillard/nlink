@@ -35,7 +35,11 @@
 //!
 //! Unknown attribute types are silently skipped — forward
 //! compatibility with newer kernels that emit attrs older
-//! consumers don't understand.
+//! consumers don't understand. An enum value newer than the enum
+//! is treated the same way (#727): an `Option<E>` field stays
+//! `None` and a `Vec<E>` field skips the element, so one new value
+//! does not cost the rest of the message. Unknown bits in a
+//! bitflags field are kept (`from_bits_retain`).
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
@@ -700,11 +704,9 @@ impl FieldSpec {
                 WireKind::Enum { type_path, .. } => quote! {
                     __ty if __ty == (#attr) as u16 => {
                         let __raw = #parse_fn(__attr_payload)?;
-                        let __decoded = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
-                            .map_err(|e| ::nlink::Error::invalid_message(
-                                ::std::format!("{e}")
-                            ))?;
-                        #ident = ::core::option::Option::Some(__decoded);
+                        // A value newer than the enum reads as an absent
+                        // attribute, not a failed message (#727).
+                        #ident = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw).ok();
                     }
                 },
                 WireKind::Nested { type_path } => quote! {
@@ -735,13 +737,14 @@ impl FieldSpec {
             WireKind::RepeatedEnum { type_path, .. } => quote! {
                 __ty if __ty == (#attr) as u16 => {
                     // Kernel may emit the same attr type repeatedly
-                    // for list-valued fields. Push each occurrence.
+                    // for list-valued fields. Push each occurrence; a
+                    // value newer than the enum is skipped (#727).
                     let __raw = #parse_fn(__attr_payload)?;
-                    let __decoded = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
-                        .map_err(|e| ::nlink::Error::invalid_message(
-                            ::std::format!("{e}")
-                        ))?;
-                    #ident.push(__decoded);
+                    if let ::core::result::Result::Ok(__decoded) =
+                        <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
+                    {
+                        #ident.push(__decoded);
+                    }
                 }
             },
             WireKind::Bitflags { type_path, .. } => quote! {

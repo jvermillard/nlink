@@ -223,7 +223,9 @@ pub fn derive_genl_enum(input: TokenStream) -> TokenStream {
 /// Missing attributes produce default values (zero for ints,
 /// empty for strings/bytes, `None` for `Option<T>`). Unknown
 /// attribute types are silently skipped — forward-compatibility
-/// with newer kernels.
+/// with newer kernels. So is an enum value the `GenlEnum` has no
+/// variant for: an `Option<E>` field stays `None` and a `Vec<E>`
+/// field skips the element, rather than failing the message.
 ///
 /// # Example
 ///
