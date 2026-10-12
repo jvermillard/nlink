@@ -92,7 +92,7 @@ jobs:
           done
       - name: Build with lab feature
         shell: bash
-        run: cargo build -p nlink --features lab,sockdiag,namespace_watcher --tests
+        run: cargo build -p nlink --features lab,sockdiag,namespace_watcher,process --tests
       # This step gates. It carried `continue-on-error: true` from its
       # first run until #350, nominally waiting on #293/#294 — both long
       # fixed — and the flag did exactly what it says: this step's result
@@ -129,7 +129,7 @@ jobs:
           # privileged trial reached the same conclusion. Set it to 1 on
           # a lane that does run as host root, and those skips become
           # failures.
-        run: cargo test -p nlink --features lab,sockdiag,namespace_watcher -- --test-threads=1 --nocapture
+        run: cargo test -p nlink --features lab,sockdiag,namespace_watcher,process -- --test-threads=1 --nocapture
       - name: Library tests
         shell: bash
         run: cargo test -p nlink --lib

@@ -66,7 +66,7 @@ the workflow. For local validation as a non-root user, the
 ```bash
 # The CI lane's features; the runner puts sudo in front of the test binary only.
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' \
-  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher \
+  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher,process \
   -- --test-threads=1
 ```
 
@@ -189,6 +189,7 @@ unsafe pointer casts in `types/`.
 | `syscall_batch` | `recvmmsg`/`sendmmsg` batching wired into eager + streaming dump paths (0.16+; opt-in for one soak release) |
 | `serde` | `Serialize` + validating `Deserialize` on the declarative config types (`NetworkConfig` round-trips through JSON/YAML; addresses/routes as CIDR strings, MACs as `aa:bb:..`, validated via `try_from`). Also gates `ConfigDiff`/`NftablesDiff`/result-type `Serialize`. Pulls `serde_json` for the `NetworkConfig::{from_json_str,to_json_string}` helpers. |
 | `schemars` | JSON Schema (draft 7) for `NetworkConfig` via `json_schema()` / `json_schema_value()` — wire into editor `json.schemas`/`yaml.schemas` or CI validation. Opt-in; implies `serde`; faithful to the human-facing JSON shape (CIDR strings, not parsed structs). 0.23+. |
+| `process` | `NetnsCommand::{spawn_tokio, output_async}`: a namespace process as a tokio child (`tokio/process`). In the integration lane's features. 0.32+, #521. |
 | `wireguard-keys` | `genl::wireguard::PrivateKey::{generate, public_key}` — X25519 key pairs without a crypto crate of your own (`x25519-dalek`). The key type itself, base64 and clamping, is always available. 0.31+, #529. |
 | `full` | All of the above except `lab`, which is test code: enable it in dev-dependencies (0.32, #532) |
 
