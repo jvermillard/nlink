@@ -336,3 +336,110 @@ async fn a_sub_second_keepalive_is_one_second() -> nlink::Result<()> {
     ];
     assert_converges("wge", cases).await
 }
+
+/// #529: an allowed-IP edit asks the kernel, once, whether it removes a
+/// single prefix (`WGALLOWEDIP_F_REMOVE_ME`, 6.16+). The probe changes
+/// nothing; on a kernel without the flag — this one, 6.12 — it says so and
+/// the edit replaces the list, ending where it was declared; with no
+/// prefix to remove, only the new one is sent.
+#[tokio::test]
+async fn an_allowed_ip_edit_probes_for_per_prefix_removal() -> nlink::Result<()> {
+    use nlink::netlink::Wireguard;
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("wireguard");
+
+    let ns = TestNamespace::new("wg-prefix")?;
+    let (route, wg) = (ns.connection()?, ns.connection_for_async::<Wireguard>().await?);
+    let net = |n| AllowedIp::v4(Ipv4Addr::new(10, n, 0, 0), 24);
+    let config = |nets: Vec<u8>| {
+        WireguardConfig::new().device("wg0", move |d| {
+            d.listen_port(51830).peer(peer_key(0xd1), move |mut p| {
+                for n in &nets {
+                    p = p.allowed_ip(net(*n));
+                }
+                p
+            })
+        })
+    };
+    let first = config(vec![0, 1]);
+    first.ensure_devices(&route).await?;
+    let _ = first.apply(&wg).await?;
+
+    let absent = AllowedIp::v4(Ipv4Addr::new(255, 255, 255, 255), 32);
+    let supported = wg.allowed_ip_removal_supported("wg0", peer_key(0xd1), absent).await?;
+    let (major, minor) = kernel_version();
+    assert_eq!(supported, (major, minor) >= (6, 16), "kernel {major}.{minor}");
+    assert_eq!(held_ips(&wg).await?, ["10.0.0.0/24", "10.1.0.0/24"], "the probe changed nothing");
+
+    // 10.1 goes, 10.2 comes.
+    let second = config(vec![0, 2]);
+    let _ = second.apply(&wg).await?;
+    assert_eq!(held_ips(&wg).await?, ["10.0.0.0/24", "10.2.0.0/24"]);
+    assert!(second.diff(&wg).await?.is_empty());
+    // Only an addition: no list to replace.
+    let third = config(vec![0, 2, 3]);
+    let diff = third.diff(&wg).await?;
+    let (_, changes) = &diff.devices_to_modify[0].1.peers_to_modify[0];
+    assert_eq!(changes.allowed_ips_added, [net(3)]);
+    assert!(changes.allowed_ips_removed.is_empty());
+    let _ = third.apply(&wg).await?;
+    assert_eq!(held_ips(&wg).await?, ["10.0.0.0/24", "10.2.0.0/24", "10.3.0.0/24"]);
+    Ok(())
+}
+
+/// wg0's one peer's allowed IPs, sorted.
+async fn held_ips(
+    wg: &nlink::netlink::Connection<nlink::netlink::Wireguard>,
+) -> nlink::Result<Vec<String>> {
+    let mut ips: Vec<String> = wg
+        .get_device_by_name("wg0")
+        .await?
+        .peers
+        .remove(0)
+        .allowed_ips
+        .iter()
+        .map(|ip| format!("{}/{}", ip.addr, ip.cidr))
+        .collect();
+    ips.sort();
+    Ok(ips)
+}
+
+/// The running kernel's major and minor version.
+fn kernel_version() -> (u32, u32) {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut parts = release.trim().split(['.', '-']).map(|p| p.parse().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+/// #529: a peer whose endpoint is `InitialOnly` keeps the endpoint it
+/// roamed to; an enforced one is put back.
+#[tokio::test]
+async fn an_initial_only_endpoint_lets_a_peer_roam() -> nlink::Result<()> {
+    use nlink::netlink::Wireguard;
+    use nlink::netlink::genl::wireguard::{EndpointPolicy, WgPeerBuilder};
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("wireguard");
+
+    let ns = TestNamespace::new("wg-roam")?;
+    let (route, wg) = (ns.connection()?, ns.connection_for_async::<Wireguard>().await?);
+    let config = |policy| {
+        WireguardConfig::new().device("wg0", move |d| {
+            d.listen_port(51831)
+                .peer(peer_key(0xd2), move |p| p.endpoint(v4_endpoint()).endpoint_policy(policy))
+        })
+    };
+    let initial_only = config(EndpointPolicy::InitialOnly);
+    initial_only.ensure_devices(&route).await?;
+    let _ = initial_only.apply(&wg).await?;
+    // The peer roams: its handshakes now come from elsewhere.
+    let roamed: SocketAddr = "203.0.113.9:40000".parse().unwrap();
+    wg.set_peer_by_name("wg0", peer_key(0xd2), |p: WgPeerBuilder| p.endpoint(roamed)).await?;
+
+    assert!(initial_only.diff(&wg).await?.is_empty(), "a roamed peer is left where it went");
+    let enforce = config(EndpointPolicy::Enforce).diff(&wg).await?;
+    let (_, changes) = &enforce.devices_to_modify[0].1.peers_to_modify[0];
+    assert!(changes.endpoint_set, "{enforce}");
+    Ok(())
+}

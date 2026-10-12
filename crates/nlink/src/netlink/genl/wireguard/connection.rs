@@ -30,7 +30,10 @@ impl AsyncProtocolInit for Wireguard {
         // a per-family copy (the old `resolve_wireguard_family` was a
         // byte-for-byte duplicate of `resolve_genl_family`).
         let family_id = resolve_genl_family(socket, WG_GENL_NAME).await?;
-        Ok(Self { family_id })
+        Ok(Self {
+            family_id,
+            ..Default::default()
+        })
     }
 }
 
@@ -205,6 +208,39 @@ impl Connection<Wireguard> {
         let peer_builder = configure(super::types::WgPeerBuilder::new(public_key));
         let device_builder = WgDeviceBuilder::new().peer(peer_builder);
         self.apply_device_config(ifname, &device_builder).await
+    }
+
+    /// Whether the kernel removes a single allowed-IP prefix
+    /// (`WGALLOWEDIP_F_REMOVE_ME`, 6.16+), asked once per connection
+    /// (#529).
+    ///
+    /// The probe is a `SET_DEVICE` that changes nothing on either kind of
+    /// kernel: for `peer`, which the device must have, update-only, it
+    /// removes `absent`, a prefix the peer does not hold. A kernel without
+    /// the flag refuses the message (`EINVAL`: its strict parse of the
+    /// allowed-IP nest knows no attribute 4), which is `false`; one with it
+    /// accepts — removing nothing — which is `true`. The `true` path is
+    /// unverified: this was written on 6.12.
+    pub async fn allowed_ip_removal_supported(
+        &self,
+        ifname: &str,
+        peer: [u8; WG_KEY_LEN],
+        absent: AllowedIp,
+    ) -> Result<bool> {
+        if let Some(known) = self.state().allowed_ip_removal.get() {
+            return Ok(*known);
+        }
+        let supported = match self
+            .set_peer_by_name(ifname, peer, |b| b.update_only().remove_allowed_ip(absent))
+            .await
+        {
+            Ok(()) => true,
+            Err(e) if e.is_invalid_argument() => false,
+            Err(e) => return Err(e),
+        };
+        tracing::debug!(supported, "wireguard: per-prefix allowed-IP removal");
+        let _ = self.state().allowed_ip_removal.set(supported);
+        Ok(supported)
     }
 
     /// Remove a peer by public key using interface name.
@@ -471,7 +507,7 @@ fn plan_set_device(peers: &[super::types::WgPeerBuilder]) -> Vec<Vec<PeerPart<'_
     let mut current = Vec::new();
     let mut used = SET_DEVICE_OVERHEAD;
     for peer in peers {
-        let ips = peer.get_allowed_ips();
+        let ips = peer.allowed_ip_entries();
         let (mut next, mut first) = (0, true);
         loop {
             let head = encoded_len(|b| {
@@ -491,8 +527,8 @@ fn plan_set_device(peers: &[super::types::WgPeerBuilder]) -> Vec<Vec<PeerPart<'_
             }
             used += head;
             let start = next;
-            while let Some(ip) = ips.get(next) {
-                let len = encoded_len(|b| append_allowed_ip(b, 0, ip));
+            while let Some((ip, remove)) = ips.get(next) {
+                let len = encoded_len(|b| append_allowed_ip(b, 0, ip, *remove));
                 if used + len > SET_DEVICE_BUDGET {
                     break;
                 }
@@ -516,12 +552,16 @@ fn plan_set_device(peers: &[super::types::WgPeerBuilder]) -> Vec<Vec<PeerPart<'_
     messages
 }
 
-/// One allowed-ip entry, nested under index `idx`.
-fn append_allowed_ip(builder: &mut MessageBuilder, idx: u16, allowed_ip: &AllowedIp) {
+/// One allowed-ip entry, nested under index `idx`; a removal carries
+/// `WGALLOWEDIP_F_REMOVE_ME` (#529).
+fn append_allowed_ip(builder: &mut MessageBuilder, idx: u16, allowed_ip: &AllowedIp, remove: bool) {
     let ip_token = builder.nest_start(idx | NLA_F_NESTED);
     builder.append_attr_u16(WgAllowedIpAttr::Family as u16, allowed_ip.family());
     builder.append_attr(WgAllowedIpAttr::IpAddr as u16, &allowed_ip.addr_bytes());
     builder.append_attr_u8(WgAllowedIpAttr::CidrMask as u16, allowed_ip.cidr);
+    if remove {
+        builder.append_attr_u32(WgAllowedIpAttr::Flags as u16, super::WGALLOWEDIP_F_REMOVE_ME);
+    }
     builder.nest_end(ip_token);
 }
 
@@ -556,11 +596,12 @@ fn append_peer_part(builder: &mut MessageBuilder, idx: u16, part: &PeerPart<'_>)
         }
     }
 
-    let ips = &peer.get_allowed_ips()[part.ips.clone()];
+    let entries = peer.allowed_ip_entries();
+    let ips = &entries[part.ips.clone()];
     if !ips.is_empty() {
         let ips_token = builder.nest_start(WgPeerAttr::AllowedIps as u16 | NLA_F_NESTED);
-        for (ip_idx, allowed_ip) in ips.iter().enumerate() {
-            append_allowed_ip(builder, ip_idx as u16, allowed_ip);
+        for (ip_idx, (allowed_ip, remove)) in ips.iter().enumerate() {
+            append_allowed_ip(builder, ip_idx as u16, allowed_ip, *remove);
         }
         builder.nest_end(ips_token);
     }
@@ -668,6 +709,25 @@ fn parse_sockaddr(data: &[u8]) -> Option<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// #529: a removal carries `WGALLOWEDIP_F_REMOVE_ME`; an addition
+    /// carries no flags attribute.
+    #[test]
+    fn a_removed_allowed_ip_carries_the_remove_flag() {
+        use crate::netlink::attr::AttrIter;
+        let ip = AllowedIp::v4(std::net::Ipv4Addr::new(10, 1, 0, 0), 24);
+        let flags_of = |remove| {
+            let mut b = MessageBuilder::new(0, 0);
+            append_allowed_ip(&mut b, 0, &ip, remove);
+            let bytes = b.finish();
+            let (_, nest) = AttrIter::new(&bytes[16..]).next().unwrap();
+            AttrIter::new(nest)
+                .find(|(t, _)| *t == WgAllowedIpAttr::Flags as u16)
+                .map(|(_, v)| u32::from_ne_bytes(v.try_into().unwrap()))
+        };
+        assert_eq!(flags_of(true), Some(super::super::WGALLOWEDIP_F_REMOVE_ME));
+        assert_eq!(flags_of(false), None);
+    }
 
     use super::*;
     use crate::netlink::attr::{NLA_HDRLEN, NlAttr, nla_align};

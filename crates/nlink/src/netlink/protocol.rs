@@ -213,6 +213,9 @@ impl ProtocolState for Generic {
 pub struct Wireguard {
     /// Resolved WireGuard GENL family ID.
     pub(crate) family_id: u16,
+    /// Whether the kernel removes one allowed-IP prefix
+    /// (`WGALLOWEDIP_F_REMOVE_ME`, 6.16+), once probed (#529).
+    pub(crate) allowed_ip_removal: std::sync::OnceLock<bool>,
 }
 
 impl private::Sealed for Wireguard {}

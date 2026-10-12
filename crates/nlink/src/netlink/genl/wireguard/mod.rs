@@ -65,7 +65,8 @@ pub mod watch;
 
 pub use config::{
     DeclaredWgDevice, DeclaredWgDeviceBuilder, DeclaredWgPeer, DeclaredWgPeerBuilder,
-    DeviceChanges, PeerChanges, PrivateKey, PublicKey, WireguardApplyResult, WireguardConfig,
+    DeviceChanges, EndpointPolicy, PeerChanges, PrivateKey, PublicKey, WireguardApplyResult,
+    WireguardConfig,
     WireguardConfigDiff,
 };
 pub use types::{
@@ -133,7 +134,14 @@ pub enum WgAllowedIpAttr {
     Family = 1,
     IpAddr = 2,
     CidrMask = 3,
+    /// `WGALLOWEDIP_A_FLAGS` (kernel 6.16+): [`WGALLOWEDIP_F_REMOVE_ME`].
+    Flags = 4,
 }
+
+/// `WGALLOWEDIP_F_REMOVE_ME` (kernel 6.16+): remove this one prefix from
+/// the peer instead of adding it (#529). An older kernel refuses the
+/// whole message (`EINVAL`), its strict parse knowing no attribute 4.
+pub const WGALLOWEDIP_F_REMOVE_ME: u32 = 1;
 
 /// WireGuard device flags.
 #[repr(u32)]
