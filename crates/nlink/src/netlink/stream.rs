@@ -165,6 +165,7 @@ type MetaEvent<P> = (EventMeta, <P as EventSource>::Event);
 /// ([`Connection::with_dispatcher`](crate::Connection::with_dispatcher))
 /// has neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct EventMeta {
     /// The originating socket's port id; 0 for the kernel.

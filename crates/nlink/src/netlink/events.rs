@@ -29,6 +29,9 @@
 //! # }
 //! ```
 
+#[cfg(feature = "serde")]
+pub mod view;
+
 use super::{
     fdb::FdbEntry,
     mdb::MdbEntry,
