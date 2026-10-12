@@ -808,7 +808,7 @@ pub(crate) async fn apply_declared(
         if tree.classes.is_empty() && tree.leaves.is_empty() && tree.filters.is_empty() {
             return Ok(0);
         }
-        return Err(Error::interface_not_found(&tree.dev));
+        return Err(conn.interface_not_found(&tree.dev));
     };
     let ifindex = link.ifindex();
     let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
@@ -914,7 +914,7 @@ async fn apply_tree(
             let FilterSpec::RedirectTo(dev) = &f.spec else {
                 unreachable!("only a redirect resolves to nothing")
             };
-            Error::interface_not_found(dev)
+            conn.interface_not_found(dev)
         })?;
         // A filter of the same name that differs goes first: the kernel
         // refuses another kind at a priority and protocol, and a replace

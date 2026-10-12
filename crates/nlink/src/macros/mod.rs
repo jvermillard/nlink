@@ -501,6 +501,16 @@ pub mod __rt {
         socket: &NetlinkSocket,
         name: &str,
     ) -> Result<(u16, HashMap<String, u32>)> {
+        // An error carries the socket's protocol and namespace (#718).
+        resolve_family_unstamped(socket, name)
+            .await
+            .map_err(|e| socket.stamp(e))
+    }
+
+    async fn resolve_family_unstamped(
+        socket: &NetlinkSocket,
+        name: &str,
+    ) -> Result<(u16, HashMap<String, u32>)> {
         let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
         let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
         builder.append(&genl_hdr);

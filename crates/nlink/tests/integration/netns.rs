@@ -168,6 +168,57 @@ async fn connections_know_their_namespace_and_siblings_follow() -> nlink::Result
     Ok(())
 }
 
+/// An error from a connection made in a namespace says which (#718), on
+/// every path: a kernel refusal to a request, a lookup the connection does
+/// by name, a sibling of another protocol, an nftables batch and a GENL
+/// family. One from the caller's own namespace says nothing.
+#[tokio::test]
+async fn errors_name_the_namespace_they_came_from() -> nlink::Result<()> {
+    use nlink::netlink::nftables::Family;
+    use nlink::netlink::route::Ipv4Route;
+    use nlink::netlink::{Generic, Nftables};
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("netns-err")?;
+    let netns = Netns::open(ns.name())?;
+    let label = ns.name();
+    let suffix = format!(" [netns {label}]");
+    let check = |what: &str, e: &nlink::Error| {
+        assert_eq!(e.netns(), Some(label), "{what}: {e:?}");
+        assert!(e.to_string().ends_with(&suffix), "{what}: {e}");
+    };
+
+    // The namespace has no route anywhere: the kernel refuses this.
+    let route = || Ipv4Route::new("10.1.0.0", 16).gateway(std::net::Ipv4Addr::new(192, 0, 2, 1));
+    let conn = Connection::<Route>::new_in(&netns)?;
+    let refused = conn.add_route(route()).await.unwrap_err();
+    assert!(refused.errno().is_some(), "{refused}");
+    check("a refused request", &refused);
+
+    // Opened by name rather than by handle: the label is the name.
+    let by_name: Connection<Route> = Connection::new_in(ns.name())?;
+    check("by name", &by_name.add_route(route()).await.unwrap_err());
+
+    let missing = conn.set_link_up("nope0").await.unwrap_err();
+    assert!(missing.is_not_found(), "{missing}");
+    check("an interface lookup", &missing);
+
+    let nft = conn.sibling::<Nftables>()?;
+    let batch = nft.del_table("nope", Family::Inet).await.unwrap_err();
+    assert!(batch.is_not_found(), "{batch}");
+    check("an nftables batch", &batch);
+
+    let genl = conn.sibling::<Generic>()?;
+    let family = genl.get_family("nlink-no-such-family").await.unwrap_err();
+    check("a GENL family lookup", &family);
+
+    let host = Connection::<Route>::new()?;
+    let here = host.set_link_up("nlink-nope0").await.unwrap_err();
+    assert_eq!(here.netns(), None, "{here:?}");
+    assert!(!here.to_string().contains("[netns"), "{here}");
+    Ok(())
+}
+
 /// A pool opens its namespace once. When the name is deleted and a new
 /// namespace is created under it, a replacement connection is refused
 /// rather than made in the new namespace, which it was before (#520).

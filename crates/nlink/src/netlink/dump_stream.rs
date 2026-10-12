@@ -361,6 +361,16 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        // An error carries the socket's protocol and namespace (#718).
+        let socket = this.conn.socket();
+        this.poll_unstamped(cx)
+            .map(|item| item.map(|r| r.map_err(|e| socket.stamp(e))))
+    }
+}
+
+impl<P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'_, P, T> {
+    fn poll_unstamped(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T>>> {
+        let this = self;
 
         // Yield buffered items first.
         if let Some(item) = this.pending.pop_front() {

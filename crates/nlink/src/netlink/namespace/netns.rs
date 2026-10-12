@@ -503,7 +503,7 @@ impl Netns {
         let (raw, pid) = self.on_worker(move || NetlinkSocket::create_raw_socket(protocol))??;
         let mut socket = NetlinkSocket::from_raw_socket(raw, pid, protocol)?;
         let fd = self.fd.try_clone().map_err(Error::from)?;
-        socket.set_namespace(Arc::new(fd), self.marker.clone());
+        socket.set_namespace(Arc::new(fd), self.marker.clone(), Some(self.label.clone()));
         Ok(socket)
     }
 

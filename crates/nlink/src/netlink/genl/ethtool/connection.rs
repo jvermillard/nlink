@@ -81,9 +81,7 @@ impl Connection<Ethtool> {
                     .get_link_by_index(*idx)
                     .await?
                     .and_then(|l| l.name().map(|s| s.to_string()))
-                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-                        name: format!("ifindex {}", idx),
-                    }))
+                    .ok_or_else(|| self.interface_not_found(format!("ifindex {idx}")))
             }
         }
     }

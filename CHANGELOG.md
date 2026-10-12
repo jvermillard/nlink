@@ -2378,6 +2378,25 @@ All notable changes to this project will be documented in this file.
   much of each vendored spec nlink mirrors, per attribute set, enum and op
   list. Over the 16 specs it is 42%; netdev and the MPTCP events are at 0%.
 
+- **An error says which namespace its connection was in (#718).**
+  `Error::netns()` returns the label of the `Netns` a connection was made
+  in: an `ip netns` name, a path, `pid 42`, and so on. `Display` puts it
+  last: `add_route: Network is unreachable (errno 101) [netns red]`, and
+  `ApplyError` serializes it as `netns`. A caller with one connection per
+  namespace, such as a lab with a node in each, can tell which one failed
+  without wrapping every call. The label is carried by:
+  - the kernel's refusals, on every request path: rtnetlink requests,
+    dumps and batches, GENL families, nftables batches, sockdiag, xfrm,
+    conntrack, audit and `fib_lookup`;
+  - the socket's own I/O errors and timeouts;
+  - dump and event streams;
+  - GENL family lookups;
+  - the lookups a connection does by name (`InterfaceNotFound`).
+
+  A connection made through `Connection::new_in`, `Netns::connection` or
+  `sibling` has a label; one in the calling thread's namespace has none.
+  Errors from checking arguments before anything is sent carry no label.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
