@@ -43,6 +43,7 @@ ALLOWLIST_FILE = REPO / "scripts" / "audit-uapi-constants.allowlist"
 NEWER_FILE = REPO / "scripts" / "audit-uapi-constants.newer"
 CONST_ALLOW_FILE = REPO / "scripts" / "audit-uapi-constants.const-allowlist"
 MODMAP_FILE = REPO / "scripts" / "audit-uapi-constants.modmap"
+YNL_QUIRKS_FILE = REPO / "scripts" / "audit-uapi-constants.ynl-quirks"
 SRC_DIRS = [REPO / "crates" / "nlink" / "src"]
 
 
@@ -172,9 +173,17 @@ def parse_kernel_consts() -> dict[str, int]:
 # nlink enums
 # --------------------------------------------------------------------------
 
+# `#[repr(uN)]`, or the GENL derives' `#[genl_attribute(repr = "uN")]` (and
+# `genl_command`, `genl_enum`), which declare the same kind of wire enum through
+# nlink-macros. The derive form went unchecked until #167: all of ovpn,
+# net_shaper and dpll.
 RUST_ENUM_RE = re.compile(
-    r"#\[repr\(u(?:8|16|32|64)\)\][^{}]*?\benum\s+(\w+)\s*\{(.*?)\n\}",
-    re.S,
+    r"#\[(?:repr\(u(?:8|16|32|64)\)"
+    r"|genl_(?:attribute|command|enum)\(repr\s*=\s*\"u(?:8|16|32|64)\"\))\]"
+    # The body ends at the `}` indented like the `enum` line, so an enum in a
+    # test module ends at its own brace, not at the module's.
+    r"[^{}]*?^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?enum\s+(\w+)\s*\{(.*?)\n\1\}",
+    re.S | re.M,
 )
 VARIANT_RE = re.compile(r"^\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*,", re.M)
 
@@ -187,7 +196,7 @@ def parse_rust_enums() -> dict[str, tuple[Path, dict[str, int]]]:
             text = path.read_text()
             # Drop doc comments so `/// FOO = 3` in prose can't be read as code.
             text = re.sub(r"^\s*//[^\n]*$", "", text, flags=re.M)
-            for name, body in RUST_ENUM_RE.findall(text):
+            for _indent, name, body in RUST_ENUM_RE.findall(text):
                 variants = {
                     v: int(n, 0) for v, n in VARIANT_RE.findall(body)
                 }
@@ -316,6 +325,72 @@ def parse_map() -> dict[str, tuple[str, dict[str, str]]]:
     return mapping
 
 
+def ynl_overlay(kernel: dict[str, int]) -> tuple[dict[str, int], list[str], list[str]]:
+    """The constants the vendored YNL specs define (#167).
+
+    Returns `(spec_only, failures, notes)`:
+
+      - `spec_only`: what the specs define and the headers don't. Merged into the
+        kernel's constants, it checks nlink where this host's headers can't: a
+        family newer than them (ovpn, net_shaper on a 6.12 host) and every
+        constant after the host's kernel version.
+      - `failures`: a vendored spec that doesn't match its SOURCE hash, or a
+        constant the specs and the headers both define with different values.
+        The latter means the derivation or a spec is wrong. A known spec quirk
+        is excused by name in audit-uapi-constants.ynl-quirks.
+      - `notes`: what was skipped, and why.
+
+    Needs PyYAML, and fails without it rather than skip: the constants only a
+    spec defines are no longer vouched for in audit-uapi-constants.newer, so a
+    skipped overlay would report them as invented, and a silent skip would be
+    indistinguishable from a pass.
+    """
+    import audit_uapi_ynl as ynl  # noqa: PLC0415  (sibling module)
+
+    try:
+        import yaml  # noqa: F401, PLC0415
+    except ImportError:
+        return {}, ["PyYAML is not installed, and the YNL spec check needs it "
+                    "(apt install python3-yaml, or dnf install python3-pyyaml)"], []
+
+    problems = ynl.verify_hashes()
+    if problems:
+        return {}, [f"vendored YNL spec: {p}" for p in problems], []
+
+    quirks = {
+        line.split("#", 1)[0].strip()
+        for line in YNL_QUIRKS_FILE.read_text().splitlines()
+        if line.split("#", 1)[0].strip()
+    } if YNL_QUIRKS_FILE.exists() else set()
+
+    spec_only: dict[str, int] = {}
+    owner: dict[str, str] = {}
+    failures: list[str] = []
+    for spec, consts in ynl.load().items():
+        for name, value in sorted(consts.items()):
+            if name in quirks:
+                continue
+            if name in kernel:
+                if kernel[name] != value:
+                    failures.append(
+                        f"third_party/ynl-specs/{spec}.yaml: {name} = {value}, "
+                        f"but {HEADER_DIR} says {kernel[name]}\n"
+                        f"    The spec and the header disagree. Either the derivation in\n"
+                        f"    scripts/audit_uapi_ynl.py is wrong for this case, or the spec\n"
+                        f"    is (list it, with the reason, in\n"
+                        f"    scripts/audit-uapi-constants.ynl-quirks)."
+                    )
+            elif name in spec_only and spec_only[name] != value:
+                failures.append(
+                    f"{name}: {owner[name]}.yaml says {spec_only[name]}, "
+                    f"{spec}.yaml says {value}"
+                )
+            else:
+                spec_only[name] = value
+                owner[name] = spec
+    return spec_only, failures, []
+
+
 def main() -> int:
     if not HEADER_DIR.is_dir():
         print(f"SKIP: {HEADER_DIR} not present (install kernel-headers)")
@@ -325,6 +400,14 @@ def main() -> int:
     if len(kernel) < 1000:
         print(f"FAIL: only parsed {len(kernel)} kernel constants — headers look wrong")
         return 1
+
+    spec_only, ynl_failures, ynl_notes = ynl_overlay(kernel)
+    if ynl_failures:
+        print(f"FAIL: {len(ynl_failures)} problem(s) with the YNL spec check.\n")
+        for f in ynl_failures:
+            print(f"  {f}\n")
+        return 1
+    kernel.update(spec_only)
 
     rust = parse_rust_enums()
     mapping = parse_map()
@@ -470,10 +553,13 @@ def main() -> int:
             "see scripts/audit-uapi-constants.newer)\n"
         )
 
+    for note in ynl_notes:
+        print(f"note: {note}")
     print(
         f"OK: {checked_variants} discriminants across {checked_enums} enums, and "
-        f"{checked_consts} plain consts, match {HEADER_DIR} "
-        f"({len(allowed)} nlink-only enums, {len(const_allowed)} consts allowlisted)"
+        f"{checked_consts} plain consts, match {HEADER_DIR} and the YNL specs "
+        f"({len(spec_only)} constants only the specs define; "
+        f"{len(allowed)} nlink-only enums, {len(const_allowed)} consts allowlisted)"
     )
     return 0
 

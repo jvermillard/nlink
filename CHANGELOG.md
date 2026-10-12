@@ -2312,6 +2312,39 @@ All notable changes to this project will be documented in this file.
     must name the route. Before, `object()` was `None` and the message
     named no route.
 
+- **The UAPI audit checks nlink against the kernel's YNL specs too (#167).**
+  The kernel describes its netlink families in YAML specs, and its header
+  generator names every constant in them by fixed rules. 16 of those specs,
+  from v7.2, are vendored in `third_party/ynl-specs/` with a `SOURCE` of
+  per-file sha256s. `scripts/audit-uapi-constants.sh` derives their constants
+  by the generator's rules and merges them with the host's headers:
+  - **A spec reaches past the host's headers.** That covers families newer than
+    the build host, such as ovpn (6.16) and net_shaper (6.13) on a 6.12 host,
+    and every constant added after the host's kernel. It covers 734 constants
+    the 6.12 headers do not define.
+  - **A spec that disagrees with a header fails the build.** Either the
+    derivation or the spec is wrong for that case. The one known spec quirk
+    (nlctrl lists `NL_POLICY_TYPE_ATTR_MASK` before `_PAD`) is listed by name,
+    with its reason, in `audit-uapi-constants.ynl-quirks`.
+  - **A spec edited by hand fails.** A spec can change only through
+    `scripts/vendor-ynl-specs.sh <tag>`, in a reviewed commit.
+
+  The audit also reads enums declared through the GENL derives
+  (`#[genl_attribute/command/enum(repr = "uN")]`). That form had gone
+  unchecked, which left out all of ovpn, net_shaper and dpll: 26 enums and
+  178 values. They all match. Three constants the specs now vouch for left
+  `audit-uapi-constants.newer`. The audit needs PyYAML, and fails without it
+  instead of skipping. Its self-test reconstructs:
+  - a drift that only a spec can see;
+  - a spec that disagrees with a header;
+  - a spec edited by hand;
+  - an unclassified GENL enum;
+  - a missing PyYAML.
+
+  The nftables and conntrack specs are not vendored. They give no values and
+  omit pad attributes, so their implicit numbering drifts from the headers,
+  which every supported host has anyway.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

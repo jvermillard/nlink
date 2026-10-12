@@ -103,6 +103,8 @@ jobs:
       - run: bash scripts/audit-example-registration.sh
       - run: bash scripts/audit-recv-loop-error-handling.sh
       - run: bash scripts/audit-sysfs-in-lib.sh
+      # The UAPI audit reads the vendored YNL specs (#167) and fails without PyYAML.
+      - run: python3 -c 'import yaml' 2>/dev/null || (sudo apt-get update && sudo apt-get install -y python3-yaml)
       - run: bash scripts/audit-uapi-constants.sh
       - run: bash scripts/test-audit-uapi-constants.sh
       - run: bash scripts/audit-message-accessor-convention.sh

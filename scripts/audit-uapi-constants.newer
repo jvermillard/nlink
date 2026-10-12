@@ -23,20 +23,17 @@
 # looking at a transcription error, which is the thing this gate exists to find.
 #
 # Format: one kernel constant name per line.
+#
+# A constant a vendored YNL spec defines (third_party/ynl-specs) does not belong
+# here: the specs check it on every host (#167). What is left are constants
+# outside the specs: ethtool's directional commands and its string sets.
 
 # --- ethtool -------------------------------------------------------------
 # Module firmware flashing, and the PHY_GET command it displaced. Linux 6.9.
 ETHTOOL_MSG_MODULE_FW_FLASH_ACT
 ETHTOOL_MSG_PHY_GET
 
-# Per-PHY addressing in the ethtool request header. Linux 6.11.
-ETHTOOL_A_HEADER_PHY_INDEX
-
 # PHY(dev) statistics, and the hardware-timestamping flags string set.
 # Linux 6.11 / 6.13.
 ETH_SS_STATS_PHY
 ETH_SS_TS_FLAGS
-
-# WireGuard per-prefix allowed-IP removal, kernel 6.16 (#529).
-WGALLOWEDIP_A_FLAGS
-WGALLOWEDIP_F_REMOVE_ME
