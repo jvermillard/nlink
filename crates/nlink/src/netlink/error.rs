@@ -288,6 +288,12 @@ pub enum ErrorDetail {
         /// header it echoes (#526): what [`Error::kind`] reads an errno
         /// against. `None` for an error not built from a kernel reply.
         request_type: Option<u16>,
+        /// The protocol the request was sent on. A request type means
+        /// something only within its protocol: 25 is `RTM_DELROUTE` on
+        /// rtnetlink, `XFRM_MSG_UPDPOLICY` on xfrm, and a family id on
+        /// generic netlink (#722). `None` where the reply's socket was not
+        /// known.
+        protocol: Option<crate::netlink::Protocol>,
     },
 
     /// The kernel refused an nftables batch.
@@ -916,8 +922,26 @@ impl Error {
             ext_ack,
             ext_ack_offset,
             request_type,
+            protocol: None,
         }
         .into()
+    }
+
+    /// Note the protocol a kernel refusal came back on (#722), unless it
+    /// has one: the connection paths, which know their socket, call this.
+    pub(crate) fn in_protocol(mut self, p: crate::netlink::Protocol) -> Self {
+        if let ErrorDetail::Kernel { protocol, .. } = &mut self.0.detail {
+            protocol.get_or_insert(p);
+        }
+        self
+    }
+
+    /// The protocol of the request the kernel refused, where known (#722).
+    pub fn protocol(&self) -> Option<crate::netlink::Protocol> {
+        match self.detail() {
+            ErrorDetail::Kernel { protocol, .. } => *protocol,
+            _ => None,
+        }
     }
 
     /// The `nlmsg_type` of the request the kernel refused, if this is its
@@ -1139,15 +1163,18 @@ impl Error {
             ErrorDetail::Internal(_) => ErrorKind::Other,
             // An errno means "not there" only for some requests (#526): the
             // kernel answers a route delete that matches nothing with ESRCH,
-            // and an address delete with EADDRNOTAVAIL.
+            // and an address delete with EADDRNOTAVAIL. Only on rtnetlink:
+            // the same type numbers mean other requests elsewhere (#722).
             ErrorDetail::Kernel {
                 errno: libc::ESRCH,
                 request_type: Some(crate::netlink::message::NlMsgType::RTM_DELROUTE),
+                protocol: Some(crate::netlink::Protocol::Route),
                 ..
             }
             | ErrorDetail::Kernel {
                 errno: libc::EADDRNOTAVAIL,
                 request_type: Some(crate::netlink::message::NlMsgType::RTM_DELADDR),
+                protocol: Some(crate::netlink::Protocol::Route),
                 ..
             } => ErrorKind::NotFound,
             _ => self.errno().map_or(ErrorKind::Other, ErrorKind::from_errno),
@@ -1944,6 +1971,7 @@ mod tests {
             ext_ack: Some("attribute IFLA_MTU rejected: value 0 out of range".into()),
             ext_ack_offset: Some(24),
             request_type: None,
+            protocol: None,
         });
         assert_eq!(
             err.ext_ack(),
@@ -1972,6 +2000,7 @@ mod tests {
             ext_ack: None,
             ext_ack_offset: None,
             request_type: None,
+            protocol: None,
         });
         assert_eq!(err.ext_ack(), None);
         assert_eq!(err.ext_ack_offset(), None);
@@ -2005,6 +2034,7 @@ mod tests {
             ext_ack: None,
             ext_ack_offset: None,
             request_type: None,
+            protocol: None,
         });
         assert!(err.is_no_buffer_space());
     }

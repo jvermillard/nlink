@@ -993,7 +993,10 @@ impl<P: ProtocolState> Connection<P> {
     /// Prefer using typed methods like `get_links()`, `add_route()`, etc.
     pub(crate) async fn send_request(&self, builder: MessageBuilder) -> Result<Vec<u8>> {
         builder.check_size()?;
-        self.with_timeout(self.send_request_inner(builder)).await
+        let protocol = self.socket.protocol();
+        self.with_timeout(self.send_request_inner(builder))
+            .await
+            .map_err(|e| e.in_protocol(protocol))
     }
 
     /// Send a request that expects an ACK only (no data response).
@@ -1002,7 +1005,10 @@ impl<P: ProtocolState> Connection<P> {
     /// Prefer using typed methods like `add_link()`, `del_route()`, etc.
     pub(crate) async fn send_ack(&self, builder: MessageBuilder) -> Result<()> {
         builder.check_size()?;
-        self.with_timeout(self.send_ack_inner(builder)).await
+        let protocol = self.socket.protocol();
+        self.with_timeout(self.send_ack_inner(builder))
+            .await
+            .map_err(|e| e.in_protocol(protocol))
     }
 
     /// Send `builder` and wait for its ACK, returning the value some
@@ -1024,7 +1030,9 @@ impl<P: ProtocolState> Connection<P> {
                     if header.nlmsg_seq != seq || !header.is_error() {
                         continue;
                     }
-                    return NlMsgError::from_bytes(payload)?.ack_value(header.nlmsg_flags, payload);
+                    return NlMsgError::from_bytes(payload)?
+                        .ack_value(header.nlmsg_flags, payload)
+                        .map_err(|e| e.in_protocol(self.socket.protocol()));
                 }
             }
         })
@@ -1085,7 +1093,7 @@ impl<P: ProtocolState> Connection<P> {
                         "dump interrupted by a concurrent change; re-dumping"
                     );
                 }
-                other => return other,
+                other => return other.map_err(|e| e.in_protocol(self.socket.protocol())),
             }
         }
     }

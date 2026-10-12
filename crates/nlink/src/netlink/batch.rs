@@ -452,8 +452,9 @@ impl<'a> Batch<'a> {
                                 if err.is_ack() {
                                     results[idx] = Some(Ok(()));
                                 } else {
-                                    results[idx] =
-                                        Some(Err(err.to_error(header.nlmsg_flags, payload)));
+                                    results[idx] = Some(Err(err
+                                        .to_error(header.nlmsg_flags, payload)
+                                        .in_protocol(crate::netlink::Protocol::Route)));
                                 }
                                 remaining -= 1;
                             }
