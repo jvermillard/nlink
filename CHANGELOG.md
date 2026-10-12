@@ -416,6 +416,16 @@ All notable changes to this project will be documented in this file.
     adds it, where it used to be sent table 254.
   - **Tests.** Root tests cover each case, and fail without the fix.
 
+- **`get_nsid`, `get_nsid_for_pid` and `set_nsid` work (#669).**
+  - **They failed on every call.** Each appended the one-byte `rtgenmsg`
+    with `append`, which pads it to four bytes, then padded it by three
+    more. The `NETNSA_*` attribute sat four bytes past where the kernel
+    reads it, so every call failed with "Peer netns reference is missing"
+    (`EINVAL`).
+  - **`nlink-ip netns` too.** Its nsid lookups failed the same way.
+  - **Test.** A root test sets an id and reads it back by fd and by the
+    pid of a process inside the namespace. It fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

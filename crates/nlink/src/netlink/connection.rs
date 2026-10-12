@@ -3767,9 +3767,10 @@ impl Connection<Route> {
     pub async fn get_nsid(&self, ns_fd: RawFd) -> Result<u32> {
         let mut builder = ack_request(RTM_GETNSID);
 
-        // Append rtgenmsg header (1 byte + 3 padding)
+        // The one-byte rtgenmsg, which `append` pads to four: the kernel
+        // reads the attributes from there. Three more bytes of padding put
+        // them where it never looked (#669).
         builder.append(&RtGenMsg::new());
-        builder.append_bytes(&[0u8; 3]); // Padding to 4 bytes
 
         // Add NETNSA_FD attribute
         builder.append_attr_u32(netnsa::FD, ns_fd as u32);
@@ -3812,9 +3813,10 @@ impl Connection<Route> {
     pub async fn get_nsid_for_pid(&self, pid: u32) -> Result<u32> {
         let mut builder = ack_request(RTM_GETNSID);
 
-        // Append rtgenmsg header (1 byte + 3 padding)
+        // The one-byte rtgenmsg, which `append` pads to four: the kernel
+        // reads the attributes from there. Three more bytes of padding put
+        // them where it never looked (#669).
         builder.append(&RtGenMsg::new());
-        builder.append_bytes(&[0u8; 3]); // Padding to 4 bytes
 
         // Add NETNSA_PID attribute
         builder.append_attr_u32(netnsa::PID, pid);
@@ -3853,7 +3855,6 @@ impl Connection<Route> {
 
         // rtgenmsg header (1 byte + 3 padding).
         builder.append(&RtGenMsg::new());
-        builder.append_bytes(&[0u8; 3]);
 
         // NETNSA_NSID carries an i32; -1 means "auto-allocate".
         builder.append_attr_u32(netnsa::NSID, nsid as u32);
