@@ -54,9 +54,11 @@ use super::{
     socket::NetlinkSocket,
 };
 
+mod command;
 mod netns;
 
 pub use netns::{Netns, NetnsId, NetnsRef};
+pub use command::{NetnsCommand, Overlay, etc_overlay_supported};
 
 /// Specification for which network namespace to use.
 ///

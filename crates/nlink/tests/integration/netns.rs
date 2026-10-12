@@ -324,3 +324,116 @@ async fn reclaim_stale_takes_a_dead_marker_and_never_a_live_namespace() -> nlink
     assert_eq!(namespace::owner_of(&name)?, None, "the failed create removed its tag");
     Ok(())
 }
+
+/// Removes `/etc/netns/<name>/` when the test is done with it.
+struct EtcNetns(std::path::PathBuf);
+
+impl EtcNetns {
+    fn new(name: &str) -> std::io::Result<Self> {
+        let dir = std::path::PathBuf::from("/etc/netns").join(name);
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for EtcNetns {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn cat_hosts(cmd: namespace::NetnsCommand) -> nlink::Result<String> {
+    let out = cmd.output()?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The `/etc/netns` overlay as asked (#521): off gives the host's
+/// `/etc/hosts`, strict and best effort the namespace's. A bind the kernel
+/// refuses — here a directory over a file — fails a strict spawn and is
+/// left out of a best-effort one. Where the environment refuses the
+/// private mount namespace altogether, best effort runs with the host's.
+#[tokio::test]
+async fn an_etc_overlay_is_given_as_asked() -> nlink::Result<()> {
+    use namespace::{NetnsCommand, Overlay};
+    use std::process::Command;
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("cmd-overlay")?;
+    let etc = EtcNetns::new(ns.name())?;
+    std::fs::write(etc.0.join("hosts"), "10.9.9.9 overlaid\n")?;
+    let cat = || {
+        let mut c = Command::new("cat");
+        c.arg("/etc/hosts");
+        c
+    };
+    let run = |overlay| cat_hosts(NetnsCommand::new(ns.name(), cat())?.etc_overlay(overlay));
+    assert!(!run(Overlay::Off)?.contains("overlaid"));
+    if namespace::etc_overlay_supported() {
+        assert!(run(Overlay::Strict)?.contains("overlaid"));
+    } else {
+        assert!(run(Overlay::Strict).is_err(), "the probe says strict cannot work here");
+    }
+    // Best effort runs either way, and gets the overlay wherever binds over
+    // /etc are allowed — everywhere this suite runs.
+    assert!(run(Overlay::BestEffort)?.contains("overlaid"));
+
+    // A bind the kernel refuses: a directory over a file.
+    std::fs::remove_file(etc.0.join("hosts"))?;
+    std::fs::create_dir(etc.0.join("hosts"))?;
+    assert!(run(Overlay::Strict).is_err(), "a strict overlay fails without its bind");
+    assert!(!run(Overlay::BestEffort)?.contains("overlaid"));
+
+    // Through a `Netns` opened by name, too.
+    let netns = Netns::open(ns.name())?;
+    let out = cat_hosts(netns.command(cat())?.etc_overlay(Overlay::Off))?;
+    assert!(!out.is_empty());
+    Ok(())
+}
+
+/// A process starts in its cgroup (#521): it joins before it enters the
+/// namespace, so nothing it starts escapes the cgroup.
+#[tokio::test]
+async fn a_process_starts_in_its_cgroup() -> nlink::Result<()> {
+    use namespace::NetnsCommand;
+    use std::process::Command;
+    nlink::require_root!();
+    // cgroupfs is the host's to write.
+    nlink::require_host_root!();
+
+    let ns = TestNamespace::new("cmd-cgroup")?;
+    let name = format!("nlink-test-{}", std::process::id());
+    let dir = std::path::PathBuf::from("/sys/fs/cgroup").join(&name);
+    std::fs::create_dir(&dir)?;
+    let mut cmd = Command::new("cat");
+    cmd.arg("/proc/self/cgroup");
+    let out = NetnsCommand::new(ns.name(), cmd)?.cgroup(&dir).output();
+    let _ = std::fs::remove_dir(&dir);
+    let out = String::from_utf8_lossy(&out?.stdout).into_owned();
+    assert_eq!(out.trim(), format!("0::/{name}"));
+    Ok(())
+}
+
+/// The parent-death signal reaches the process when the thread that
+/// spawned it ends (#521).
+#[test]
+fn pdeathsig_ends_the_process_with_its_spawning_thread() -> nlink::Result<()> {
+    use namespace::NetnsCommand;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("cmd-pdeath")?;
+    let name = ns.name().to_string();
+    let mut child = std::thread::spawn(move || {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("10");
+        NetnsCommand::new(&name, cmd)?.pdeathsig(libc::SIGKILL).spawn()
+    })
+    .join()
+    .expect("the spawning thread")?;
+    let started = std::time::Instant::now();
+    let status = child.wait()?;
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    Ok(())
+}

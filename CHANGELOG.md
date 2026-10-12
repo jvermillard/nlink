@@ -1404,6 +1404,38 @@ All notable changes to this project will be documented in this file.
     tokio runtime, calls with no runtime at all, and the nftables
     helpers.
 
+- **`NetnsCommand`, a process-spawn builder for namespaces (#521, first
+  part).**
+  - **Entry points.** `NetnsCommand::new(name, cmd)`,
+    `NetnsCommand::path(path, cmd)` and `Netns::command(cmd)` spawn a
+    process in a namespace.
+  - **`etc_overlay(Overlay)`** sets the `/etc/netns/<name>/` policy:
+    - `Off`, the default, gives the host's `/etc` and `/sys`, as `spawn`
+      does.
+    - `Strict` follows `spawn_with_etc`'s rules: the overlay, or a
+      failure.
+    - `BestEffort` gives what the environment allows. A refused private
+      mount namespace or `MS_SLAVE` remount leaves the host's `/etc`,
+      never bound into a tree that propagates. A refused bind is left
+      out. The namespace's sysfs goes on top of `/sys` rather than in its
+      place, so a refused mount leaves the old one, never none.
+  - **`user(SpawnUser)`** drops privileges once inside the namespace.
+  - **`cgroup(dir)`** joins a cgroup v2 before entering the namespace, so
+    nothing the process starts escapes it. Writing the pid after the
+    spawn let early children escape.
+  - **`pdeathsig(signal)`** sets the parent-death signal.
+  - **`spawn()` and `output()`** run it.
+  - **`namespace::etc_overlay_supported()`** probes once, in a child,
+    whether `Strict` can work here. It checks the private mount
+    namespace, its remount, a fresh sysfs, and a bind over `/etc`. A
+    rootless container's user namespace refuses the fresh sysfs once the
+    old one is detached.
+  - **Tests.** Root tests cover each policy, and a bind the kernel
+    refuses: strict fails, best effort leaves it out. They also cover a
+    process starting in its cgroup (host root) and the parent-death
+    signal. They pass as root and in the rootless lane, where the probe
+    says strict cannot work and best effort still gives the overlay.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
