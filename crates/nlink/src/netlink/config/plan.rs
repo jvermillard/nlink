@@ -107,7 +107,13 @@ pub enum Step {
         vlan: String,
     },
     /// Add a declared address.
-    AddAddress(DeclaredAddress),
+    AddAddress {
+        /// The address.
+        address: DeclaredAddress,
+        /// Why, when it is there now: a link change in this apply flushes
+        /// it (#649).
+        reason: Option<String>,
+    },
     /// Change an address's metric, lifetimes or (IPv6) flags in place
     /// (#516).
     ChangeAddress(DeclaredAddress),
@@ -126,6 +132,9 @@ pub enum Step {
         before: Option<DeclaredRoute>,
         /// The route installed.
         after: DeclaredRoute,
+        /// Why, when it is there now: a link change in this apply flushes
+        /// it (#649).
+        reason: Option<String>,
     },
     /// Delete a route.
     DeleteRoute(DeclaredRoute),
@@ -216,21 +225,26 @@ impl Step {
                 changes: invert_link_changes(changes)?,
                 mtu_already_set: false,
             },
-            Self::AddAddress(address) => Self::DeleteAddress {
+            Self::AddAddress { address, .. } => Self::DeleteAddress {
                 address: address.clone(),
                 reason: None,
             },
-            Self::DeleteAddress { address, .. } => Self::AddAddress(address.clone()),
-            Self::ReplaceRoute { before, after } => match before {
+            Self::DeleteAddress { address, .. } => Self::AddAddress {
+                address: address.clone(),
+                reason: None,
+            },
+            Self::ReplaceRoute { before, after, .. } => match before {
                 Some(before) => Self::ReplaceRoute {
                     before: Some(after.clone()),
                     after: before.clone(),
+                    reason: None,
                 },
                 None => Self::DeleteRoute(after.clone()),
             },
             Self::DeleteRoute(route) => Self::ReplaceRoute {
                 before: None,
                 after: route.clone(),
+                reason: None,
             },
             Self::AddQdisc(q) => Self::DeleteQdisc(q.clone()),
             Self::DeleteQdisc(q) => Self::AddQdisc(q.clone()),
@@ -293,7 +307,11 @@ impl Step {
             Self::HoldVlanDown { .. } => {
                 Some("a lower device coming up brings its VLANs up".into())
             }
-            Self::DeleteAddress { reason, .. } => reason.clone(),
+            Self::DeleteAddress { reason, .. } | Self::AddAddress { reason, .. } => reason.clone(),
+            Self::ReplaceRoute {
+                reason: Some(reason),
+                ..
+            } => Some(reason.clone()),
             Self::ReplaceRoute {
                 before: Some(before),
                 ..
@@ -397,7 +415,7 @@ impl fmt::Display for Step {
             Self::HoldVlanDown { vlan } => {
                 write!(f, "~ link {vlan} down (if its lower device brought it up)")
             }
-            Self::AddAddress(a) => {
+            Self::AddAddress { address: a, .. } => {
                 write!(f, "+ address {}/{} on {}", a.address, a.prefix_len, a.dev)
             }
             Self::ChangeAddress(a) => {
@@ -406,7 +424,7 @@ impl fmt::Display for Step {
             Self::DeleteAddress { address: a, .. } => {
                 write!(f, "- address {}/{} on {}", a.address, a.prefix_len, a.dev)
             }
-            Self::ReplaceRoute { before, after } => match before {
+            Self::ReplaceRoute { before, after, .. } => match before {
                 Some(before) => write!(
                     f,
                     "~ route {} (replacing {})",
@@ -618,7 +636,14 @@ impl super::ConfigDiff {
                     reason: Some(reason),
                 });
             }
-            steps.push(Step::AddAddress(address.clone()));
+            steps.push(Step::AddAddress {
+                address: address.clone(),
+                reason: self
+                    .addresses_readded
+                    .iter()
+                    .find(|(a, _)| a == address)
+                    .map(|(_, why)| why.clone()),
+            });
         }
         steps.extend(self.addresses_to_change.iter().cloned().map(Step::ChangeAddress));
         for n in &self.nexthops_to_set {
@@ -652,6 +677,11 @@ impl super::ConfigDiff {
             steps.push(Step::ReplaceRoute {
                 before,
                 after: route.clone(),
+                reason: self
+                    .routes_readded
+                    .iter()
+                    .find(|(r, _)| r == route)
+                    .map(|(_, why)| why.clone()),
             });
         }
         // A rule after the routes of the table it looks up, so traffic it
@@ -838,7 +868,7 @@ mod tests {
                 Step::RaiseMtuFirst { .. } => "mtu-first",
                 Step::PinBridgeMtu { .. } => "pin",
                 Step::DeleteAddress { reason: Some(_), .. } => "del-addr-early",
-                Step::AddAddress(_) => "add-addr",
+                Step::AddAddress { .. } => "add-addr",
                 Step::ReplaceRoute { .. } => "route",
                 Step::DeleteRoute(_) => "del-route",
                 Step::DeleteAddress { .. } => "del-addr",
@@ -874,20 +904,21 @@ mod tests {
     fn inverses_undo_what_can_be_undone() {
         let r = route("10.1.0.0", 16, "10.0.0.2");
         let old = route("10.1.0.0", 16, "10.0.0.1");
-        let Some(Step::ReplaceRoute { before, after }) = (Step::ReplaceRoute {
+        let Some(Step::ReplaceRoute { before, after, .. }) = (Step::ReplaceRoute {
             before: Some(old.clone()),
             after: r.clone(),
+            reason: None,
         })
         .inverse() else {
             panic!("a replace's inverse is a replace");
         };
         assert_eq!((before, after), (Some(r.clone()), old));
         assert!(matches!(
-            Step::ReplaceRoute { before: None, after: r.clone() }.inverse(),
+            Step::ReplaceRoute { before: None, after: r.clone(), reason: None }.inverse(),
             Some(Step::DeleteRoute(x)) if x == r
         ));
         assert!(matches!(
-            Step::AddAddress(addr("d0", "10.0.0.1", 24)).inverse(),
+            Step::AddAddress { address: addr("d0", "10.0.0.1", 24), reason: None }.inverse(),
             Some(Step::DeleteAddress { .. })
         ));
 

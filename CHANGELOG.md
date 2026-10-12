@@ -2520,6 +2520,16 @@ All notable changes to this project will be documented in this file.
   another VRF has while strict mode is on. Validation refuses a config that
   turns it on with two VRFs on one table.
 
+- **A plan says why it re-adds (#649).** An address or route that is there
+  now, and that a link change in the same apply flushes, is re-added (#409,
+  #427, #436). Its step now says why: `Step::AddAddress { address, reason }`
+  and `Step::ReplaceRoute { .., reason }`, read through `Step::reason()`,
+  for example `re-add: flushed when d0 changes master`. The diff records
+  the cause for each flushed link: it goes down, it changes master, it
+  leaves a recreated master, or the lower device under its VLAN goes down.
+  `Step::AddAddress` was a tuple variant; `Plan` and `Step` are new in this
+  release.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

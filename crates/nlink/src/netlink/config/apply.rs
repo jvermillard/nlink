@@ -469,7 +469,7 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
         },
         Step::PinBridgeMtu { bridge, .. } => link(bridge),
         Step::HoldVlanDown { vlan } => link(vlan),
-        Step::AddAddress(a) | Step::ChangeAddress(a) | Step::DeleteAddress { address: a, .. } => {
+        Step::AddAddress { address: a, .. } | Step::ChangeAddress(a) | Step::DeleteAddress { address: a, .. } => {
             address(a)
         }
         Step::RefuseRoute(c) => route(&c.route),
@@ -520,7 +520,7 @@ fn step_operation(step: &Step) -> String {
         }
         Step::PinBridgeMtu { bridge, mtu } => format!("restore bridge {bridge} mtu={mtu}"),
         Step::HoldVlanDown { vlan } => format!("take VLAN {vlan} down"),
-        Step::AddAddress(a) => format!("add address {}/{} on {}", a.address, a.prefix_len, a.dev),
+        Step::AddAddress { address: a, .. } => format!("add address {}/{} on {}", a.address, a.prefix_len, a.dev),
         Step::ChangeAddress(a) => {
             format!("change address {}/{} on {}", a.address, a.prefix_len, a.dev)
         }
@@ -838,7 +838,7 @@ async fn run_step(
                 1,
             )
         }
-        Step::AddAddress(addr) => match add_address(conn, addr).await {
+        Step::AddAddress { address: addr, .. } => match add_address(conn, addr).await {
             Ok(()) => Outcome::Changed(
                 format!(
                     "Added address {}/{} on {}",
