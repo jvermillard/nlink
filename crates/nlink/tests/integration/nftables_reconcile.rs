@@ -2190,3 +2190,34 @@ async fn a_shared_table_keeps_what_another_tool_added() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #721: a declared value whose bytes start like an empty attribute
+/// (`04 00 05 00`, `ip daddr 4.0.5.0`) still changes. The normalizer used to
+/// read such a value as a nest and drop it, so `4.0.5.0` and `4.0.6.0`
+/// compared equal, and the change diffed empty and was never applied.
+#[tokio::test]
+async fn a_value_that_looks_like_an_attribute_still_changes() -> nlink::Result<()> {
+    use std::net::Ipv4Addr;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let cfg = |addr: Ipv4Addr| {
+        NftablesConfig::new().table("t", Family::Inet, |t| {
+            t.chain("c", |c| c)
+                .rule_keyed("c", "dst", move |r| r.match_daddr_v4(addr, 32).accept())
+        })
+    };
+    let steps = [cfg(Ipv4Addr::new(4, 0, 5, 0)), cfg(Ipv4Addr::new(4, 0, 6, 0))];
+    let want = ["4.0.5.0", "4.0.6.0"];
+    let ns = TestNamespace::new("nft-721")?;
+    assert_transition(&ns, &steps, false, async |i, _| {
+        let shown = ns
+            .exec("nft", &["list", "chain", "inet", "t", "c"])
+            .map_err(|e| e.to_string())?;
+        if !shown.contains(&format!("ip daddr {} accept", want[i])) {
+            return Err(format!("want ip daddr {}:\n{shown}", want[i]));
+        }
+        Ok(())
+    })
+    .await
+}

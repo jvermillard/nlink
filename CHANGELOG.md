@@ -615,6 +615,36 @@ All notable changes to this project will be documented in this file.
 
   The installed trees are unchanged.
 
+- **nftables: a declared change between two values could be missed
+  (#721).** The diff compares rules by normalized expression bytes, and the
+  normalizer guessed which attributes were nests: it recursed into any
+  payload that parsed as attributes and dropped empty ones. A 4-byte value
+  such as `04 00 05 00` parses as one empty attribute. That covers `ip daddr
+  4.0.5.0`, and on a little-endian host every mark with `0x0004` in its low
+  half. The value was dropped, so `4.0.5.0` and `4.0.6.0` compared equal and
+  a change between them diffed empty and was never applied. Unkeyed rules
+  hash their derived key through the same normalization, so two such rules
+  could also collide.
+  - The normalizer follows the kernel's schema now. It walks `NFTA_LIST_ELEM`
+    into name and data, and recurses only into the attributes each
+    expression declares as nested:
+    - `cmp` and `immediate` data;
+    - `range` bounds;
+    - `bitwise` mask, xor and data;
+    - `dynset` expressions.
+
+    Within those, a value is a leaf and a verdict a nest of leaves.
+  - **Derived keys.** A kernel rule's derived `~` key is computed again
+    from its own canonical body rather than read from its userdata. So rules
+    an earlier nlink installed still match their declarations, and upgrading
+    replaces none of them.
+  - **Tests.**
+    - Unit tests: two addresses and two marks that look like attributes
+      still differ, and so do their derived keys. A kernel rule with a stale
+      `~` key is re-keyed to its declaration, ordinals included.
+    - A root transition changes a keyed `ip daddr` from `4.0.5.0` to
+      `4.0.6.0` and reads the result back with `nft`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
