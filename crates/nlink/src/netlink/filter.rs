@@ -3094,10 +3094,9 @@ impl BpfFilter {
                         ));
                     }
                     // `BPF_OBJ_GET`: bpffs refuses `open(2)` on a pin (#710).
+                    // The errno survives: ENOENT is not found, EPERM denied (#718).
                     fd = Some(ProgFd::open_pinned(std::path::Path::new(path)).map_err(|e| {
-                        Error::invalid_message(format!(
-                            "bpf: failed to open pinned program `{path}`: {e}"
-                        ))
+                        Error::from(e).with_context(format!("bpf: open pinned program `{path}`"))
                     })?);
                     i += 2;
                 }
@@ -6196,10 +6195,9 @@ mod tests {
     #[test]
     fn bpf_parse_params_pinned_open_failure_surfaces_err() {
         let err = BpfFilter::parse_params(&["pinned", "/nonexistent/path/to/bpf"]).unwrap_err();
-        assert!(
-            err.to_string().contains("failed to open pinned program"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("open pinned program"), "got: {err}");
+        // The kernel's errno survives, not a message (#718).
+        assert!(err.errno().is_some(), "got: {err:?}");
     }
 
     #[test]

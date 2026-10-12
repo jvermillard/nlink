@@ -467,9 +467,9 @@ impl MirredAction {
                             "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
                         ));
                     }
-                    let idx = crate::util::get_ifindex(s).map_err(|e| {
-                        Error::invalid_message(format!("mirred: dev `{s}` not found: {e}"))
-                    })?;
+                    // Not found is not a parse error (#718).
+                    let idx = crate::util::get_ifindex(s)
+                        .map_err(|_| Error::interface_not_found(s).with_context("mirred"))?;
                     ifindex = Some(idx);
                     i += 2;
                 }
@@ -4626,10 +4626,9 @@ impl BpfAction {
                             "bpf: only one of `pinned` / `fd` may be specified".to_string(),
                         ));
                     }
+                    // The errno survives: ENOENT is not found, EPERM denied (#718).
                     source = Some(Self::from_pinned(s).map_err(|e| {
-                        Error::invalid_message(format!(
-                            "bpf: failed to open pinned program `{s}`: {e}"
-                        ))
+                        e.with_context(format!("bpf: open pinned program `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -6645,7 +6644,19 @@ mod tests {
     #[test]
     fn bpf_parse_params_pinned_missing_path_errors() {
         let err = BpfAction::parse_params(&["pinned", "/nonexistent/xyzzy"]).unwrap_err();
-        assert!(err.to_string().contains("bpf: failed to open pinned program"), "{err}");
+        assert!(err.to_string().contains("bpf: open pinned program"), "{err}");
+        // The kernel's errno survives, not a message (#718).
+        assert!(err.errno().is_some(), "{err:?}");
+    }
+
+    /// #718: a mirred `dev` that is not there is not found, not a parse
+    /// error.
+    #[test]
+    fn mirred_parse_params_missing_dev_is_not_found() {
+        let err = MirredAction::parse_params(&["egress", "redirect", "dev", "nlink-nope0"])
+            .unwrap_err();
+        assert!(err.is_not_found(), "{err:?}");
+        assert_eq!(err.context(), ["mirred"], "{err:?}");
     }
 
     #[test]

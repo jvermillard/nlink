@@ -104,9 +104,8 @@ impl NetworkConfig {
     /// ```
     #[cfg(feature = "serde")]
     pub fn from_json_str(s: &str) -> crate::netlink::Result<Self> {
-        let cfg: Self = serde_json::from_str(s).map_err(|e| {
-            crate::netlink::Error::invalid_message(format!("config JSON parse: {e}"))
-        })?;
+        let cfg: Self = serde_json::from_str(s)
+            .map_err(|e| crate::netlink::Error::from(e).with_context("config JSON parse"))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -674,18 +673,16 @@ impl NetworkConfig {
     /// Requires the `serde` feature.
     #[cfg(feature = "serde")]
     pub fn to_json_string(&self) -> crate::netlink::Result<String> {
-        serde_json::to_string(self).map_err(|e| {
-            crate::netlink::Error::invalid_message(format!("config JSON serialize: {e}"))
-        })
+        serde_json::to_string(self)
+            .map_err(|e| crate::netlink::Error::from(e).with_context("config JSON serialize"))
     }
 
     /// Serialize this configuration to a pretty-printed JSON string.
     /// Requires the `serde` feature.
     #[cfg(feature = "serde")]
     pub fn to_json_string_pretty(&self) -> crate::netlink::Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| {
-            crate::netlink::Error::invalid_message(format!("config JSON serialize: {e}"))
-        })
+        serde_json::to_string_pretty(self)
+            .map_err(|e| crate::netlink::Error::from(e).with_context("config JSON serialize"))
     }
 
     /// Generate a [JSON Schema](https://json-schema.org) (draft 7)
@@ -6194,6 +6191,18 @@ mod serde_roundtrip_tests {
                 .to_string();
             assert!(err.contains(says), "{doc}: {err}");
         }
+    }
+
+    /// #718: a JSON error keeps serde_json's error as its detail, where its
+    /// line and column are, under a context.
+    #[test]
+    fn a_json_error_keeps_its_source() {
+        let err = NetworkConfig::from_json_str("{\"links\": [}").unwrap_err();
+        let crate::netlink::ErrorDetail::Json(json) = err.detail() else {
+            panic!("expected ErrorDetail::Json, got {err:?}");
+        };
+        assert_eq!(json.line(), 1, "{err}");
+        assert_eq!(err.context(), ["config JSON parse"], "{err:?}");
     }
 
     #[test]
