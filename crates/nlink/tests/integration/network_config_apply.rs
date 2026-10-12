@@ -1379,3 +1379,46 @@ async fn an_owner_tag_lets_a_purge_find_the_configs_links() -> Result<()> {
     })
     .await
 }
+
+/// #526: a failed step names what it was done to. The kernel's answer
+/// alone (`Network is unreachable`) said nothing about which route; the
+/// error now carries the step as context and the route as its object,
+/// propagated or collected with `continue_on_error`, and serialized.
+#[tokio::test]
+async fn a_failed_step_names_its_object() -> Result<()> {
+    use nlink::ErrorObject;
+    use nlink::netlink::config::ExecOptions;
+    nlink::require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("err-object")?;
+    let conn = conn_in_ns(&ns)?;
+    // A gateway on a link with no address: the kernel refuses the route.
+    let cfg = NetworkConfig::new()
+        .link("d0", |b| b.dummy().up())
+        .route("10.9.0.0/24", |r| r.via("10.99.0.1").dev("d0"))?;
+    let route = ErrorObject::Route {
+        destination: "10.9.0.0/24".into(),
+        table: None,
+    };
+
+    let err = cfg.apply(&conn).await.expect_err("the gateway is unreachable");
+    assert_eq!(err.object(), Some(&route), "{err}");
+    assert!(err.to_string().contains("10.9.0.0/24"), "{err}");
+    assert!(err.errno().is_some(), "the kernel's errno survives: {err:?}");
+
+    let diff = cfg.diff(&conn).await?;
+    let result = diff.apply(&conn, ExecOptions::new().with_continue_on_error(true)).await?;
+    let [failed] = result.errors.as_slice() else {
+        panic!("one failed step: {:?}", result.errors);
+    };
+    assert_eq!(failed.error.object(), Some(&route));
+    #[cfg(feature = "serde")]
+    {
+        let json = serde_json::to_value(failed).unwrap();
+        assert_eq!(json["object"]["type"], "route", "{json}");
+        assert_eq!(json["object"]["destination"], "10.9.0.0/24", "{json}");
+        assert_eq!(json["errno"], serde_json::json!(failed.error.errno()), "{json}");
+    }
+    Ok(())
+}

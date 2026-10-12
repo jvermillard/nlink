@@ -9,14 +9,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// An nlink error (#526).
 ///
-/// One error carries three things:
+/// One error carries four things:
 /// - **[`kind`](Self::kind):** what kind of failure it is, for matching
 ///   and for reports;
 /// - **[`detail`](Self::detail):** where it came from. That is the
 ///   kernel's errno and extended ack, an I/O error, a parse, …;
 /// - **[`context`](Self::context):** what was being done, outermost
 ///   first. A context added with [`with_context`](Self::with_context) or
-///   [`ResultExt::context`] is kept on every error, kernel or not.
+///   [`ResultExt::context`] is kept on every error, kernel or not;
+/// - **[`object`](Self::object):** what it was done to, where the code
+///   that failed knew: the route, the qdisc, the peer, the sysctl.
 ///
 /// Recover with [`kind`](Self::kind), or with the `is_*` predicates,
 /// rather than by matching [`ErrorDetail`]. One kind can come from several
@@ -41,6 +43,122 @@ struct Inner {
     detail: ErrorDetail,
     /// Outermost first.
     context: Vec<String>,
+    object: Option<ErrorObject>,
+}
+
+/// What a failed operation was done to (#526): the object an [`Error`]
+/// names, where the code that failed knew it. [`Error::object`] reads it,
+/// and [`ApplyError`](crate::netlink::config::ApplyError) serializes it.
+///
+/// A declarative apply names the object of the step that failed; a
+/// sysctl, interface or namespace error names its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "kebab-case"))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum ErrorObject {
+    /// A link (an interface), by name.
+    Link {
+        /// Its name.
+        name: String,
+    },
+    /// An address on a link.
+    Address {
+        /// The link.
+        dev: String,
+        /// The address and prefix: `10.0.0.1/24`.
+        address: String,
+    },
+    /// A route.
+    Route {
+        /// Its destination and prefix: `10.0.0.0/8`.
+        destination: String,
+        /// Its table, where one was given.
+        table: Option<u32>,
+    },
+    /// A neighbour (ARP/NDP) entry.
+    Neighbour {
+        /// The link.
+        dev: String,
+        /// The neighbour's address.
+        destination: std::net::IpAddr,
+    },
+    /// A bridge forwarding-database entry.
+    Fdb {
+        /// The port.
+        dev: String,
+        /// The MAC address: `aa:bb:cc:dd:ee:ff`.
+        mac: String,
+    },
+    /// A policy routing rule.
+    Rule {
+        /// Its priority.
+        priority: u32,
+    },
+    /// A nexthop object.
+    Nexthop {
+        /// Its id.
+        id: u32,
+    },
+    /// A qdisc.
+    Qdisc {
+        /// The link.
+        dev: String,
+        /// Its kind: `htb`, `netem`, ….
+        kind: String,
+    },
+    /// A link's traffic-control tree: its classes, leaf qdiscs and filters.
+    Tc {
+        /// The link.
+        dev: String,
+    },
+    /// A WireGuard device.
+    WireguardDevice {
+        /// Its name.
+        name: String,
+    },
+    /// A WireGuard peer.
+    WireguardPeer {
+        /// Its device.
+        dev: String,
+        /// Its public key, base64.
+        public_key: String,
+    },
+    /// A sysctl.
+    Sysctl {
+        /// The key, as given.
+        key: String,
+    },
+    /// A network namespace: its name, or the path it was opened by.
+    Namespace {
+        /// The name or path.
+        name: String,
+    },
+}
+
+impl std::fmt::Display for ErrorObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Link { name } => write!(f, "link {name}"),
+            Self::Address { dev, address } => write!(f, "address {address} on {dev}"),
+            Self::Route {
+                destination,
+                table: Some(table),
+            } => write!(f, "route {destination} table {table}"),
+            Self::Route { destination, .. } => write!(f, "route {destination}"),
+            Self::Neighbour { dev, destination } => write!(f, "neighbour {destination} on {dev}"),
+            Self::Fdb { dev, mac } => write!(f, "fdb {mac} on {dev}"),
+            Self::Rule { priority } => write!(f, "rule {priority}"),
+            Self::Nexthop { id } => write!(f, "nexthop {id}"),
+            Self::Qdisc { dev, kind } => write!(f, "qdisc {kind} on {dev}"),
+            Self::Tc { dev } => write!(f, "tc on {dev}"),
+            Self::WireguardDevice { name } => write!(f, "wireguard device {name}"),
+            Self::WireguardPeer { dev, public_key } => write!(f, "peer {public_key} on {dev}"),
+            Self::Sysctl { key } => write!(f, "sysctl {key}"),
+            Self::Namespace { name } => write!(f, "namespace {name}"),
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -87,9 +205,22 @@ impl std::error::Error for Error {
 
 impl From<ErrorDetail> for Error {
     fn from(detail: ErrorDetail) -> Self {
+        // A detail that names its object says so in `object()` too.
+        let object = match &detail {
+            ErrorDetail::Sysctl { key, .. } => Some(ErrorObject::Sysctl { key: key.clone() }),
+            ErrorDetail::InterfaceNotFound { name } => Some(ErrorObject::Link { name: name.clone() }),
+            ErrorDetail::NamespaceNotFound { name } => {
+                Some(ErrorObject::Namespace { name: name.clone() })
+            }
+            ErrorDetail::NamespaceDeleted { path } => Some(ErrorObject::Namespace {
+                name: path.display().to_string(),
+            }),
+            _ => None,
+        };
         Self(Box::new(Inner {
             detail,
             context: Vec::new(),
+            object,
         }))
     }
 }
@@ -821,6 +952,19 @@ impl Error {
     /// [`detail`](Self::detail), by value; the context is dropped.
     pub fn into_detail(self) -> ErrorDetail {
         self.0.detail
+    }
+
+    /// What the failed operation was done to (#526), where the code that
+    /// failed knew: a declarative apply names its step's object.
+    pub fn object(&self) -> Option<&ErrorObject> {
+        self.0.object.as_ref()
+    }
+
+    /// Name what the failed operation was done to, unless the error names
+    /// something already: the innermost code knows best.
+    pub fn with_object(mut self, object: ErrorObject) -> Self {
+        self.0.object.get_or_insert(object);
+        self
     }
 
     /// What was being done, outermost first (#526): each
@@ -1569,6 +1713,30 @@ mod tests {
         );
         assert!(matches!(io.detail(), ErrorDetail::Io(_)));
         assert!(io.into_detail().to_string().starts_with("I/O error: "));
+    }
+
+    /// #526: an error names its object. A detail that carries one names
+    /// it by itself; `with_object` keeps the innermost.
+    #[test]
+    fn an_error_names_its_object() {
+        let sysctl = Error::from(ErrorDetail::Sysctl {
+            key: "net.ipv4.ip_forward".into(),
+            source: io::Error::from_raw_os_error(libc::EACCES),
+        });
+        assert_eq!(
+            sysctl.object(),
+            Some(&ErrorObject::Sysctl {
+                key: "net.ipv4.ip_forward".into()
+            })
+        );
+        let link = Error::interface_not_found("d0").with_object(ErrorObject::Tc { dev: "d1".into() });
+        assert_eq!(link.object(), Some(&ErrorObject::Link { name: "d0".into() }), "the inner one stays");
+        let route = Error::from_errno(libc::ENETUNREACH).with_object(ErrorObject::Route {
+            destination: "10.9.0.0/24".into(),
+            table: Some(100),
+        });
+        assert_eq!(route.object().unwrap().to_string(), "route 10.9.0.0/24 table 100");
+        assert_eq!(Error::from_errno(libc::EEXIST).object(), None);
     }
 
     /// One pointer wide: every `Result<T>` in the crate pays for it.

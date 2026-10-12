@@ -250,7 +250,7 @@ pub use netlink::reconcile::{
     ExecOptions, ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject,
 };
 pub use netlink::{
-    Connection, Error, ErrorDetail, ErrorKind, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result,
+    Connection, Error, ErrorDetail, ErrorKind, ErrorObject, LinkCond, NamespaceSpec, NetworkEvent, Protocol, Result,
     ResultExt, RtnetlinkGroup,
     // `Error::validation` takes `impl IntoIterator<Item = ValidationErrorInfo>`
     // and this lived in a private module, so the public constructor was
