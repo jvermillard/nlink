@@ -345,7 +345,7 @@ async fn add_nexthop(conn: &Connection<Route>, args: NexthopAddArgs, replace: bo
             let nh_id: u32 = parts[0]
                 .parse()
                 .map_err(|_| Error::InvalidMessage(format!("invalid nexthop id: {}", parts[0])))?;
-            let weight: u8 = if parts.len() > 1 {
+            let weight: u16 = if parts.len() > 1 {
                 parts[1]
                     .parse()
                     .map_err(|_| Error::InvalidMessage(format!("invalid weight: {}", parts[1])))?

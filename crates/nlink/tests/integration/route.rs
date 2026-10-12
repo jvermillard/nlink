@@ -464,3 +464,59 @@ async fn test_host_route() -> Result<()> {
 
     Ok(())
 }
+
+/// A nexthop group's member weights are the ones `ip nexthop` shows, both
+/// ways (#672). The wire carries each minus one: nlink sent `member(2, 3)`
+/// as 3, which the kernel weighs 4, and read `ip nexthop`'s `1/2,3` back
+/// as 0 and 2.
+#[tokio::test]
+async fn nexthop_group_weights_are_the_kernels() -> Result<()> {
+    use nlink::netlink::nexthop::{NexthopBuilder, NexthopGroupBuilder};
+    nlink::require_root!();
+
+    let (ns, conn) = setup_routed_ns("nhweight").await?;
+    for (id, gw) in [(1, "192.168.1.2"), (2, "192.168.1.3")] {
+        conn.add_nexthop(NexthopBuilder::new(id).gateway(gw.parse().unwrap()).dev("dummy0"))
+            .await?;
+    }
+    conn.add_nexthop_group(NexthopGroupBuilder::new(10).member(1, 1).member(2, 3))
+        .await?;
+    let shown = ns.exec("ip", &["-j", "nexthop", "show", "id", "10"])?;
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("ip -j");
+    assert_eq!(
+        shown[0]["group"],
+        serde_json::json!([{"id": 1}, {"id": 2, "weight": 3}]),
+        "{shown}"
+    );
+
+    ns.exec("ip", &["nexthop", "add", "id", "11", "group", "1/2,3"])?;
+    let read = conn.get_nexthop(11).await?.expect("nexthop 11");
+    let weights: Vec<(u32, u32)> = read
+        .group()
+        .expect("a group")
+        .iter()
+        .map(|m| (m.id(), u32::from(m.weight())))
+        .collect();
+    assert_eq!(weights, [(1, 1), (2, 3)]);
+    Ok(())
+}
+
+/// A blackhole nexthop and one with a device alone are created (#673).
+/// `NexthopBuilder` sent `AF_UNSPEC` for both, which the kernel takes only
+/// for a group: "Invalid address family" (EINVAL).
+#[tokio::test]
+async fn a_nexthop_without_a_gateway_is_created() -> Result<()> {
+    use nlink::netlink::nexthop::NexthopBuilder;
+    nlink::require_root!();
+
+    let (ns, conn) = setup_routed_ns("nhnogw").await?;
+    // A blackhole nexthop sits on the loopback device, which must be up.
+    conn.set_link_up("lo").await?;
+    conn.add_nexthop(NexthopBuilder::new(5).blackhole()).await?;
+    conn.add_nexthop(NexthopBuilder::new(6).dev("dummy0")).await?;
+    let shown = ns.exec("ip", &["-j", "nexthop", "show"])?;
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("ip -j");
+    let ids: Vec<u64> = shown.as_array().into_iter().flatten().filter_map(|n| n["id"].as_u64()).collect();
+    assert_eq!(ids, [5, 6], "{shown}");
+    Ok(())
+}

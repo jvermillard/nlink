@@ -426,6 +426,28 @@ All notable changes to this project will be documented in this file.
   - **Test.** A root test sets an id and reads it back by fd and by the
     pid of a process inside the namespace. It fails without the fix.
 
+- **Nexthop group weights are the ones `ip nexthop` uses (#672).**
+  - **The wire value.** `struct nexthop_grp` carries each member's
+    weight minus one.
+  - **Writing.** `NexthopGroupBuilder::member(id, weight)` sent the
+    weight as given, so `member(2, 3)` made a member the kernel weighs 4.
+    `.member(1, 1).member(2, 3)` was a 1:2 split, not 1:3. Equal weights
+    hid it.
+  - **Reading.** `NexthopGroupMember::weight()` returned the wire value,
+    so `ip nexthop`'s `1/2,3` read back as 0 and 2.
+  - **The fix.** Both now use the real weight, as a `u16`. A weight over
+    256 goes through `weight_high` (kernel 6.12).
+  - **Tests.** A root test checks both directions against iproute2, and
+    fails without the fix.
+
+- **A blackhole nexthop, or one with a device alone, can be made (#673).**
+  - **The bug.** `NexthopBuilder` sent `AF_UNSPEC` when there was no
+    gateway. The kernel takes that only for a group, so both kinds
+    failed with "Invalid address family".
+  - **The fix.** Without a gateway the builder now sends `AF_INET`, as
+    `ip nexthop` does. `NexthopBuilder::ipv6()` makes an IPv6 one.
+  - **Test.** A root test creates both, and fails without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

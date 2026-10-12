@@ -75,9 +75,10 @@ impl NhMsg {
 pub struct NexthopGrp {
     /// Nexthop ID.
     pub id: u32,
-    /// Weight (1-256, 0 means 1).
+    /// The weight minus one, low byte.
     pub weight: u8,
-    /// Reserved.
+    /// The weight minus one, high byte (`weight_high`, kernel 6.12); zero
+    /// before.
     pub resvd1: u8,
     /// Reserved.
     pub resvd2: u16,
@@ -87,7 +88,8 @@ impl NexthopGrp {
     /// Size of this structure.
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
-    /// Create a new nexthop group entry.
+    /// Create a new nexthop group entry from the wire weight, the weight
+    /// minus one.
     pub fn new(id: u32, weight: u8) -> Self {
         Self {
             id,
@@ -95,6 +97,23 @@ impl NexthopGrp {
             resvd1: 0,
             resvd2: 0,
         }
+    }
+
+    /// An entry for a member of `weight`, as `ip nexthop` takes it (1 and
+    /// up; 0 is 1): the wire carries it minus one (#672).
+    pub fn with_weight(id: u32, weight: u16) -> Self {
+        let wire = weight.max(1) - 1;
+        Self {
+            id,
+            weight: (wire & 0xff) as u8,
+            resvd1: (wire >> 8) as u8,
+            resvd2: 0,
+        }
+    }
+
+    /// The member's weight, as `ip nexthop` shows it.
+    pub fn weight(&self) -> u16 {
+        (u16::from(self.resvd1) << 8 | u16::from(self.weight)) + 1
     }
 
     /// Convert to bytes.
@@ -186,6 +205,17 @@ pub mod nha_res_bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire carries a member's weight minus one, the high byte in
+    /// `weight_high` (#672).
+    #[test]
+    fn group_member_weights_on_the_wire() {
+        for (weight, low, high) in [(0, 0, 0), (1, 0, 0), (3, 2, 0), (256, 255, 0), (300, 43, 1)] {
+            let g = NexthopGrp::with_weight(9, weight);
+            assert_eq!((g.weight, g.resvd1), (low, high), "weight {weight}");
+            assert_eq!(g.weight(), weight.max(1));
+        }
+    }
 
     #[test]
     fn test_nhmsg_size() {
