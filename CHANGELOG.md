@@ -1646,6 +1646,37 @@ All notable changes to this project will be documented in this file.
     metadata. Each view is built from the kernel's message bytes and
     round-trips through `Deserialize`.
 
+- **`Netns`: sysctls, the processes inside, and a deletion that waits
+  (#520, third part).**
+  - **`Netns::sysctl()`** returns a `Sysctl` with `get`, `set` and
+    `set_many`. They read and write `/proc/sys` on the handle's worker
+    thread, inside the namespace, with the keys and errors of
+    `sysctl::get`.
+  - **`Netns::pids()`** lists the processes with a thread in the
+    namespace. A thread that entered it counts, so a `run` inside lists
+    this process.
+  - **`Netns::delete_and_wait(timeout)`** deletes the name and waits for
+    the `RTM_DELNSID` the kernel sends as it starts destroying the
+    namespace. If the namespace has no id in the caller's namespace, it
+    gets one first.
+    - Past that point nothing can bring the namespace back.
+    - The namespace's interfaces go in the same kernel work, just after.
+      `RTM_DELNSID` comes before the devices are destroyed (`cleanup_net`
+      unhashes the nsid first), so a veth's far end can outlive the
+      return by a moment. The rustdoc says so.
+    - If something still holds the namespace, it fails with `is_timeout()`
+      and logs the holding pids.
+  - **Tests.**
+    - The first test flips a namespace's sysctl and checks that the
+      host's value is unchanged. It also checks `set_many`, and that a
+      missing key is `is_not_found()`.
+    - The second test checks `pids()` with a child process, with this
+      process inside through `run`, and after the child exits.
+    - The third test checks `delete_and_wait` on a namespace held by a
+      socket (timeout, its veth still there) and on a free one (returns;
+      its veth's far end follows). It fails if the call does not wait:
+      the held namespace then returns `Ok`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

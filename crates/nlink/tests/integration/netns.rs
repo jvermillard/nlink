@@ -504,3 +504,96 @@ async fn a_tokio_child_runs_in_the_namespace() -> nlink::Result<()> {
     assert!(status.success());
     Ok(())
 }
+
+/// #520: a handle reads and writes its namespace's sysctls — and only its
+/// own: the host's value and another path's reading agree.
+#[tokio::test]
+async fn a_netns_reads_and_writes_its_own_sysctls() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+    let ns = TestNamespace::new("netns-sysctl")?;
+    let netns = Netns::open(ns.name())?;
+    let key = "net.ipv4.ip_forward";
+    let host = nlink::netlink::sysctl::get(key)?;
+    // A new namespace may inherit the host's value: flip whatever it has.
+    let want = if netns.sysctl().get(key)? == "1" { "0" } else { "1" };
+    netns.sysctl().set(key, want)?;
+    assert_eq!(netns.sysctl().get(key)?, want);
+    assert_eq!(namespace::get_sysctl(ns.name(), key)?, want, "read another way");
+    assert_eq!(nlink::netlink::sysctl::get(key)?, host, "the host's is untouched");
+
+    netns
+        .sysctl()
+        .set_many(&[("net.ipv4.conf.all.rp_filter", "2"), ("net.ipv4.conf.default.rp_filter", "2")])?;
+    assert_eq!(netns.sysctl().get("net/ipv4/conf/all/rp_filter")?, "2");
+    let err = netns.sysctl().get("net.ipv4.no_such_key").unwrap_err();
+    assert!(err.is_not_found(), "{err}");
+    Ok(())
+}
+
+/// #520: `pids` names the processes in a namespace, a thread that entered
+/// it included.
+#[tokio::test]
+async fn pids_names_what_is_inside() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("netns-pids")?;
+    let netns = Netns::open(ns.name())?;
+    assert_eq!(netns.pids()?, Vec::<u32>::new());
+
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("30");
+    let mut child = netns.command(cmd)?.spawn()?;
+    assert_eq!(netns.pids()?, [child.id()]);
+    let inside = netns.run(|| netns.pids())??;
+    assert!(inside.contains(&std::process::id()), "{inside:?}");
+
+    child.kill().map_err(nlink::Error::Io)?;
+    child.wait().map_err(nlink::Error::Io)?;
+    assert_eq!(netns.pids()?, Vec::<u32>::new());
+    Ok(())
+}
+
+/// Whether `dev` exists in `ns`.
+async fn has_link(ns: &TestNamespace, dev: &str) -> nlink::Result<bool> {
+    Ok(ns.connection()?.get_link_by_name(dev).await?.is_some())
+}
+
+/// #520: `delete_and_wait` tells a namespace that is going from one that
+/// something still holds — here a socket inside it — and returns once the
+/// kernel is destroying it, its veth's far end following.
+#[tokio::test]
+async fn delete_and_wait_tells_a_held_namespace_from_a_going_one() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("veth");
+    let a = TestNamespace::new("dw-a")?;
+    let pid = std::process::id();
+
+    let held_name = format!("nlink-dw-held-{pid}");
+    let held = Netns::create(&held_name)?;
+    a.exec("ip", &["link", "add", "v0", "type", "veth", "peer", "name", "v1", "netns", &held_name])?;
+    let socket = held.connection::<Route>()?;
+    let err = held
+        .delete_and_wait(Duration::from_millis(500))
+        .await
+        .expect_err("a socket inside holds the namespace");
+    assert!(err.is_timeout(), "{err}");
+    assert!(has_link(&a, "v0").await?, "a held namespace keeps its veth");
+    drop(socket);
+
+    let name = format!("nlink-dw-free-{pid}");
+    let free = Netns::create(&name)?;
+    a.exec("ip", &["link", "add", "w0", "type", "veth", "peer", "name", "w1", "netns", &name])?;
+    free.delete_and_wait(Duration::from_secs(5)).await?;
+    // Its devices go in the same kernel work, moments after the id.
+    let end = tokio::time::Instant::now() + Duration::from_secs(5);
+    while has_link(&a, "w0").await? {
+        assert!(tokio::time::Instant::now() < end, "w0 outlived its namespace");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // And the held one, once its socket went.
+    while has_link(&a, "v0").await? {
+        assert!(tokio::time::Instant::now() < end, "v0 outlived its namespace");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
