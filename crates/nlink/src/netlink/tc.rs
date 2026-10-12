@@ -3302,19 +3302,19 @@ impl QdiscConfig for RedConfig {
 /// use nlink::netlink::tc::ChokeConfig;
 ///
 /// let cfg = ChokeConfig::new()
-///     .limit(1_000_000)
-///     .min(50_000)
-///     .max(150_000)
+///     .limit(1000)
+///     .min(50)
+///     .max(150)
 ///     .ecn(true)
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
 pub struct ChokeConfig {
-    /// Queue limit in bytes.
+    /// Queue limit in packets: `sch_choke` counts packets (#723).
     pub limit: u32,
-    /// Minimum threshold in bytes.
+    /// Minimum threshold in packets.
     pub min: u32,
-    /// Maximum threshold in bytes.
+    /// Maximum threshold in packets.
     pub max: u32,
     /// Maximum probability (0-255, default ~2%).
     pub max_p: u8,
