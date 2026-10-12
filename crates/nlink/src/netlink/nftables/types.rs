@@ -579,6 +579,73 @@ impl std::ops::BitOrAssign for CtState {
     }
 }
 
+/// The 16 label bytes with only `bit` set, laid out as the kernel's
+/// `unsigned long` bitmap is on this host — which is what `ct label`
+/// reads and `ct label set` ORs in. `None` past bit 127.
+fn ct_label_mask(bit: u8) -> Option<Vec<u8>> {
+    const WORD: usize = usize::BITS as usize;
+    let bit = usize::from(bit);
+    if bit >= 128 {
+        return None;
+    }
+    let mut words = [0usize; 128 / WORD];
+    words[bit / WORD] |= 1 << (bit % WORD);
+    Some(words.iter().flat_map(|w| w.to_ne_bytes()).collect())
+}
+
+/// A connection's direction — `enum ip_conntrack_dir`: the original
+/// tuple, or the reply's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum CtDirection {
+    /// `original`: as the connection was opened.
+    Original = 0,
+    /// `reply`.
+    Reply = 1,
+}
+
+impl CtDirection {
+    /// The direction of an `NFTA_CT_DIRECTION` value.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Original),
+            1 => Some(Self::Reply),
+            _ => None,
+        }
+    }
+}
+
+bitflags::bitflags! {
+    /// A connection's status bits (`ct status`), the `IPS_*` of
+    /// `linux/netfilter/nf_conntrack_common.h`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct CtStatus: u32 {
+        /// `expected`: an expected connection (a helper's).
+        const EXPECTED = 1 << 0;
+        /// `seen-reply`.
+        const SEEN_REPLY = 1 << 1;
+        /// `assured`.
+        const ASSURED = 1 << 2;
+        /// `confirmed`.
+        const CONFIRMED = 1 << 3;
+        /// `snat`.
+        const SRC_NAT = 1 << 4;
+        /// `dnat`.
+        const DST_NAT = 1 << 5;
+        /// `dying`.
+        const DYING = 1 << 9;
+        /// `fixed-timeout`.
+        const FIXED_TIMEOUT = 1 << 10;
+        /// `offload`: on a flowtable.
+        const OFFLOAD = 1 << 14;
+        /// `hw-offload`.
+        const HW_OFFLOAD = 1 << 15;
+        // The rest read back as they are.
+        const _ = !0;
+    }
+}
+
 /// A packet's type (`meta pkttype`), the `PACKET_*` of
 /// `linux/if_packet.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1214,6 +1281,38 @@ pub enum CtKey {
     Expiration = 5,
     Helper = 6,
     L3Protocol = 7,
+    /// `ct <dir> saddr`, either family (16 bytes); prefer [`SrcIp`](Self::SrcIp)/[`SrcIp6`](Self::SrcIp6).
+    Src = 8,
+    /// `ct <dir> daddr`, either family.
+    Dst = 9,
+    /// `ct protocol`: the layer-4 protocol.
+    Protocol = 10,
+    /// `ct <dir> proto-src`: the source port.
+    ProtoSrc = 11,
+    /// `ct <dir> proto-dst`: the destination port.
+    ProtoDst = 12,
+    /// `ct label`: the 128 label bits.
+    Labels = 13,
+    /// `ct packets`.
+    Pkts = 14,
+    /// `ct bytes`.
+    Bytes = 15,
+    /// `ct avgpkt`: average packet size.
+    AvgPkt = 16,
+    /// `ct zone`.
+    Zone = 17,
+    /// `ct event`: which events the connection reports.
+    EventMask = 18,
+    /// `ct <dir> ip saddr`.
+    SrcIp = 19,
+    /// `ct <dir> ip daddr`.
+    DstIp = 20,
+    /// `ct <dir> ip6 saddr`.
+    SrcIp6 = 21,
+    /// `ct <dir> ip6 daddr`.
+    DstIp6 = 22,
+    /// `ct id`.
+    Id = 23,
 }
 
 impl CtKey {
@@ -1230,6 +1329,22 @@ impl CtKey {
             5 => Some(Self::Expiration),
             6 => Some(Self::Helper),
             7 => Some(Self::L3Protocol),
+            8 => Some(Self::Src),
+            9 => Some(Self::Dst),
+            10 => Some(Self::Protocol),
+            11 => Some(Self::ProtoSrc),
+            12 => Some(Self::ProtoDst),
+            13 => Some(Self::Labels),
+            14 => Some(Self::Pkts),
+            15 => Some(Self::Bytes),
+            16 => Some(Self::AvgPkt),
+            17 => Some(Self::Zone),
+            18 => Some(Self::EventMask),
+            19 => Some(Self::SrcIp),
+            20 => Some(Self::DstIp),
+            21 => Some(Self::SrcIp6),
+            22 => Some(Self::DstIp6),
+            23 => Some(Self::Id),
             _ => None,
         }
     }
@@ -2823,6 +2938,121 @@ impl Rule {
             std::net::IpAddr::V4(a) => self.match_daddr_v4_not(a, prefix),
             std::net::IpAddr::V6(a) => self.match_daddr_v6_not(a, prefix),
         }
+    }
+
+    /// Match a connection with any of `status`'s bits: `ct status dnat`
+    /// (#528).
+    pub fn match_ct_status(mut self, status: CtStatus) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Status });
+        self.exprs.push(Expr::Bitwise {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            len: 4,
+            mask: status.bits().to_ne_bytes().to_vec(),
+            xor: vec![0; 4],
+        });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![0; 4] });
+        self
+    }
+
+    /// Match the packet's direction in its connection: `ct direction
+    /// reply`.
+    pub fn match_ct_direction(mut self, direction: CtDirection) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Direction });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![direction as u8] });
+        self
+    }
+
+    /// Match the connection's zone: `ct zone <zone>`.
+    pub fn match_ct_zone(mut self, zone: u16) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Zone });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: zone.to_ne_bytes().to_vec() });
+        self
+    }
+
+    /// Put the packet's connection in `zone`: `ct zone set <zone>`. In a
+    /// chain at the `raw` priority, before conntrack sees the packet.
+    pub fn set_ct_zone(mut self, zone: u16) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Immediate { dreg: Register::R0, data: zone.to_ne_bytes().to_vec() });
+        self.exprs.push(Expr::CtSet { key: CtKey::Zone, sreg: Register::R0 });
+        self
+    }
+
+    /// Match an address of the connection's `direction` tuple: `ct
+    /// original ip saddr 10.0.0.1` is
+    /// `match_ct_addr(CtDirection::Original, true, addr)`; `source: false`
+    /// is the destination.
+    pub fn match_ct_addr(mut self, direction: CtDirection, source: bool, addr: std::net::IpAddr) -> Self {
+        use super::expr::Expr;
+        let (key, data) = match (addr, source) {
+            (std::net::IpAddr::V4(a), true) => (CtKey::SrcIp, a.octets().to_vec()),
+            (std::net::IpAddr::V4(a), false) => (CtKey::DstIp, a.octets().to_vec()),
+            (std::net::IpAddr::V6(a), true) => (CtKey::SrcIp6, a.octets().to_vec()),
+            (std::net::IpAddr::V6(a), false) => (CtKey::DstIp6, a.octets().to_vec()),
+        };
+        self.exprs.push(Expr::CtDirectional { dreg: Register::R0, key, direction });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data });
+        self
+    }
+
+    /// Match a port of the connection's `direction` tuple: `ct reply
+    /// proto-src 53` is `match_ct_port(CtDirection::Reply, true, 53)`.
+    pub fn match_ct_port(mut self, direction: CtDirection, source: bool, port: u16) -> Self {
+        use super::expr::Expr;
+        let key = if source { CtKey::ProtoSrc } else { CtKey::ProtoDst };
+        self.exprs.push(Expr::CtDirectional { dreg: Register::R0, key, direction });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: port.to_be_bytes().to_vec() });
+        self
+    }
+
+    /// Match a connection carrying label `bit` (0..=127): `ct label <bit>`.
+    pub fn match_ct_label(mut self, bit: u8) -> Self {
+        use super::expr::Expr;
+        let Some(mask) = ct_label_mask(bit) else {
+            self.error.get_or_insert(format!("ct label: bit {bit} is past 127"));
+            return self;
+        };
+        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Labels });
+        self.exprs.push(Expr::Bitwise {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            len: 16,
+            mask,
+            xor: vec![0; 16],
+        });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![0; 16] });
+        self
+    }
+
+    /// Give the connection label `bit` (0..=127), keeping the others: `ct
+    /// label set <bit>`.
+    pub fn set_ct_label(mut self, bit: u8) -> Self {
+        use super::expr::Expr;
+        let Some(mask) = ct_label_mask(bit) else {
+            self.error.get_or_insert(format!("ct label: bit {bit} is past 127"));
+            return self;
+        };
+        self.exprs.push(Expr::Immediate { dreg: Register::R0, data: mask });
+        self.exprs.push(Expr::CtSet { key: CtKey::Labels, sreg: Register::R0 });
+        self
+    }
+
+    /// Match while the rule has seen at most `count` connections: `ct
+    /// count <count>` (needs `nft_connlimit`).
+    pub fn match_ct_count(mut self, count: u32) -> Self {
+        self.exprs.push(super::expr::Expr::Connlimit { count, over: false });
+        self
+    }
+
+    /// Match once the rule has seen more than `count` connections: `ct
+    /// count over <count>`.
+    pub fn match_ct_count_over(mut self, count: u32) -> Self {
+        self.exprs.push(super::expr::Expr::Connlimit { count, over: true });
+        self
     }
 
     /// Match the packet type: `meta pkttype broadcast` (#528).

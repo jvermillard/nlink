@@ -643,3 +643,68 @@ async fn fib_pkttype_and_notrack_are_what_nft_writes() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #528: the conntrack matches and sets nlink builds are what `nft`
+/// installs from the same statements, and they reconcile.
+#[tokio::test]
+async fn ct_keys_are_what_nft_writes() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{CtDirection, CtStatus, RuleExpr};
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_ct", "nft_connlimit");
+
+    let ns = TestNamespace::new("nft-echo-ct")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let chain = |priority| {
+            move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+                c.hook(Hook::Prerouting).priority(priority).chain_type(ChainType::Filter)
+            }
+        };
+        let ip = "10.0.0.1".parse().unwrap();
+        let cfg = NftablesConfig::new().table("c", Family::Inet, |t| {
+            t.chain("raw", chain(Priority::Raw))
+                .chain("pre", chain(Priority::Filter))
+                .rule_keyed("raw", "zone-set", |r| r.set_ct_zone(7))
+                .rule_keyed("pre", "status", |r| r.match_ct_status(CtStatus::DST_NAT).accept())
+                .rule_keyed("pre", "direction", |r| r.match_ct_direction(CtDirection::Reply).accept())
+                .rule_keyed("pre", "zone", |r| r.match_ct_zone(5).accept())
+                .rule_keyed("pre", "orig-saddr", |r| r.match_ct_addr(CtDirection::Original, true, ip).accept())
+                // nft 1.0.6 needs the protocol in context to parse a port.
+                .rule_keyed("pre", "reply-dport", |r| {
+                    r.match_l4proto(6).match_ct_port(CtDirection::Reply, false, 22).accept()
+                })
+                .rule_keyed("pre", "count", |r| r.match_ct_count_over(3).drop())
+                .rule_keyed("pre", "label", |r| r.match_ct_label(5).accept())
+                .rule_keyed("pre", "label-set", |r| r.set_ct_label(5))
+        });
+        assert_reconciles(&conn, &cfg).await?;
+
+        ns.exec("nft", &["add chain inet c theirs-raw"])?;
+        ns.exec("nft", &["add chain inet c theirs"])?;
+        ns.exec("nft", &["add rule inet c theirs-raw ct zone set 7"])?;
+        for statement in [
+            "ct status dnat accept",
+            "ct direction reply accept",
+            "ct zone 5 accept",
+            "ct original ip saddr 10.0.0.1 accept",
+            "meta l4proto tcp ct reply proto-dst 22 accept",
+            "ct count over 3 drop",
+            "ct label 5 accept",
+            "ct label set 5",
+        ] {
+            ns.exec("nft", &[&format!("add rule inet c theirs {statement}")])?;
+        }
+        let rules = conn.list_rules("c", Family::Inet).await?;
+        let exprs = |chain: &str| -> Vec<Vec<RuleExpr>> {
+            rules.iter().filter(|r| r.chain == chain).map(|r| r.expressions()).collect()
+        };
+        assert_eq!(exprs("raw"), exprs("theirs-raw"), "ct zone set");
+        let (mine, theirs) = (exprs("pre"), exprs("theirs"));
+        for (i, (m, t)) in mine.iter().zip(&theirs).enumerate() {
+            assert_eq!(m, t, "rule {i}");
+        }
+        assert_eq!(mine.len(), theirs.len());
+        Ok(())
+    })
+    .await
+}

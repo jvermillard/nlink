@@ -1865,6 +1865,44 @@ All notable changes to this project will be documented in this file.
       exactly that flow's packets. With `notrack` a no-op, both tests
       fail.
 
+- **Conntrack keys: status, direction, tuples, zone, labels, count, and
+  `ct … set` (#528, sixth part).**
+  - **`CtKey`** gains every kernel key: the tuple's addresses and ports,
+    `protocol`, `labels`, `packets`/`bytes`/`avgpkt`, `zone`, `event`
+    and `id`. The new `CtDirection` (`original`/`reply`) goes with the
+    directional ones.
+    - A directional load decodes as the new `RuleExpr::CtDirectional`,
+      where it used to be `Unknown`.
+    - `Expr::CtDirectional` writes one.
+  - **Builders.**
+    - `match_ct_status(CtStatus)`: `ct status dnat`, with `CtStatus` as
+      bitflags of the `IPS_*` bits.
+    - `match_ct_direction(CtDirection)`.
+    - `match_ct_zone` and `set_ct_zone`.
+    - `match_ct_addr(direction, source, IpAddr)`: `ct original ip saddr
+      …`.
+    - `match_ct_port(direction, source, port)`: `ct reply proto-dst 22`.
+    - `match_ct_label(bit)` and `set_ct_label(bit)`. The mask is laid out
+      as the kernel's `unsigned long` bitmap is on the host.
+    - `match_ct_count` and `match_ct_count_over`: `ct count over 3`, the
+      `connlimit` expression. Its flags attribute is written only for
+      `over`, as the kernel dumps it.
+  - **Audit and CI.** `CtDirection` and the new keys are mapped in the
+    UAPI audit. `nft_connlimit` joins the CI module guard and the strict
+    list.
+  - **Tests.**
+    - **Parity with nft.** Every builder decodes to the same expressions
+      as `nft` installs from the same statement, labels included, and the
+      rules reconcile. With the label mask written big-endian, the
+      comparison fails; the traffic test alone would not catch it, because
+      setting and matching would agree with each other.
+    - **Traffic.** All of these act as nft's do:
+      - a zone set in raw is the zone input sees;
+      - a dnat'ed flow has `ct status dnat`;
+      - a label one rule sets, the next one reads;
+      - the original tuple's destination is `b`;
+      - `ct count over 1` passes the first flow and drops the second.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

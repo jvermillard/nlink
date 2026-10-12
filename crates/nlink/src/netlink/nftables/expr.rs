@@ -102,6 +102,16 @@ pub enum Expr {
     /// few keys [`CtKey`] does not model (labels, zone, event mask).
     /// Needs the `nft_ct` module.
     CtSet { key: CtKey, sreg: Register },
+    /// Load a conntrack key of one direction's tuple into a register
+    /// (`ct original ip saddr`, `ct reply proto-dst`, …) (#528).
+    CtDirectional {
+        dreg: Register,
+        key: CtKey,
+        direction: CtDirection,
+    },
+    /// `ct count [over] <count>`: the connections the rule has seen
+    /// (`connlimit`).
+    Connlimit { count: u32, over: bool },
     /// Load routing data into a register (`rt mtu`, `rt classid`, …).
     Rt { dreg: Register, key: RtKey },
     /// Look the packet up in the routing table (`fib saddr . iif oif`),
@@ -922,6 +932,24 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
             builder.nest_end(data);
         }
+        Expr::CtDirectional { dreg, key, direction } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "ct");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_CT_DREG, dreg.wire());
+            builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
+            builder.append_attr(NFTA_CT_DIRECTION, &[*direction as u8]);
+            builder.nest_end(data);
+        }
+        Expr::Connlimit { count, over } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "connlimit");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_CONNLIMIT_COUNT, *count);
+            // `nft_connlimit_do_dump` writes the flags only when inverted.
+            if *over {
+                builder.append_attr_u32_be(NFTA_CONNLIMIT_FLAGS, NFT_CONNLIMIT_F_INV);
+            }
+            builder.nest_end(data);
+        }
         Expr::CtSet { key, sreg } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "ct");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -1408,6 +1436,24 @@ pub enum RuleExpr {
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
     },
+    /// `ct` load of one direction's tuple.
+    #[non_exhaustive]
+    CtDirectional {
+        /// Destination register.
+        dreg: Register,
+        /// The key.
+        key: CtKey,
+        /// Original or reply.
+        direction: CtDirection,
+    },
+    /// `ct count [over] <count>`.
+    #[non_exhaustive]
+    Connlimit {
+        /// The connection count.
+        count: u32,
+        /// `over`: match above it rather than up to it.
+        over: bool,
+    },
     /// `fib` — a routing lookup.
     #[non_exhaustive]
     Fib {
@@ -1546,6 +1592,10 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "limit" => parse_limit_attrs(data).map(RuleExpr::Limit),
         "range" => parse_range(data),
         "fib" => parse_fib(data),
+        "connlimit" => u32_attr(data, NFTA_CONNLIMIT_COUNT).map(|count| RuleExpr::Connlimit {
+            count,
+            over: u32_attr(data, NFTA_CONNLIMIT_FLAGS).unwrap_or(0) & NFT_CONNLIMIT_F_INV != 0,
+        }),
         "notrack" if data.is_empty() => Some(RuleExpr::Notrack),
         "log" => parse_log(data),
         "reject" => parse_reject(data),
@@ -1872,20 +1922,22 @@ fn parse_ct(data: &[u8]) -> Option<RuleExpr> {
     let mut dreg = None;
     let mut sreg = None;
     let mut key = None;
+    let mut direction = None;
     for (attr, payload) in AttrIter::new(data) {
         match attr {
             NFTA_CT_DREG => dreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
             NFTA_CT_SREG => sreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
             NFTA_CT_KEY => key = CtKey::from_u32(get::u32_be(payload).ok()?),
-            // `Expr::Ct` has no direction: never guess which one was meant.
-            NFTA_CT_DIRECTION => return None,
+            NFTA_CT_DIRECTION => direction = Some(CtDirection::from_u8(*payload.first()?)?),
             _ => {}
         }
     }
     let key = key?;
-    match (dreg, sreg) {
-        (Some(dreg), None) => Some(RuleExpr::Ct { dreg, key }),
-        (None, Some(sreg)) => Some(RuleExpr::CtSet { key, sreg }),
+    match (dreg, sreg, direction) {
+        (Some(dreg), None, None) => Some(RuleExpr::Ct { dreg, key }),
+        (Some(dreg), None, Some(direction)) => Some(RuleExpr::CtDirectional { dreg, key, direction }),
+        (None, Some(sreg), None) => Some(RuleExpr::CtSet { key, sreg }),
+        // A `ct set` with a direction (a zone's) is not modelled.
         _ => None,
     }
 }
@@ -3363,10 +3415,11 @@ mod decode_tests {
 
     #[test]
     fn shapes_the_typed_variants_do_not_describe_stay_unknown() {
-        // `ct original saddr`: a direction `RuleExpr::Ct` cannot carry.
+        // `ct original zone set`: a direction `RuleExpr::CtSet` cannot
+        // carry. (A directional load is `CtDirectional`.)
         let directional = build_attrs(|b| {
-            b.append_attr_u32_be(NFTA_CT_DREG, 1);
-            b.append_attr_u32_be(NFTA_CT_KEY, 0);
+            b.append_attr_u32_be(NFTA_CT_SREG, 1);
+            b.append_attr_u32_be(NFTA_CT_KEY, 17);
             b.append_attr_u8(NFTA_CT_DIRECTION, 0);
         });
         // A lookup flag this decoder does not know.

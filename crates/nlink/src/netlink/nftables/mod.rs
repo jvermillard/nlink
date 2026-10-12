@@ -307,9 +307,8 @@ pub const NFT_BITWISE_BOOL: u32 = 0;
 // Conntrack
 pub const NFTA_CT_DREG: u16 = 1;
 pub const NFTA_CT_KEY: u16 = 2;
-/// `NFTA_CT_DIRECTION` — original/reply, for the directional keys. The
-/// decoder demotes a `ct` carrying it to `RuleExpr::Unknown`: `Expr::Ct`
-/// does not model a direction.
+/// `NFTA_CT_DIRECTION` — original/reply, for the directional keys
+/// (`Expr::CtDirectional`, a u8).
 pub const NFTA_CT_DIRECTION: u16 = 3;
 /// Source register of the set form (`ct mark set ...`).
 pub const NFTA_CT_SREG: u16 = 4;
@@ -408,6 +407,14 @@ pub const NFTA_LOG_SNAPLEN: u16 = 3;
 pub const NFTA_LOG_QTHRESHOLD: u16 = 4;
 /// `NFTA_LOG_FLAGS` — what a syslog `log` adds: TCP sequence, options, ….
 pub const NFTA_LOG_FLAGS: u16 = 6;
+
+// Connlimit — `enum nft_connlimit_attributes`.
+/// `NFTA_CONNLIMIT_COUNT` — the connection count.
+pub const NFTA_CONNLIMIT_COUNT: u16 = 1;
+/// `NFTA_CONNLIMIT_FLAGS` — `NFT_CONNLIMIT_F_INV` for `over`.
+pub const NFTA_CONNLIMIT_FLAGS: u16 = 2;
+/// `NFT_CONNLIMIT_F_INV` — match above the count.
+pub const NFT_CONNLIMIT_F_INV: u32 = 1;
 
 // Fib — `enum nft_fib_attributes`.
 /// `NFTA_FIB_DREG` — the register the result goes to.
