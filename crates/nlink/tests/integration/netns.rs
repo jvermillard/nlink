@@ -437,3 +437,70 @@ fn pdeathsig_ends_the_process_with_its_spawning_thread() -> nlink::Result<()> {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     Ok(())
 }
+
+/// The parent pid of `pid`, from `/proc`.
+fn ppid_of(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|l| l.strip_prefix("PPid:")).and_then(|v| v.trim().parse().ok())
+}
+
+/// A detached process is no child of the caller's, runs in the namespace,
+/// and with an exit-status file has its exit code written when it ends
+/// (#521).
+#[test]
+fn a_detached_process_runs_in_the_namespace_and_reports_its_exit() -> nlink::Result<()> {
+    use namespace::NetnsCommand;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("cmd-detached")?;
+    let dir = std::env::temp_dir().join(format!("nlink-detached-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let (netns_file, status_file) = (dir.join("netns"), dir.join("status"));
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(format!("readlink /proc/self/ns/net > {}; sleep 0.3; exit 7", netns_file.display()));
+    let pid = NetnsCommand::new(ns.name(), cmd)?.exit_status_file(&status_file).spawn_detached()?;
+    assert_ne!(ppid_of(pid), Some(std::process::id()), "not the caller's child");
+
+    let started = Instant::now();
+    while !status_file.exists() && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(&status_file)?, "7\n");
+    let inode = Netns::open(ns.name())?.id().ino();
+    assert_eq!(std::fs::read_to_string(&netns_file)?.trim(), format!("net:[{inode}]"));
+
+    // Without the file, the pid is the command's own; a start that fails
+    // is an error here.
+    let mut cmd = Command::new("sleep");
+    cmd.arg("5");
+    let pid = NetnsCommand::new(ns.name(), cmd)?.spawn_detached()?;
+    assert!(std::fs::read_to_string(format!("/proc/{pid}/cmdline"))?.starts_with("sleep"));
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    let err = NetnsCommand::new(ns.name(), Command::new("/nonexistent/program"))?
+        .spawn_detached()
+        .expect_err("no such program");
+    assert!(err.to_string().contains("No such file"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// A namespace process as a tokio child (#521): spawned, waited on, and
+/// its output collected without blocking the runtime.
+#[tokio::test]
+async fn a_tokio_child_runs_in_the_namespace() -> nlink::Result<()> {
+    use namespace::NetnsCommand;
+    use std::process::Command;
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("cmd-tokio")?;
+    let mut cmd = Command::new("readlink");
+    cmd.arg("/proc/self/ns/net");
+    let out = NetnsCommand::new(ns.name(), cmd)?.output_async().await?;
+    let inode = Netns::open(ns.name())?.id().ino();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("net:[{inode}]"));
+    let status = NetnsCommand::new(ns.name(), Command::new("true"))?.spawn_tokio()?.wait().await?;
+    assert!(status.success());
+    Ok(())
+}

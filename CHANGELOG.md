@@ -1436,6 +1436,27 @@ All notable changes to this project will be documented in this file.
     signal. They pass as root and in the rootless lane, where the probe
     says strict cannot work and best effort still gives the overlay.
 
+- **Detached and tokio spawns for `NetnsCommand` (#521, second part).**
+  - **`spawn_detached()`** runs the process as no child of the caller's,
+    through an async-signal-safe double fork, and returns its pid.
+    Everything after the fork works on data built before it: argv, envp,
+    and the program, found on `PATH` in the parent. Its stdio is
+    `/dev/null`. A failed start (the namespace, the overlay, the cgroup,
+    the user, the exec) comes back as the error.
+  - **`exit_status_file(path)`** keeps a monitor process as the
+    command's parent. The monitor writes the exit code to `path` when the
+    command ends, or `128 + n` for a death by signal `n`.
+  - **`spawn_tokio()` and `output_async()`** spawn the process as a tokio
+    child, to wait on without blocking the runtime. They sit behind the
+    new `process` feature (`tokio/process`), which joins `full` and the
+    integration lane's feature list.
+  - **Internal.** The child-side setup is one `Prepared` step list shared
+    by `pre_exec` and the double fork.
+  - **Tests.** Root tests cover a detached process: its parent, its
+    namespace, its exit code, and a failed start. They also cover a tokio
+    child's output and status. They pass as root and in the rootless
+    lane.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
