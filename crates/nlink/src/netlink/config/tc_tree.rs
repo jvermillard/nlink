@@ -833,6 +833,24 @@ async fn apply_tree(
         Err(e) if e.is_not_found() => Ok(()),
         other => other,
     };
+    // What each step is done to, for `Error::object` (#718).
+    let class = |id: TcHandle| crate::ErrorObject::TcClass {
+        dev: diff.dev.clone(),
+        classid: id.to_string(),
+    };
+    let filter = |parent: TcHandle, priority: FilterPriority, protocol: EthProto| {
+        crate::ErrorObject::TcFilter {
+            dev: diff.dev.clone(),
+            parent: parent.to_string(),
+            priority: priority.as_u16(),
+            protocol: protocol.to_string(),
+        }
+    };
+    let leaf = |at: TcHandle, kind: Option<&str>| crate::ErrorObject::Qdisc {
+        dev: diff.dev.clone(),
+        parent: at.to_string(),
+        kind: kind.map(str::to_string),
+    };
     let mut changes = 0;
 
     for (parent, priority, protocol) in &diff.filters_to_remove {
@@ -840,12 +858,18 @@ async fn apply_tree(
             conn.del_filter_by_index(ifindex, *parent, *protocol, *priority)
                 .await,
         )
-        .map_err(|e| e.with_context(format!("tc {}: remove filter", diff.dev)))?;
+        .map_err(|e| {
+            e.with_context(format!("tc {}: remove filter", diff.dev))
+                .with_object(filter(*parent, *priority, *protocol))
+        })?;
         changes += 1;
     }
     for (class, _) in &diff.leaves_to_remove {
         gone_is_ok(conn.del_qdisc_by_index(ifindex, *class).await)
-            .map_err(|e| e.with_context(format!("tc {}: remove leaf in {class}", diff.dev)))?;
+            .map_err(|e| {
+                e.with_context(format!("tc {}: remove leaf in {class}", diff.dev))
+                    .with_object(leaf(*class, None))
+            })?;
         changes += 1;
     }
     // Children before parents: the deepest minor-numbered order is not a
@@ -867,7 +891,10 @@ async fn apply_tree(
             let h = next.remove(0);
             conn.del_class_by_index(ifindex, TcHandle::UNSPEC, h)
                 .await
-                .map_err(|e| e.with_context(format!("tc {}: remove class {h}", diff.dev)))?;
+                .map_err(|e| {
+                    e.with_context(format!("tc {}: remove class {h}", diff.dev))
+                        .with_object(class(h))
+                })?;
             changes += 1;
         }
         pending = next;
@@ -890,7 +917,10 @@ async fn apply_tree(
             let ClassSpec::Htb(cfg) = &c.spec;
             conn.add_class_by_index(ifindex, c.parent, c.id, cfg.clone())
                 .await
-                .map_err(|e| e.with_context(format!("tc {}: add class {}", diff.dev, c.id)))?;
+                .map_err(|e| {
+                    e.with_context(format!("tc {}: add class {}", diff.dev, c.id))
+                        .with_object(class(c.id))
+                })?;
             changes += 1;
         }
         to_add = waiting;
@@ -899,13 +929,19 @@ async fn apply_tree(
         let ClassSpec::Htb(cfg) = &c.spec;
         conn.change_class_by_index(ifindex, c.parent, c.id, cfg.clone())
             .await
-            .map_err(|e| e.with_context(format!("tc {}: change class {}", diff.dev, c.id)))?;
+            .map_err(|e| {
+                e.with_context(format!("tc {}: change class {}", diff.dev, c.id))
+                    .with_object(class(c.id))
+            })?;
         changes += 1;
     }
-    for leaf in &diff.leaves_to_set {
-        conn.replace_qdisc_by_index_full(ifindex, leaf.class, Some(leaf.handle), leaf.spec.clone())
+    for l in &diff.leaves_to_set {
+        conn.replace_qdisc_by_index_full(ifindex, l.class, Some(l.handle), l.spec.clone())
             .await
-            .map_err(|e| e.with_context(format!("tc {}: leaf in {}", diff.dev, leaf.class)))?;
+            .map_err(|e| {
+                e.with_context(format!("tc {}: leaf in {}", diff.dev, l.class))
+                    .with_object(leaf(l.class, Some(l.spec.kind())))
+            })?;
         changes += 1;
     }
 
@@ -922,7 +958,8 @@ async fn apply_tree(
         gone_is_ok(
             conn.del_filter_by_index(ifindex, f.parent, f.protocol, f.priority)
                 .await,
-        )?;
+        )
+        .map_err(|e| e.with_object(filter(f.parent, f.priority, f.protocol)))?;
         cfg.install(conn, ifindex, f.parent, f.protocol, f.priority)
             .await
             .map_err(|e| {
@@ -930,6 +967,7 @@ async fn apply_tree(
                     "tc {}: filter at {} prio {} {}",
                     diff.dev, f.parent, f.priority, f.protocol
                 ))
+                .with_object(filter(f.parent, f.priority, f.protocol))
             })?;
         changes += 1;
     }

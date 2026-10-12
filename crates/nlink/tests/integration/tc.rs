@@ -2909,12 +2909,19 @@ async fn the_tc_verbs_do_what_their_table_says() -> Result<()> {
         root.get().await?.is_none(),
         "the kernel's default root is not configured"
     );
-    assert!(
-        root.change(netem(5)).await.unwrap_err().is_not_found(),
-        "change needs something to change"
-    );
+    let missing = root.change(netem(5)).await.unwrap_err();
+    assert!(missing.is_not_found(), "change needs something to change");
+    // A verb's error names its slot (#718).
+    let slot = |kind: Option<&str>| nlink::ErrorObject::Qdisc {
+        dev: "dummy0".into(),
+        parent: "root".into(),
+        kind: kind.map(str::to_string),
+    };
+    assert_eq!(missing.object(), Some(&slot(Some("netem"))), "{missing}");
     root.create(netem(5)).await?;
-    assert!(root.create(netem(5)).await.unwrap_err().is_already_exists());
+    let taken = root.create(netem(5)).await.unwrap_err();
+    assert!(taken.is_already_exists(), "{taken}");
+    assert_eq!(taken.object(), Some(&slot(Some("netem"))), "{taken}");
     root.change(netem(9)).await?;
     let live = root.get().await?.expect("netem");
     assert_eq!(
@@ -2965,7 +2972,8 @@ async fn the_tc_verbs_do_what_their_table_says() -> Result<()> {
 
     root.delete().await?;
     assert!(root.get().await?.is_none());
-    assert!(root.delete().await.is_err(), "nothing left to delete");
+    let nothing = root.delete().await.unwrap_err();
+    assert_eq!(nothing.object(), Some(&slot(None)), "nothing left to delete: {nothing}");
 
     let hook = tc.qdisc(Parent::Ingress);
     hook.create(ClsactConfig::new()).await?;

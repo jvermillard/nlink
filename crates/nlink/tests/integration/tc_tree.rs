@@ -91,6 +91,54 @@ fn ssh_to(port: u16, class: TcHandle) -> FlowerFilter {
     FlowerFilter::new().ip_proto_tcp().dst_port(port).classid(class)
 }
 
+/// A step the kernel refuses names the class or filter it was (#718), not
+/// just the tree.
+#[tokio::test]
+async fn a_refused_step_names_its_class_or_filter() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall");
+
+    let ns = TestNamespace::new("tc-tree-obj")?;
+    let conn = ns.connection()?;
+    // HTB refuses a class with no rate.
+    let err = shaped(|t| t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::bytes_per_sec(0))))
+        .apply_with_options(&conn, ApplyOptions::default())
+        .await
+        .expect_err("a class with no rate");
+    assert_eq!(
+        err.object(),
+        Some(&nlink::ErrorObject::TcClass {
+            dev: "d0".into(),
+            classid: "1:10".into(),
+        }),
+        "{err}"
+    );
+
+    // No qdisc 5: to hang a filter off.
+    let err = shaped(|t| {
+        t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10))).filter(
+            h(5, 0),
+            FilterPriority::new(3),
+            EthProto::IP,
+            MatchallFilter::new().classid(h(1, 0x10)),
+        )
+    })
+    .apply_with_options(&conn, ApplyOptions::default())
+    .await
+    .expect_err("a filter on a qdisc that is not there");
+    assert_eq!(
+        err.object(),
+        Some(&nlink::ErrorObject::TcFilter {
+            dev: "d0".into(),
+            parent: "5:".into(),
+            priority: 3,
+            protocol: EthProto::IP.to_string(),
+        }),
+        "{err}"
+    );
+    Ok(())
+}
+
 /// A tree changed A→B in place, then cut down: each step converges, and
 /// `tc` shows what each declares — a class's rate changed, a filter's key
 /// changed, a leaf swapped for another kind, and what the last step drops
