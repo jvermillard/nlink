@@ -2316,6 +2316,105 @@ async fn ip6gre_tunnels_change_in_place() -> nlink::Result<()> {
     Ok(())
 }
 
+/// vti6, erspan and ip6erspan tunnels changed in place (#680): ends, key or
+/// session, TTL, underlay, and an ERSPAN header from type II to type III.
+/// Each kind's netlink parms rebuild the configuration from the request, so
+/// each step checks every parameter through `ip -d link`, and every tunnel
+/// keeps its ifindex.
+#[tokio::test]
+async fn vti6_and_erspan_tunnels_change_in_place() -> nlink::Result<()> {
+    use nlink::netlink::link::{ErspanDirection, ErspanVersion};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    require_root!();
+    nlink::require_modules!("dummy", "ip_gre", "ip6_gre", "ip6_vti");
+
+    let a6 = |n: u16, h: u16| Ipv6Addr::new(0xfd00, 0x96, n, 0, 0, 0, 0, h);
+    let a4 = |h: u16| Ipv4Addr::new(10, 96, 0, u8::try_from(h).unwrap());
+    let version = |b: bool| {
+        if b {
+            ErspanVersion::V2 { direction: ErspanDirection::Egress, hwid: 7 }
+        } else {
+            ErspanVersion::V1 { index: 123 }
+        }
+    };
+    let params = |b: bool| if b { (3, 9, 32, "d1") } else { (2, 5, 64, "d0") };
+    let step = |b: bool| {
+        let (r, key, ttl, dev) = params(b);
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .link("v61", move |l| {
+                l.vti6()
+                    .ip6tnl_local(a6(0, 1))
+                    .ip6tnl_remote(a6(0, r))
+                    .tunnel_key(key)
+                    .tunnel_underlay_dev(dev)
+            })
+            .link("es1", move |l| {
+                l.erspan(u16::try_from(key).unwrap() + 100)
+                    .erspan_local(a4(1))
+                    .erspan_remote(a4(r))
+                    .erspan_ttl(ttl)
+                    .erspan_version(version(b))
+                    .tunnel_underlay_dev(dev)
+            })
+            .link("es6", move |l| {
+                l.ip6erspan(u16::try_from(key).unwrap())
+                    .erspan_local(a6(1, 1))
+                    .erspan_remote(a6(1, r))
+                    .erspan_version(version(!b))
+            })
+    };
+    let ns = TestNamespace::new("tr-erspan")?;
+    let mut ifindexes = Vec::new();
+    crate::common::converge::assert_transition(&ns, &[step(false), step(true)], false, async |i, _conn| {
+        let b = i == 1;
+        let (r, key, ttl, dev) = params(b);
+        let dotted = |k: u32| Ipv4Addr::from(k).to_string();
+        let v61 = link_json(&ns, "v61")?;
+        let es1 = link_json(&ns, "es1")?;
+        let es6 = link_json(&ns, "es6")?;
+        let (dv, d1, d6) = (
+            &v61["linkinfo"]["info_data"],
+            &es1["linkinfo"]["info_data"],
+            &es6["linkinfo"]["info_data"],
+        );
+        let header = |d: &serde_json::Value, v: ErspanVersion| match v {
+            ErspanVersion::V1 { index } => {
+                (d["erspan_ver"] == 1 && d["erspan_index"] == index).then_some(())
+            }
+            ErspanVersion::V2 { .. } => {
+                (d["erspan_ver"] == 2 && d["erspan_dir"] == "egress" && d["erspan_hwid"] == "0x7")
+                    .then_some(())
+            }
+            _ => None,
+        };
+        let checks = [
+            ("v61 remote", dv["remote"].clone(), serde_json::json!(a6(0, r).to_string())),
+            ("v61 key", dv["ikey"].clone(), serde_json::json!(dotted(key))),
+            ("v61 dev", dv["link"].clone(), serde_json::json!(dev)),
+            ("es1 remote", d1["remote"].clone(), serde_json::json!(a4(r).to_string())),
+            ("es1 session", d1["okey"].clone(), serde_json::json!(dotted(key + 100))),
+            ("es1 ttl", d1["ttl"].clone(), serde_json::json!(ttl)),
+            ("es1 dev", d1["link"].clone(), serde_json::json!(dev)),
+            ("es6 remote", d6["remote"].clone(), serde_json::json!(a6(1, r).to_string())),
+            ("es6 session", d6["ikey"].clone(), serde_json::json!(dotted(key))),
+        ];
+        for (what, have, want) in checks {
+            if have != want {
+                return Err(format!("step {}: {what} is {have}, want {want}", i + 1));
+            }
+        }
+        header(d1, version(b)).ok_or_else(|| format!("step {}: es1 header {d1}", i + 1))?;
+        header(d6, version(!b)).ok_or_else(|| format!("step {}: es6 header {d6}", i + 1))?;
+        ifindexes.push((v61["ifindex"].as_u64(), es1["ifindex"].as_u64(), es6["ifindex"].as_u64()));
+        Ok(())
+    })
+    .await?;
+    assert_eq!(ifindexes[0], ifindexes[1], "all three change in place");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

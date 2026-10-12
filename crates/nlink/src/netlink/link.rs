@@ -3190,6 +3190,7 @@ pub struct Vti6Link {
     remote: Option<std::net::Ipv6Addr>,
     ikey: Option<u32>,
     okey: Option<u32>,
+    mtu: Option<u32>,
     link: Option<InterfaceRef>,
 }
 
@@ -3202,6 +3203,7 @@ impl Vti6Link {
             remote: None,
             ikey: None,
             okey: None,
+            mtu: None,
             link: None,
         }
     }
@@ -3227,6 +3229,12 @@ impl Vti6Link {
     /// Set the output key (for marking outgoing traffic).
     pub fn okey(mut self, key: u32) -> Self {
         self.okey = Some(key);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
         self
     }
 
@@ -3267,6 +3275,9 @@ impl LinkConfig for Vti6Link {
         // Add interface name
         write_ifname(builder, &self.name);
 
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
         // Set underlying link if specified
         if let Some(idx) = parent_index {
             builder.append_attr_u32(IflaAttr::Link as u16, idx);
@@ -3367,11 +3378,17 @@ mod gre_attr {
     pub const IFLA_GRE_COLLECT_METADATA: u16 = 18;
     pub const IFLA_GRE_IGNORE_DF: u16 = 19;
     pub const IFLA_GRE_FWMARK: u16 = 20;
+    pub const IFLA_GRE_ERSPAN_INDEX: u16 = 21;
+    pub const IFLA_GRE_ERSPAN_VER: u16 = 22;
+    pub const IFLA_GRE_ERSPAN_DIR: u16 = 23;
+    pub const IFLA_GRE_ERSPAN_HWID: u16 = 24;
 
     /// GRE_KEY flag for IFLA_GRE_IFLAGS/OFLAGS. The flags and the keys are
     /// big-endian on the wire (`nla_get_be16`/`nla_get_be32`): written
     /// native-endian, the flag read as none and the key was dropped (#516).
     pub const GRE_KEY: u16 = 0x2000;
+    /// GRE_SEQ, which an ERSPAN tunnel must carry (`erspan_validate`).
+    pub const GRE_SEQ: u16 = 0x1000;
 }
 
 /// IFLA_IPTUN_* attributes (for ipip and sit tunnels).
@@ -3715,6 +3732,327 @@ impl LinkConfig for Ip6GretapLink {
             builder.append_attr_u32_be(gre_attr::IFLA_GRE_OKEY, key);
         }
 
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+    }
+}
+
+// ============================================================================
+// ERSPAN Links
+// ============================================================================
+
+/// The ERSPAN header an `erspan` or `ip6erspan` tunnel writes (#680).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErspanVersion {
+    /// Type II (`erspan_ver 1`), with the port `index` it mirrors: 20 bits.
+    V1 {
+        /// The index; up to `0xfffff`.
+        index: u32,
+    },
+    /// Type III (`erspan_ver 2`), with the direction the traffic was
+    /// mirrored in and a 6-bit hardware id.
+    V2 {
+        /// Ingress or egress.
+        direction: ErspanDirection,
+        /// The hardware id; up to 63.
+        hwid: u8,
+    },
+}
+
+impl Default for ErspanVersion {
+    /// Type II with index 0, the kernel's default.
+    fn default() -> Self {
+        Self::V1 { index: 0 }
+    }
+}
+
+impl ErspanVersion {
+    /// Its `IFLA_GRE_ERSPAN_*` attributes.
+    fn write(self, builder: &mut MessageBuilder) {
+        match self {
+            Self::V1 { index } => {
+                builder.append_attr_u8(gre_attr::IFLA_GRE_ERSPAN_VER, 1);
+                builder.append_attr_u32(gre_attr::IFLA_GRE_ERSPAN_INDEX, index);
+            }
+            Self::V2 { direction, hwid } => {
+                builder.append_attr_u8(gre_attr::IFLA_GRE_ERSPAN_VER, 2);
+                builder.append_attr_u8(gre_attr::IFLA_GRE_ERSPAN_DIR, direction as u8);
+                builder.append_attr_u16(gre_attr::IFLA_GRE_ERSPAN_HWID, u16::from(hwid));
+            }
+        }
+    }
+}
+
+/// The direction a type III ERSPAN header says traffic was mirrored in.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum ErspanDirection {
+    /// Received traffic.
+    #[default]
+    Ingress = 0,
+    /// Sent traffic.
+    Egress = 1,
+}
+
+/// The GRE key flags and keys an ERSPAN tunnel sends: `GRE_SEQ`, which
+/// `erspan_validate` requires, and the session id as the key both ways.
+fn write_erspan_key(builder: &mut MessageBuilder, session: u16) {
+    let flags = gre_attr::GRE_SEQ | gre_attr::GRE_KEY;
+    builder.append_attr_u16_be(gre_attr::IFLA_GRE_IFLAGS, flags);
+    builder.append_attr_u16_be(gre_attr::IFLA_GRE_OFLAGS, flags);
+    builder.append_attr_u32_be(gre_attr::IFLA_GRE_IKEY, u32::from(session));
+    builder.append_attr_u32_be(gre_attr::IFLA_GRE_OKEY, u32::from(session));
+}
+
+/// Configuration for an ERSPAN tunnel over IPv4 (`erspan`, #680): a
+/// gretap that wraps what it mirrors in an ERSPAN header.
+///
+/// # Example
+///
+/// ```no_run
+/// use nlink::netlink::link::{ErspanLink, ErspanVersion};
+/// use std::net::Ipv4Addr;
+///
+/// # async fn example() -> nlink::Result<()> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// let erspan = ErspanLink::new("erspan1", 100)
+///     .local(Ipv4Addr::new(192, 0, 2, 1))
+///     .remote(Ipv4Addr::new(192, 0, 2, 2))
+///     .version(ErspanVersion::V1 { index: 123 });
+/// conn.add_link(erspan).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct ErspanLink {
+    name: String,
+    session: u16,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ttl: Option<u8>,
+    version: ErspanVersion,
+    mtu: Option<u32>,
+    link: Option<InterfaceRef>,
+}
+
+impl ErspanLink {
+    /// A new ERSPAN tunnel with this session id (the GRE key, 10 bits:
+    /// up to 1023).
+    pub fn new(name: impl Into<String>, session: u16) -> Self {
+        Self {
+            name: name.into(),
+            session,
+            local: None,
+            remote: None,
+            ttl: None,
+            version: ErspanVersion::default(),
+            mtu: None,
+            link: None,
+        }
+    }
+
+    /// Set the local endpoint address.
+    pub fn local(mut self, addr: Ipv4Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote endpoint address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the outer TTL.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the ERSPAN header version; type II, index 0, by default.
+    pub fn version(mut self, version: ErspanVersion) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the underlay interface by name.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    /// Set the underlay interface by index.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
+        self
+    }
+}
+
+impl LinkConfig for ErspanLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "erspan"
+    }
+
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
+        }
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "erspan");
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_LINK, idx);
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
+        }
+        write_erspan_key(builder, self.session);
+        self.version.write(builder);
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+    }
+}
+
+/// Configuration for an ERSPAN tunnel over IPv6 (`ip6erspan`, #680).
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct Ip6ErspanLink {
+    name: String,
+    session: u16,
+    local: Option<std::net::Ipv6Addr>,
+    remote: Option<std::net::Ipv6Addr>,
+    hoplimit: Option<u8>,
+    version: ErspanVersion,
+    mtu: Option<u32>,
+    link: Option<InterfaceRef>,
+}
+
+impl Ip6ErspanLink {
+    /// A new ERSPAN tunnel over IPv6 with this session id (up to 1023).
+    pub fn new(name: impl Into<String>, session: u16) -> Self {
+        Self {
+            name: name.into(),
+            session,
+            local: None,
+            remote: None,
+            hoplimit: None,
+            version: ErspanVersion::default(),
+            mtu: None,
+            link: None,
+        }
+    }
+
+    /// Set the local endpoint address.
+    pub fn local(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote endpoint address.
+    pub fn remote(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the outer hop limit.
+    pub fn hoplimit(mut self, hoplimit: u8) -> Self {
+        self.hoplimit = Some(hoplimit);
+        self
+    }
+
+    /// Set the ERSPAN header version; type II, index 0, by default.
+    pub fn version(mut self, version: ErspanVersion) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the underlay interface by name.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    /// Set the underlay interface by index.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
+        self
+    }
+}
+
+impl LinkConfig for Ip6ErspanLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ip6erspan"
+    }
+
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "ip6erspan");
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_LINK, idx);
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
+        }
+        if let Some(hoplimit) = self.hoplimit {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, hoplimit);
+        }
+        write_erspan_key(builder, self.session);
+        self.version.write(builder);
         builder.nest_end(data);
         builder.nest_end(linkinfo);
     }

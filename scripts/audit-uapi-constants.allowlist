@@ -30,3 +30,9 @@ HealthState
 TestCmd
 TestAttr
 TestMode
+
+# ERSPAN's direction is a 1-bit field of the type III header (`dir:1` in
+# struct erspan_md2, linux/erspan.h): 0 ingress, 1 egress, as iproute2's
+# `erspan_dir ingress|egress` writes `IFLA_GRE_ERSPAN_DIR`. No header names
+# the two values.
+ErspanDirection

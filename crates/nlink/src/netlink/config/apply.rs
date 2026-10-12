@@ -1316,6 +1316,65 @@ pub(crate) fn link_config(
             }
             Box::new(c)
         }
+        DeclaredLinkType::Vti6(p) => {
+            let mut c = crate::netlink::link::Vti6Link::new(&link.name);
+            if let Some(v) = p.local {
+                c = c.local(v);
+            }
+            if let Some(v) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.key {
+                c = c.ikey(v).okey(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        // Validation has checked the ends' family against the kind.
+        DeclaredLinkType::Erspan(p) => {
+            let mut c = crate::netlink::link::ErspanLink::new(&link.name, p.session).version(p.version);
+            if let Some(std::net::IpAddr::V4(v)) = p.local {
+                c = c.local(v);
+            }
+            if let Some(std::net::IpAddr::V4(v)) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.ttl {
+                c = c.ttl(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
+        DeclaredLinkType::Ip6erspan(p) => {
+            let mut c =
+                crate::netlink::link::Ip6ErspanLink::new(&link.name, p.session).version(p.version);
+            if let Some(std::net::IpAddr::V6(v)) = p.local {
+                c = c.local(v);
+            }
+            if let Some(std::net::IpAddr::V6(v)) = p.remote {
+                c = c.remote(v);
+            }
+            if let Some(v) = p.ttl {
+                c = c.hoplimit(v);
+            }
+            if let Some(v) = &p.underlay_dev {
+                c = c.link(v.as_str());
+            }
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
+            }
+            Box::new(c)
+        }
         DeclaredLinkType::Xfrm { if_id, underlay_dev } => {
             let mut c = crate::netlink::link::XfrmLink::new(&link.name, *if_id);
             if let Some(v) = underlay_dev {

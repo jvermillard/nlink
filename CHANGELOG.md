@@ -2473,6 +2473,30 @@ All notable changes to this project will be documented in this file.
   reads `ESRCH` as not found for an xfrm SA delete, get or update, and only
   on xfrm: on rtnetlink those message types are link requests.
 
+- **Declared vti6, erspan and ip6erspan links, and ERSPAN tunnels (#680).**
+  - **Imperative.** `ErspanLink` and `Ip6ErspanLink` take a session id
+    (the GRE key, 10 bits), ends, TTL or hop limit, an underlay device, and
+    an `ErspanVersion`: type II with an index, or type III with an
+    `ErspanDirection` and a hardware id. They send the `GRE_SEQ | GRE_KEY`
+    flags that `erspan_validate` requires, and the `IFLA_GRE_ERSPAN_*`
+    attributes nlink had not written before. `Vti6Link` gains `mtu`.
+  - **Declarative.** `LinkBuilder::vti6()` takes the `ip6tnl_*` ends,
+    `tunnel_key` and `tunnel_underlay_dev`. `erspan(session)` and
+    `ip6erspan(session)` take the `erspan_*` setters and
+    `tunnel_underlay_dev`. Each kind's parms rebuild the configuration
+    from the request, so any difference sends the whole declared set.
+  - **Validation:**
+    - a vti6 with no end, underlay device or key, which is the fallback
+      `ip6_vti0`'s tunnel;
+    - a link named `ip6_vti0`;
+    - a vti6 hop limit, encapsulation limit or mode;
+    - ERSPAN ends of the other family;
+    - a session id, index or hardware id past its width.
+  - **CI.** `ip6_vti` joins CI's module lists.
+  - **Test.** A transition test changes every parameter of all three in
+    place, the ERSPAN headers between type II and type III, and checks
+    each step through `ip -d -j link`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
