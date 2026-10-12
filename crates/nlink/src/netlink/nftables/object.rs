@@ -319,13 +319,25 @@ mod tests {
         assert_eq!(attrs, [NFTA_QUOTA_BYTES, NFTA_QUOTA_FLAGS]);
     }
 
+    /// A byte limit is a limit (#528); an unknown type or kind is not a
+    /// guess.
     #[test]
-    fn a_byte_limit_or_an_unknown_kind_is_other_not_a_guess() {
-        let mut b = MessageBuilder::new(0, 0);
-        b.append_attr_u64_be(NFTA_LIMIT_RATE, 1000);
-        b.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
-        b.append_attr_u32_be(NFTA_LIMIT_TYPE, 1); // NFT_LIMIT_PKT_BYTES
-        assert_eq!(parse_state(ObjectType::Limit as u32, &b.as_bytes()[16..]), None);
+    fn a_byte_limit_decodes_and_an_unknown_kind_is_other() {
+        let limit = |kind: u32| {
+            let mut b = MessageBuilder::new(0, 0);
+            b.append_attr_u64_be(NFTA_LIMIT_RATE, 1000);
+            b.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
+            b.append_attr_u32_be(NFTA_LIMIT_BURST, 1500);
+            b.append_attr_u32_be(NFTA_LIMIT_TYPE, kind);
+            parse_state(ObjectType::Limit as u32, &b.as_bytes()[16..])
+        };
+        assert_eq!(
+            limit(1), // NFT_LIMIT_PKT_BYTES
+            Some(ObjectState::Limit(
+                LimitExpr::bytes(crate::Bytes::new(1000), LimitUnit::Second).burst(1500)
+            ))
+        );
+        assert_eq!(limit(7), None);
         assert_eq!(parse_state(3, &[]), None); // ct helper
     }
 }

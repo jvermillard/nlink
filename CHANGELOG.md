@@ -1770,6 +1770,32 @@ All notable changes to this project will be documented in this file.
     - **Unit tests.** Unit tests check the register loads and decode, the
       byte equality with the older builders, and every refusal.
 
+- **Byte-rate limits and named ICMPX reject codes (#528, third part).**
+  - **Byte-rate limits.**
+    - `LimitExpr::bytes(Bytes, LimitUnit)` is nft's `limit rate 10
+      mbytes/second`, with a burst in bytes.
+    - `Rule::limit_bytes` is the shorthand.
+    - The new `LimitExpr::kind` (`LimitKind::{Packets, Bytes}`) says which
+      a limit counts.
+    - Byte limits work in rules, with `over`, and as named limit objects.
+      They now decode, as rule expressions and as objects, where they used
+      to be `Unknown` and `ObjectState::Other`.
+  - **ICMPX codes.** `IcmpxCode` names the family-independent reject
+    codes: `NoRoute`, `PortUnreachable`, `HostUnreachable` and
+    `AdminProhibited`. `Rule::reject_icmpx(code)` writes `reject with icmpx
+    <code>`. nlink-lab used to define these codes itself.
+  - **UAPI audit.** Both enums are mapped in the UAPI audit.
+  - **Tests.**
+    - **Convergence and parity.** A declared table reconciles, and `nft`
+      lists every item as written (`limit rate 10 mbytes/second`, `limit
+      rate over 1 kbytes/minute burst 4 kbytes`, `host-unreachable`). It
+      holds a byte-limit rule, an `over` one, a byte-limit object and three
+      ICMPX rejects.
+    - **Traffic.** A packet limit of 100/s with burst 100 passes all 50
+      datagrams. A byte limit of the same numbers passes only a handful.
+    - **Red run.** Both tests fail if the limit's type is always sent as
+      packets: the diff keeps three changes, and all 50 datagrams pass.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

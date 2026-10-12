@@ -412,20 +412,23 @@ impl From<DynsetExpr> for Expr {
     }
 }
 
-/// `limit`: a packet-rate limit, matching while under the rate (or, with
-/// [`over`](Self::over), once over it).
+/// `limit`: a packet- or byte-rate limit, matching while under the rate
+/// (or, with [`over`](Self::over), once over it).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LimitExpr {
-    /// Packets per [`unit`](Self::unit).
+    /// Packets, or bytes, per [`unit`](Self::unit).
     pub rate: u64,
     /// Time unit of the rate.
     pub unit: LimitUnit,
-    /// Burst in packets. The kernel stores 0 as its default, 5, and nlink
-    /// sends 5 for it so the declared rule matches the dump.
+    /// Burst, in packets or bytes as the rate is. The kernel stores a
+    /// packet limit's 0 as its default, 5, and nlink sends 5 for it so the
+    /// declared rule matches the dump; a byte limit's 0 stays 0.
     pub burst: u32,
+    /// Whether the rate counts packets or bytes (#528).
+    pub kind: LimitKind,
     /// Match once the rate is exceeded (`limit rate over`,
     /// `NFT_LIMIT_F_INV`).
     pub over: bool,
@@ -439,10 +442,24 @@ impl LimitExpr {
             unit,
             burst: 5,
             over: false,
+            kind: LimitKind::Packets,
         }
     }
 
-    /// Set the burst, in packets.
+    /// `limit rate <rate> bytes/<unit>` (#528): `LimitExpr::bytes(Bytes::mib(10),
+    /// LimitUnit::Second)` is nft's `limit rate 10 mbytes/second`. No burst
+    /// unless [`burst`](Self::burst) gives one, in bytes.
+    pub fn bytes(rate: crate::Bytes, unit: LimitUnit) -> Self {
+        Self {
+            rate: rate.as_u64(),
+            unit,
+            burst: 0,
+            over: false,
+            kind: LimitKind::Bytes,
+        }
+    }
+
+    /// Set the burst, in packets or bytes as the rate is.
     pub fn burst(mut self, burst: u32) -> Self {
         self.burst = burst;
         self
@@ -997,10 +1014,14 @@ pub(crate) fn write_limit_attrs(builder: &mut MessageBuilder, limit: &LimitExpr)
     builder.append_attr_u64_be(NFTA_LIMIT_RATE, limit.rate);
     builder.append_attr_u64_be(NFTA_LIMIT_UNIT, limit.unit.to_u64());
     // A packet limit with burst 0 is stored (and dumped) as the
-    // kernel's NFT_LIMIT_PKT_BURST_DEFAULT, 5; send what it keeps.
-    let burst = if limit.burst == 0 { 5 } else { limit.burst };
+    // kernel's NFT_LIMIT_PKT_BURST_DEFAULT, 5; send what it keeps. A byte
+    // limit keeps its 0.
+    let burst = match limit.kind {
+        LimitKind::Packets if limit.burst == 0 => 5,
+        _ => limit.burst,
+    };
     builder.append_attr_u32_be(NFTA_LIMIT_BURST, burst);
-    builder.append_attr_u32_be(NFTA_LIMIT_TYPE, 0); // NFT_LIMIT_PKTS
+    builder.append_attr_u32_be(NFTA_LIMIT_TYPE, limit.kind as u32);
     // `nft_limit_dump` always emits FLAGS, 0 included. Without it a
     // declared `limit` rendered one attribute short of the echo and
     // was replaced on every apply.
@@ -1344,8 +1365,7 @@ pub enum RuleExpr {
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
     },
-    /// `limit` — a packet-rate limit. A byte-rate limit decodes as
-    /// [`Unknown`](Self::Unknown).
+    /// `limit` — a packet- or byte-rate limit.
     Limit(LimitExpr),
     /// `log` — to syslog at the default level, or to an `nflog` group. One
     /// with a level, flags, snaplen or queue threshold decodes as
@@ -1516,17 +1536,13 @@ fn register_range(data: &[u8], min: u16, max: u16) -> Option<Option<(Register, R
 }
 
 /// A `limit`'s attributes — an expression's or a limit object's. `None`
-/// for a byte-rate limit or a unit [`LimitUnit`] has no name for.
+/// for a type or a unit nlink has no name for.
 pub(crate) fn parse_limit_attrs(data: &[u8]) -> Option<LimitExpr> {
     let u64_of = |id| {
         AttrIter::new(data)
             .find(|(attr, _)| attr & 0x7FFF == id)
             .and_then(|(_, payload)| get::u64_be(payload).ok())
     };
-    // NFT_LIMIT_PKT_BYTES is not a LimitExpr.
-    if u32_attr(data, NFTA_LIMIT_TYPE).unwrap_or(0) != 0 {
-        return None;
-    }
     let unit = match u64_of(NFTA_LIMIT_UNIT)? {
         1 => LimitUnit::Second,
         60 => LimitUnit::Minute,
@@ -1534,8 +1550,12 @@ pub(crate) fn parse_limit_attrs(data: &[u8]) -> Option<LimitExpr> {
         86400 => LimitUnit::Day,
         _ => return None,
     };
-    let mut limit = LimitExpr::packets(u64_of(NFTA_LIMIT_RATE)?, unit)
-        .burst(u32_attr(data, NFTA_LIMIT_BURST).unwrap_or(0));
+    let rate = u64_of(NFTA_LIMIT_RATE)?;
+    let limit = match LimitKind::from_u32(u32_attr(data, NFTA_LIMIT_TYPE).unwrap_or(0))? {
+        LimitKind::Packets => LimitExpr::packets(rate, unit),
+        LimitKind::Bytes => LimitExpr::bytes(crate::Bytes::new(rate), unit),
+    };
+    let mut limit = limit.burst(u32_attr(data, NFTA_LIMIT_BURST).unwrap_or(0));
     if u32_attr(data, NFTA_LIMIT_FLAGS).unwrap_or(0) & NFT_LIMIT_F_INV != 0 {
         limit = limit.over();
     }
@@ -2522,14 +2542,38 @@ mod decode_tests {
         }
     }
 
+    /// #528: a byte-rate limit and a named ICMPX code encode and decode.
+    #[test]
+    fn byte_limits_and_icmpx_codes_round_trip() {
+        use super::super::types::{IcmpxCode, Rule};
+        let rule = Rule::new("t", "c")
+            .expr(LimitExpr::bytes(crate::Bytes::kib(10), LimitUnit::Second).burst(2048).over())
+            .limit_bytes(crate::Bytes::new(500), LimitUnit::Minute)
+            .reject_icmpx(IcmpxCode::HostUnreachable);
+        assert_eq!(
+            parse_expressions(&encode(&rule.exprs)),
+            vec![
+                RuleExpr::Limit(LimitExpr::bytes(crate::Bytes::kib(10), LimitUnit::Second).burst(2048).over()),
+                RuleExpr::Limit(LimitExpr::bytes(crate::Bytes::new(500), LimitUnit::Minute)),
+                RuleExpr::Reject {
+                    reject_type: NFT_REJECT_ICMPX_UNREACH,
+                    icmp_code: Some(IcmpxCode::HostUnreachable as u8),
+                },
+            ]
+        );
+        assert_eq!(IcmpxCode::from_u8(3), Some(IcmpxCode::AdminProhibited));
+        assert_eq!(IcmpxCode::from_u8(4), None);
+    }
+
     /// What these decoders cannot carry demotes to `Unknown`, never to a
-    /// guess: a byte-rate limit, a log level, a reject with no type.
+    /// guess: a limit type nlink does not know, a log level, a reject with
+    /// no type.
     #[test]
     fn statements_beyond_the_types_stay_unknown() {
         let mut limit = MessageBuilder::new(0, 0);
         limit.append_attr_u64_be(NFTA_LIMIT_RATE, 1000);
         limit.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
-        limit.append_attr_u32_be(NFTA_LIMIT_TYPE, 1); // NFT_LIMIT_PKT_BYTES
+        limit.append_attr_u32_be(NFTA_LIMIT_TYPE, 7); // a type nlink does not know
         let mut log = MessageBuilder::new(0, 0);
         log.append_attr_u32_be(NFTA_LOG_LEVEL, 7);
         let reject = MessageBuilder::new(0, 0);
