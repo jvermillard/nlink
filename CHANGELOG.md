@@ -1503,6 +1503,36 @@ All notable changes to this project will be documented in this file.
     - A unit test checks two messages in one datagram, each with its own
       metadata.
 
+- **An event stream that restarts instead of ending (#523, third part;
+  the backoff half of #257).**
+  - **The call.** `Connection::<Route>::events_restarting(factory,
+    backoff)` returns a `RestartingStream`. It runs every rtnetlink
+    group, resynced after an overflow as `into_events_with_resync` is, on
+    a connection from `factory`.
+  - **When it ends or fails.**
+    - The error is yielded, and the stream starts again after the wait.
+    - Each restart begins with an initial snapshot (`InitialSyncStart` …
+      `ResyncEnd`), so a `Store` rebuilds itself.
+    - A failing factory is retried the same way.
+  - **When it stops.**
+    - The namespace is deleted (`NamespaceDeleted`), or the factory cannot
+      find it (`NamespaceNotFound`): no restart brings it back.
+    - It has failed `max_attempts` restarts in a row without delivering
+      an event.
+  - **`resync::Backoff`.**
+    - The wait starts at `initial` (100 ms by default) and doubles up to
+      `max` (30 s), with an optional `max_attempts`.
+    - A run that delivered an event starts the count again.
+    - No new dependency: the waits are tokio sleeps.
+  - **Tests.**
+    - A root test runs a factory that fails twice and then starts, and
+      checks the two errors, the initial snapshot and a live event.
+    - A second root test deletes the namespace under the stream, which
+      must then end. It fails if the deletion check is removed: the
+      stream restarts and reports `NamespaceNotFound` instead.
+    - Unit tests cover the backoff sequence and giving up after
+      `max_attempts`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

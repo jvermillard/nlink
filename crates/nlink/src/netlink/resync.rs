@@ -208,6 +208,55 @@ pub type ConnectionFuture<P> =
 pub type ConnectionFactory<P> =
     Arc<dyn Fn() -> ConnectionFuture<P> + Send + Sync + 'static>;
 
+/// How a restarting event stream waits between attempts (#523): from
+/// `initial`, doubling each time, up to `max`. After `max_attempts`
+/// restarts in a row without an event delivered it gives up (`None`:
+/// never). A run that delivered an event starts the count again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Backoff {
+    /// The first wait.
+    pub initial: std::time::Duration,
+    /// The longest wait.
+    pub max: std::time::Duration,
+    /// Restarts in a row before giving up; `None` for never.
+    pub max_attempts: Option<u32>,
+}
+
+impl Default for Backoff {
+    /// From 100 ms to 30 s, never giving up.
+    fn default() -> Self {
+        Self {
+            initial: std::time::Duration::from_millis(100),
+            max: std::time::Duration::from_secs(30),
+            max_attempts: None,
+        }
+    }
+}
+
+impl Backoff {
+    /// From `initial` to `max`, never giving up.
+    pub fn new(initial: std::time::Duration, max: std::time::Duration) -> Self {
+        Self {
+            initial,
+            max,
+            max_attempts: None,
+        }
+    }
+
+    /// Give up after `attempts` restarts in a row.
+    pub fn max_attempts(mut self, attempts: u32) -> Self {
+        self.max_attempts = Some(attempts);
+        self
+    }
+
+    /// The wait before restart number `attempt` (1-based).
+    pub fn delay(&self, attempt: u32) -> std::time::Duration {
+        let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
+        self.initial.saturating_mul(factor).min(self.max)
+    }
+}
+
 /// Internal state-machine state for [`ResyncStream`].
 ///
 /// The `'a` lifetime threads through to the boxed snapshot
@@ -613,6 +662,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_doubles_up_to_its_max() {
+        use std::time::Duration;
+        let b = Backoff::new(Duration::from_millis(100), Duration::from_secs(1));
+        let waits: Vec<_> = (1..=6).map(|n| b.delay(n).as_millis()).collect();
+        assert_eq!(waits, [100, 200, 400, 800, 1000, 1000]);
+        assert_eq!(b.delay(u32::MAX), Duration::from_secs(1), "no overflow");
+        assert_eq!(Backoff::default().max_attempts, None);
+    }
 
     #[test]
     fn marker_predicates() {
