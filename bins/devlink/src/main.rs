@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
                     "active" => DevlinkPortFunctionState::Active,
                     "inactive" => DevlinkPortFunctionState::Inactive,
                     other => {
-                        return Err(nlink::netlink::Error::InvalidMessage(format!(
+                        return Err(nlink::netlink::Error::invalid_message(format!(
                             "devlink port function: invalid state `{other}` (expected active/inactive)"
                         )));
                     }
@@ -747,7 +747,7 @@ async fn main() -> Result<()> {
 /// Parse a tc-style rate string (`100mbit`, `1gbit`, ...).
 fn parse_rate(s: &str) -> Result<Rate> {
     s.parse::<Rate>().map_err(|_| {
-        nlink::netlink::Error::InvalidMessage(format!(
+        nlink::netlink::Error::invalid_message(format!(
             "devlink rate: invalid rate `{s}` (expected tc-style rate like `100mbit`)"
         ))
     })
@@ -789,7 +789,7 @@ fn build_rate(
 fn coerce_param_value(name: &str, value: String, existing: Option<&ParamData>) -> Result<ParamData> {
     let int = |bits: &str, max: u64| -> Result<u64> {
         value.parse::<u64>().ok().filter(|n| *n <= max).ok_or_else(|| {
-            nlink::netlink::Error::InvalidMessage(format!(
+            nlink::netlink::Error::invalid_message(format!(
                 "devlink param `{name}` expects a {bits} value, got `{value}`"
             ))
         })
@@ -802,7 +802,7 @@ fn coerce_param_value(name: &str, value: String, existing: Option<&ParamData>) -
             "true" | "1" | "on" => true,
             "false" | "0" | "off" => false,
             _ => {
-                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                return Err(nlink::netlink::Error::invalid_message(format!(
                     "devlink param `{name}` expects a boolean (true/false), got `{value}`"
                 )));
             }

@@ -163,11 +163,11 @@ impl NetlinkSocket {
                 // freshly-spawned thread is affected, and it exits right after.
                 let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
                 if ret < 0 {
-                    return Err(Error::Io(std::io::Error::last_os_error()));
+                    return Err(Error::from(std::io::Error::last_os_error()));
                 }
                 Self::create_raw_socket(protocol)
             })
-            .map_err(Error::Io)?
+            .map_err(Error::from)?
             .join();
 
         match thread_result {
@@ -186,7 +186,7 @@ impl NetlinkSocket {
                 Ok(socket)
             }
             Ok(Err(e)) => Err(e),
-            Err(_panic) => Err(Error::InvalidMessage(
+            Err(_panic) => Err(Error::invalid_message(
                 "namespace socket worker thread panicked".to_string(),
             )),
         }
@@ -317,7 +317,7 @@ impl NetlinkSocket {
         // new()` and `connection_for()` reached while promising a `Result`
         // (#510).
         if tokio::runtime::Handle::try_current().is_err() {
-            return Err(Error::Io(std::io::Error::other(
+            return Err(Error::from(std::io::Error::other(
                 "nlink: a netlink socket needs a tokio runtime; create it inside one",
             )));
         }
@@ -507,7 +507,7 @@ impl NetlinkSocket {
             Ok(()) => Ok(()),
             // No CAP_NET_ADMIN: keep the capped size rather than
             // failing a call the caller can't satisfy anyway.
-            Err(Error::Io(e)) if e.raw_os_error() == Some(libc::EPERM) => {
+            Err(e) if e.errno() == Some(libc::EPERM) => {
                 tracing::debug!(
                     requested = bytes,
                     "SO_RCVBUF capped by net.core.rmem_max and SO_RCVBUFFORCE \
@@ -547,7 +547,7 @@ impl NetlinkSocket {
     pub fn attach_filter(&self, prog: &[u8]) -> Result<()> {
         const SOCK_FILTER_SIZE: usize = 8;
         if prog.is_empty() || !prog.len().is_multiple_of(SOCK_FILTER_SIZE) {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "attach_filter: program is {} bytes, expected a non-empty \
                  multiple of {SOCK_FILTER_SIZE} (struct sock_filter)",
                 prog.len()
@@ -555,7 +555,7 @@ impl NetlinkSocket {
         }
         let len = prog.len() / SOCK_FILTER_SIZE;
         if len > u16::MAX as usize {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "attach_filter: {len} instructions exceeds the u16 \
                  sock_fprog.len field"
             )));
@@ -579,7 +579,7 @@ impl NetlinkSocket {
             )
         };
         if rc < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -606,7 +606,7 @@ impl NetlinkSocket {
             if err.raw_os_error() == Some(libc::ENOENT) {
                 return Ok(());
             }
-            return Err(Error::Io(err));
+            return Err(Error::from(err));
         }
         Ok(())
     }
@@ -635,7 +635,7 @@ impl NetlinkSocket {
             )
         };
         if rc < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -657,7 +657,7 @@ impl NetlinkSocket {
             )
         };
         if rc < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         Ok(val)
     }
@@ -717,7 +717,7 @@ impl NetlinkSocket {
                 // unconditionally and it's a no-op on old kernels.
                 return Ok(());
             }
-            return Err(Error::Io(err));
+            return Err(Error::from(err));
         }
         Ok(())
     }
@@ -756,7 +756,7 @@ impl NetlinkSocket {
             )
         };
         if rc < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -764,7 +764,7 @@ impl NetlinkSocket {
     /// Send a message.
     ///
     /// Plan 232 B19 — surface backpressure as
-    /// [`Error::Backpressure`] after a small number of
+    /// [`ErrorDetail::Backpressure`](crate::ErrorDetail::Backpressure) after a small number of
     /// back-to-back `WouldBlock` returns from the kernel. The 30 s
     /// connection timeout (Plan 171) would eventually surface as
     /// `Timeout`; surfacing backpressure sooner lets a caller back
@@ -782,9 +782,9 @@ impl NetlinkSocket {
                 Err(_would_block) => {
                     would_block_count += 1;
                     if would_block_count >= SEND_WOULDBLOCK_LIMIT {
-                        return Err(Error::Backpressure {
+                        return Err(Error::from(crate::netlink::ErrorDetail::Backpressure {
                             send_buffer_full: true,
-                        });
+                        }));
                     }
                     continue;
                 }
@@ -854,9 +854,9 @@ impl NetlinkSocket {
                 Err(_would_block) => {
                     would_block_count += 1;
                     if would_block_count >= SEND_WOULDBLOCK_LIMIT {
-                        return Err(Error::Backpressure {
+                        return Err(Error::from(crate::netlink::ErrorDetail::Backpressure {
                             send_buffer_full: true,
-                        });
+                        }));
                     }
                     continue;
                 }
@@ -868,7 +868,7 @@ impl NetlinkSocket {
     ///
     /// Reads each datagram whole, however large, up to a 1 MiB cap: it
     /// peeks the size first (#505; see `recv_whole`). A datagram past
-    /// the cap is dropped and reported as [`Error::FrameTruncated`]
+    /// the cap is dropped and reported as [`ErrorDetail::FrameTruncated`](crate::ErrorDetail::FrameTruncated)
     /// rather than lost without a word.
     pub async fn recv_msg(&self) -> Result<Vec<u8>> {
         Ok(self.recv_msg_from().await?.0)
@@ -949,7 +949,7 @@ impl NetlinkSocket {
     /// `MSG_TRUNC` semantics match [`Self::recv_msg`]: on truncation
     /// the buffer is regrown from the kernel's reported size, up to
     /// the same 1 MiB cap, and a frame past the cap surfaces as
-    /// [`Error::FrameTruncated`].
+    /// [`ErrorDetail::FrameTruncated`](crate::ErrorDetail::FrameTruncated).
     pub fn try_recv_msg(&self) -> Result<Option<Vec<u8>>> {
         Ok(self.try_recv_inner()?.map(|(data, _)| data))
     }
@@ -981,7 +981,7 @@ impl NetlinkSocket {
     /// (#505): it used to receive into a fixed 32 KiB buffer, so a larger
     /// frame was consumed, lost, and ended an event stream for good. Only
     /// a datagram past the 1 MiB cap surfaces as
-    /// [`Error::FrameTruncated`], which an event stream reports as an
+    /// [`ErrorDetail::FrameTruncated`](crate::ErrorDetail::FrameTruncated), which an event stream reports as an
     /// overrun and survives.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
         self.poll_recv_meta(cx).map(|r| r.map(|(data, _)| data))
@@ -1026,7 +1026,7 @@ impl NetlinkSocket {
 
 /// Plan 232 B19 — back-to-back `WouldBlock` returns from `send`
 /// that exceed this threshold surface as
-/// [`Error::Backpressure`]. The kernel send buffer is full and
+/// [`ErrorDetail::Backpressure`](crate::ErrorDetail::Backpressure). The kernel send buffer is full and
 /// retrying immediately is futile.
 ///
 /// 32 matches the historic `NL_BATCH_SIZE` heuristic. The full
@@ -1048,7 +1048,7 @@ pub(crate) const RECV_INITIAL_CAPACITY: usize = 32 * 1024;
 /// read the *next* datagram, and the large one — a link with many VFs, a
 /// big notification — was gone without a word (#505). A datagram past
 /// [`RECV_MAX_CAPACITY`] is consumed and reported as
-/// [`Error::FrameTruncated`]. Returns the bytes and whether the datagram
+/// [`ErrorDetail::FrameTruncated`](crate::ErrorDetail::FrameTruncated). Returns the bytes and whether the datagram
 /// was a multicast copy.
 fn recv_whole(socket: &Socket, flags: libc::c_int) -> std::io::Result<RecvWhole> {
     recv_whole_capped(socket, flags, RECV_MAX_CAPACITY)
@@ -1184,17 +1184,17 @@ impl RecvWhole {
     fn into_result(self) -> Result<(Vec<u8>, bool)> {
         match self {
             RecvWhole::Frame(data, multicast) => Ok((data, multicast)),
-            RecvWhole::TooLarge(received) => Err(Error::FrameTruncated {
+            RecvWhole::TooLarge(received) => Err(Error::from(crate::netlink::ErrorDetail::FrameTruncated {
                 received,
                 buffer_size: RECV_MAX_CAPACITY,
-            }),
+            })),
         }
     }
 }
 
 /// Max recv buffer capacity for [`NetlinkSocket::recv_msg`]
 /// (Plan 224). 1 MiB is the cap before nlink surfaces
-/// [`Error::FrameTruncated`] instead of growing further.
+/// [`ErrorDetail::FrameTruncated`](crate::ErrorDetail::FrameTruncated) instead of growing further.
 ///
 /// The kernel's `NLMSG_GOODSIZE` per-frame budget is roughly
 /// `SKB_WITH_OVERHEAD(PAGE_SIZE_MAX)` (≈32-64 KiB on x86, up to
@@ -1335,7 +1335,7 @@ impl NetlinkSocket {
                     if e.raw_os_error() == Some(libc::ENOBUFS) {
                         self.fan_out_enobufs();
                     }
-                    return Poll::Ready(Err(Error::Io(e)));
+                    return Poll::Ready(Err(Error::from(e)));
                 }
                 Err(_would_block) => continue,
             }
@@ -1352,7 +1352,7 @@ impl NetlinkSocket {
     /// On `EAGAIN`/`EWOULDBLOCK` returns `Ok(0)` after the
     /// `AsyncFd` re-arms — caller can poll again or back off.
     /// Other syscall errors propagate. `MSG_TRUNC` on any slot is
-    /// promoted to `Error::InvalidMessage` ("frame exceeded
+    /// promoted to `Error::invalid_message` ("frame exceeded
     /// `NL_BUF_SIZE`") — the 32 KiB per-slot buffer exceeds every
     /// realistic netlink frame, so this signals a kernel ABI
     /// violation worth screaming about rather than silently
@@ -1374,7 +1374,7 @@ impl NetlinkSocket {
             // try_io expects io::Result<T> so it can spot
             // WouldBlock — we map nlink::Error back through Io to
             // satisfy that contract, then unwrap at the outer
-            // layer. The Other-shaped Error::InvalidMessage stays
+            // layer. The Other-shaped Error::invalid_message stays
             // typed via the OS-error roundtrip below.
             let result: std::result::Result<std::io::Result<Vec<Vec<u8>>>, _> =
                 guard.try_io(|inner| Self::recv_batch_inner(inner.get_ref().as_raw_fd(), max));
@@ -1389,7 +1389,7 @@ impl NetlinkSocket {
                     if e.raw_os_error() == Some(libc::ENOBUFS) {
                         self.fan_out_enobufs();
                     }
-                    return Err(Error::Io(e));
+                    return Err(Error::from(e));
                 }
                 Err(_would_block) => continue,
             }
@@ -1488,7 +1488,7 @@ impl NetlinkSocket {
                 .try_io(|inner| Self::send_batch_inner(inner.get_ref().as_raw_fd(), &msgs[..n]));
             match result {
                 Ok(Ok(sent)) => return Ok(sent),
-                Ok(Err(e)) => return Err(Error::Io(e)),
+                Ok(Err(e)) => return Err(Error::from(e)),
                 Err(_would_block) => continue,
             }
         }
@@ -1736,12 +1736,12 @@ mod recv_msg_truncate_tests {
         // connection timeout. Verify the constant is sane.
         assert_eq!(SEND_WOULDBLOCK_LIMIT, 32);
 
-        let err = Error::Backpressure {
+        let err = Error::from(crate::netlink::ErrorDetail::Backpressure {
             send_buffer_full: true,
-        };
+        });
         assert!(err.is_backpressure());
         // Other errors must NOT match.
-        assert!(!Error::Timeout.is_backpressure());
+        assert!(!Error::timeout().is_backpressure());
     }
 
     /// A receiving socket and a sender, both `NETLINK_USERSOCK`: unicast
@@ -1825,18 +1825,18 @@ mod recv_msg_truncate_tests {
     fn frame_truncated_predicate() {
         // Construct the error variant directly and assert the
         // predicate matches.
-        let err = Error::FrameTruncated {
+        let err = Error::from(crate::netlink::ErrorDetail::FrameTruncated {
             received: 2_000_000,
             buffer_size: RECV_MAX_CAPACITY,
-        };
+        });
         assert!(err.is_truncated());
         // Non-truncated errors must NOT match.
-        let other = Error::Timeout;
+        let other = Error::timeout();
         assert!(!other.is_truncated());
-        let other2 = Error::Truncated {
+        let other2 = Error::from(crate::netlink::ErrorDetail::Truncated {
             expected: 8,
             actual: 4,
-        };
+        });
         // The pre-existing parser-short-buffer `Truncated`
         // variant has a different semantic; `is_truncated()`
         // surfaces frame-truncation specifically.

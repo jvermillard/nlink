@@ -970,7 +970,7 @@ impl Connection<Netfilter> {
                         continue;
                     }
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {
@@ -1668,7 +1668,7 @@ impl FromNetlink for ConntrackEntry {
     /// dump path and the multicast-event path share one parser.
     fn from_bytes(payload: &[u8]) -> Result<Self> {
         parse_conntrack_body(payload)
-            .ok_or_else(|| super::error::Error::InvalidMessage("malformed conntrack entry".into()))
+            .ok_or_else(|| super::error::Error::invalid_message("malformed conntrack entry"))
     }
 }
 

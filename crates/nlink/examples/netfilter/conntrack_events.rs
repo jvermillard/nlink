@@ -193,7 +193,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
                 && e.orig.dst_port == Some(80)
         })
         .and_then(|e| e.id)
-        .ok_or_else(|| nlink::Error::InvalidMessage("injected entry not in dump".into()))?;
+        .ok_or_else(|| nlink::Error::invalid_message("injected entry not in dump"))?;
 
     // Step 2: delete by ID → should emit a DESTROY notification.
     println!("  Step 2: delete by id ({id}) — expect a DESTROY event");
@@ -202,7 +202,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // Drain the collector. It will time out 3s after we spawned it.
     let collected = collector
         .await
-        .map_err(|e| nlink::Error::InvalidMessage(format!("collector task: {e}")))??;
+        .map_err(|e| nlink::Error::invalid_message(format!("collector task: {e}")))??;
 
     println!();
     println!(

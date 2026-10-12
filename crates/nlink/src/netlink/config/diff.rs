@@ -230,7 +230,7 @@ pub struct ConfigDiff {
     /// them — that do not exist, and that no veth or netkit pair in this
     /// apply creates as its peer. A typo, or a device not there yet. The
     /// apply fails on the first, before it changes anything, with
-    /// [`Error::InterfaceNotFound`](crate::Error::InterfaceNotFound). They
+    /// [`ErrorDetail::InterfaceNotFound`](crate::ErrorDetail::InterfaceNotFound). They
     /// were skipped without a word (#475). So is a parent (VLAN, macvlan,
     /// VXLAN underlay) or master a declared link names that the config
     /// does not declare and that does not exist (#518).
@@ -1293,10 +1293,10 @@ pub(crate) fn diff_snapshot(
     let extras = match &snapshot.extras {
         Some(extras) => extras,
         None if kind::deletes_any(config, opts, &current_links) => {
-            return Err(crate::Error::InvalidMessage(
+            return Err(crate::Error::invalid_message(
                 "this snapshot was read without what a recreate destroys, and the config \
                  recreates a link; read it with Snapshot::read"
-                    .into(),
+                    ,
             ));
         }
         None => &no_extras,
@@ -1308,7 +1308,7 @@ pub(crate) fn diff_snapshot(
         .filter_map(|l| l.peer_netns())
         .find(|r| !r.is_default() && !snapshot.netns_ids.contains_key(*r))
     {
-        return Err(crate::Error::InvalidMessage(format!(
+        return Err(crate::Error::invalid_message(format!(
             "this snapshot does not know namespace {r}, which a veth peer is declared in: \
              Snapshot::read knows the named ones, and NetworkConfig::diff any it names"
         )));

@@ -413,7 +413,7 @@ impl Connection<Audit> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_status"))]
     pub async fn get_status(&self) -> Result<AuditStatus> {
         // Wrapped in with_timeout (Plan 171: 30s default) so a kernel
-        // that drops the response surfaces as `Error::Timeout` rather
+        // that drops the response surfaces as `Error::timeout()` rather
         // than an indefinite hang. Pre-0.19 this method could hang
         // forever waiting for an ACK that never arrived.
         self.with_timeout(async move {
@@ -444,7 +444,7 @@ impl Connection<Audit> {
                 let data = session.recv_with_timeout(self).await?;
 
                 if data.len() < NLMSG_HDRLEN {
-                    return Err(Error::InvalidMessage("response too short".into()));
+                    return Err(Error::invalid_message("response too short"));
                 }
 
                 let resp_seq = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
@@ -482,13 +482,13 @@ impl Connection<Audit> {
     /// Parse status response.
     fn parse_status_response(&self, data: &[u8]) -> Result<AuditStatus> {
         if data.len() < NLMSG_HDRLEN {
-            return Err(Error::InvalidMessage("response too short".into()));
+            return Err(Error::invalid_message("response too short"));
         }
 
         let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
 
         if nlmsg_type != AUDIT_GET {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "unexpected message type: {}",
                 nlmsg_type
             )));
@@ -549,7 +549,7 @@ impl Connection<Audit> {
         }
 
         let (status, _) = AuditStatus::ref_from_prefix(&data[NLMSG_HDRLEN..])
-            .map_err(|_| Error::InvalidMessage("failed to parse audit status".into()))?;
+            .map_err(|_| Error::invalid_message("failed to parse audit status"))?;
 
         Ok(*status)
     }
@@ -600,7 +600,7 @@ impl Connection<Audit> {
                 let data = session.recv_with_timeout(self).await?;
 
                 if data.len() < NLMSG_HDRLEN {
-                    return Err(Error::InvalidMessage("response too short".into()));
+                    return Err(Error::invalid_message("response too short"));
                 }
 
                 let resp_seq = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
@@ -624,20 +624,20 @@ impl Connection<Audit> {
 
                 if nlmsg_type == AUDIT_TTY_GET {
                     if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditTtyStatus>() {
-                        return Err(Error::InvalidMessage(
-                            "TTY status response too short".into(),
+                        return Err(Error::invalid_message(
+                            "TTY status response too short",
                         ));
                     }
 
                     let (status, _) = AuditTtyStatus::ref_from_prefix(&data[NLMSG_HDRLEN..])
                         .map_err(|_| {
-                            Error::InvalidMessage("failed to parse TTY status".into())
+                            Error::invalid_message("failed to parse TTY status")
                         })?;
 
                     return Ok(*status);
                 }
 
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "unexpected message type: {}",
                     nlmsg_type
                 )));
@@ -693,7 +693,7 @@ impl Connection<Audit> {
                 let data = session.recv_with_timeout(self).await?;
 
                 if data.len() < NLMSG_HDRLEN {
-                    return Err(Error::InvalidMessage("response too short".into()));
+                    return Err(Error::invalid_message("response too short"));
                 }
 
                 let resp_seq = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
@@ -717,20 +717,20 @@ impl Connection<Audit> {
 
                 if nlmsg_type == AUDIT_GET_FEATURE {
                     if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditFeatures>() {
-                        return Err(Error::InvalidMessage(
-                            "features response too short".into(),
+                        return Err(Error::invalid_message(
+                            "features response too short",
                         ));
                     }
 
                     let (features, _) = AuditFeatures::ref_from_prefix(&data[NLMSG_HDRLEN..])
                         .map_err(|_| {
-                            Error::InvalidMessage("failed to parse features".into())
+                            Error::invalid_message("failed to parse features")
                         })?;
 
                     return Ok(*features);
                 }
 
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "unexpected message type: {}",
                     nlmsg_type
                 )));

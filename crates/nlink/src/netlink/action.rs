@@ -188,7 +188,7 @@ impl GactAction {
     ///
     /// Stricter than the legacy `add_gact_options` parser: unknown
     /// tokens, missing values, and unparseable verdicts return
-    /// `Error::InvalidMessage("gact: ...")`.
+    /// `Error::invalid_message("gact: ...")`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         // Default to TC_ACT_OK (pass).
         let mut act = Self::pass();
@@ -229,18 +229,18 @@ impl GactAction {
                 "random" => {
                     let kind = action_need_value(params, i, "gact", key)?;
                     let verdict_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "gact: `random <kind>` requires <verdict>".to_string(),
                         )
                     })?;
                     let val_s = params.get(i + 3).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "gact: `random <kind> <verdict>` requires <value>".to_string(),
                         )
                     })?;
                     let verdict = parse_gact_verdict(verdict_s)?;
                     let val: u16 = val_s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "gact: invalid random value `{val_s}` (expected u16)"
                         ))
                     })?;
@@ -248,7 +248,7 @@ impl GactAction {
                         "determ" => act.deterministic(val, verdict),
                         "netrand" => act.random(val, verdict),
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "gact: unknown random kind `{other}` (expected `determ` or `netrand`)"
                             )));
                         }
@@ -256,7 +256,7 @@ impl GactAction {
                     i += 4;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "gact: unknown token `{other}` (recognised: pass/drop/pipe/reclassify/stolen/continue, goto_chain <n>, random determ|netrand <verdict> <val>)"
                     )));
                 }
@@ -463,12 +463,12 @@ impl MirredAction {
                 "dev" => {
                     let s = action_need_value(params, i, "mirred", key)?;
                     if ifindex.is_some() {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
                         ));
                     }
                     let idx = crate::util::get_ifindex(s).map_err(|e| {
-                        Error::InvalidMessage(format!("mirred: dev `{s}` not found: {e}"))
+                        Error::invalid_message(format!("mirred: dev `{s}` not found: {e}"))
                     })?;
                     ifindex = Some(idx);
                     i += 2;
@@ -476,7 +476,7 @@ impl MirredAction {
                 "ifindex" => {
                     let s = action_need_value(params, i, "mirred", key)?;
                     if ifindex.is_some() {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
                         ));
                     }
@@ -484,7 +484,7 @@ impl MirredAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "mirred: unknown token `{other}` (recognised: egress/ingress, redirect/mirror, dev <ifname>, ifindex <n>)"
                     )));
                 }
@@ -492,7 +492,7 @@ impl MirredAction {
         }
 
         let idx = ifindex.ok_or_else(|| {
-            Error::InvalidMessage(
+            Error::invalid_message(
                 "mirred: target interface required (use `dev <ifname>` or `ifindex <n>`)"
                     .to_string(),
             )
@@ -690,7 +690,7 @@ impl PoliceAction {
                 "rate" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let r = crate::util::Rate::parse(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "police: invalid rate `{s}` (expected tc-style rate like `1mbit`)"
                         ))
                     })?;
@@ -700,7 +700,7 @@ impl PoliceAction {
                 "peakrate" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let r = crate::util::Rate::parse(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "police: invalid peakrate `{s}` (expected tc-style rate)"
                         ))
                     })?;
@@ -710,12 +710,12 @@ impl PoliceAction {
                 "burst" | "buffer" | "maxburst" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "police: invalid burst `{s}` (expected tc-style size like `32k`)"
                         ))
                     })?;
                     if bytes > u32::MAX as u64 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "police: burst `{s}` exceeds u32::MAX bytes"
                         )));
                     }
@@ -725,12 +725,12 @@ impl PoliceAction {
                 "mtu" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "police: invalid mtu `{s}` (expected tc-style size)"
                         ))
                     })?;
                     if bytes > u32::MAX as u64 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "police: mtu `{s}` exceeds u32::MAX bytes"
                         )));
                     }
@@ -740,13 +740,13 @@ impl PoliceAction {
                 "avrate" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let r = crate::util::Rate::parse(s).map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "police: invalid avrate `{s}` (expected tc-style rate)"
                         ))
                     })?;
                     let bps = r.as_bytes_per_sec();
                     if bps > u32::MAX as u64 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "police: avrate `{s}` exceeds u32::MAX bytes/sec"
                         )));
                     }
@@ -756,15 +756,15 @@ impl PoliceAction {
                 "conform-exceed" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let (conform_s, exceed_s) = s.split_once('/').ok_or_else(|| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "police: `conform-exceed` requires `<conform>/<exceed>` (got `{s}`)"
                         ))
                     })?;
                     let conform = parse_gact_verdict(conform_s).map_err(|e| {
-                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                        Error::invalid_message(e.to_string().replace("gact:", "police:"))
                     })?;
                     let exceed = parse_gact_verdict(exceed_s).map_err(|e| {
-                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                        Error::invalid_message(e.to_string().replace("gact:", "police:"))
                     })?;
                     act = act.conform(conform).exceed(exceed);
                     i += 2;
@@ -772,7 +772,7 @@ impl PoliceAction {
                 "conform" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let v = parse_gact_verdict(s).map_err(|e| {
-                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                        Error::invalid_message(e.to_string().replace("gact:", "police:"))
                     })?;
                     act = act.conform(v);
                     i += 2;
@@ -780,13 +780,13 @@ impl PoliceAction {
                 "exceed" => {
                     let s = action_need_value(params, i, "police", key)?;
                     let v = parse_gact_verdict(s).map_err(|e| {
-                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                        Error::invalid_message(e.to_string().replace("gact:", "police:"))
                     })?;
                     act = act.exceed(v);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "police: unknown token `{other}` (recognised: rate, burst/buffer/maxburst, peakrate, mtu, avrate, conform-exceed <c>/<e>, conform, exceed)"
                     )));
                 }
@@ -998,7 +998,7 @@ impl VlanAction {
                     let s = action_need_value(params, i, "vlan", key)?;
                     let id = action_parse_u32("vlan", "push id", s)?;
                     if id > 4095 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "vlan: VLAN ID `{id}` out of range (0–4095)"
                         )));
                     }
@@ -1010,7 +1010,7 @@ impl VlanAction {
                     let s = action_need_value(params, i, "vlan", key)?;
                     let id = action_parse_u32("vlan", "modify id", s)?;
                     if id > 4095 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "vlan: VLAN ID `{id}` out of range (0–4095)"
                         )));
                     }
@@ -1021,7 +1021,7 @@ impl VlanAction {
                     let s = action_need_value(params, i, "vlan", key)?;
                     let p = action_parse_u32("vlan", "priority", s)?;
                     if p > 7 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "vlan: priority `{p}` out of range (0–7)"
                         )));
                     }
@@ -1034,7 +1034,7 @@ impl VlanAction {
                         "802.1q" => qinq = false,
                         "802.1ad" => qinq = true,
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "vlan: unknown protocol `{other}` (expected `802.1q` or `802.1ad`)"
                             )));
                         }
@@ -1042,7 +1042,7 @@ impl VlanAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "vlan: unknown token `{other}` (recognised: pop, push <id>, modify <id>, priority <p>, protocol 802.1q|802.1ad)"
                     )));
                 }
@@ -1060,7 +1060,7 @@ impl VlanAction {
                 Self::modify(id)
             }
             _ => {
-                return Err(Error::InvalidMessage(
+                return Err(Error::invalid_message(
                     "vlan: missing operation (pop, push <id>, or modify <id>)".to_string(),
                 ));
             }
@@ -1252,7 +1252,7 @@ impl MplsAction {
                     let s = action_need_value(params, i, "mpls", key)?;
                     let v = action_parse_u32("mpls", "label", s)?;
                     if v > 0xF_FFFF {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "mpls: label `{v}` out of range (0–1048575)"
                         )));
                     }
@@ -1263,7 +1263,7 @@ impl MplsAction {
                     let s = action_need_value(params, i, "mpls", key)?;
                     let v = action_parse_u32("mpls", "tc", s)?;
                     if v > 7 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "mpls: tc `{v}` out of range (0–7)"
                         )));
                     }
@@ -1274,7 +1274,7 @@ impl MplsAction {
                     let s = action_need_value(params, i, "mpls", key)?;
                     let v = action_parse_u32("mpls", "ttl", s)?;
                     if v > 255 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "mpls: ttl `{v}` out of range (0–255)"
                         )));
                     }
@@ -1285,7 +1285,7 @@ impl MplsAction {
                     let s = action_need_value(params, i, "mpls", key)?;
                     let v = action_parse_u32("mpls", "bos", s)?;
                     if v > 1 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "mpls: bos `{v}` out of range (0–1)"
                         )));
                     }
@@ -1298,7 +1298,7 @@ impl MplsAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "mpls: unknown token `{other}` (recognised: pop, push, modify, dec_ttl, label <n>, tc <n>, ttl <n>, bos <n>, protocol <ethertype>)"
                     )));
                 }
@@ -1306,12 +1306,12 @@ impl MplsAction {
         }
 
         let m_action = op.ok_or_else(|| {
-            Error::InvalidMessage(
+            Error::invalid_message(
                 "mpls: missing operation (pop, push, modify, or dec_ttl)".to_string(),
             )
         })?;
         if m_action == mpls::TCA_MPLS_ACT_PUSH && label.is_none() {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "mpls: push requires a `label`".to_string(),
             ));
         }
@@ -1441,24 +1441,24 @@ impl SkbmodAction {
                 "set" => {
                     let what = action_need_value(params, i, "skbmod", "set")?;
                     let val = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(format!("skbmod: `set {what}` requires a value"))
+                        Error::invalid_message(format!("skbmod: `set {what}` requires a value"))
                     })?;
                     match what {
                         "smac" => {
                             a.smac = Some(crate::util::addr::parse_mac(val).map_err(|_| {
-                                Error::InvalidMessage(format!("skbmod: invalid smac `{val}`"))
+                                Error::invalid_message(format!("skbmod: invalid smac `{val}`"))
                             })?);
                         }
                         "dmac" => {
                             a.dmac = Some(crate::util::addr::parse_mac(val).map_err(|_| {
-                                Error::InvalidMessage(format!("skbmod: invalid dmac `{val}`"))
+                                Error::invalid_message(format!("skbmod: invalid dmac `{val}`"))
                             })?);
                         }
                         "etype" => {
                             a.etype = Some(parse_ethertype("skbmod", val)?);
                         }
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "skbmod: unknown `set` target `{other}` (expected smac, dmac, etype)"
                             )));
                         }
@@ -1469,7 +1469,7 @@ impl SkbmodAction {
                 "swap" => {
                     let what = action_need_value(params, i, "skbmod", "swap")?;
                     if what != "mac" {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "skbmod: unknown `swap` target `{what}` (expected mac)"
                         )));
                     }
@@ -1478,14 +1478,14 @@ impl SkbmodAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "skbmod: unknown token `{other}` (recognised: set smac|dmac|etype <v>, swap mac)"
                     )));
                 }
             }
         }
         if !any {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "skbmod: at least one operation required (set smac|dmac|etype, swap mac)"
                     .to_string(),
             ));
@@ -1648,7 +1648,7 @@ impl SkbeditAction {
                     let s = action_need_value(params, i, "skbedit", key)?;
                     let q = action_parse_u32("skbedit", "queue_mapping", s)?;
                     if q > u16::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "skbedit: queue_mapping `{q}` out of range (0–65535)"
                         )));
                     }
@@ -1656,7 +1656,7 @@ impl SkbeditAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "skbedit: unknown token `{other}` (recognised: priority, mark, mask, queue_mapping)"
                     )));
                 }
@@ -1668,7 +1668,7 @@ impl SkbeditAction {
             (Some(m), Some(mk)) => act = act.mark_with_mask(m, mk),
             (Some(m), None) => act = act.mark(m),
             (None, Some(_)) => {
-                return Err(Error::InvalidMessage(
+                return Err(Error::invalid_message(
                     "skbedit: `mask` requires a `mark` value".to_string(),
                 ));
             }
@@ -1814,7 +1814,7 @@ impl NatAction {
     ///   network-based NAT; bare addresses default to /32.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if params.len() < 3 {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "nat: requires `ingress|egress <oldaddr[/prefix]> <newaddr>`".to_string(),
             ));
         }
@@ -1822,7 +1822,7 @@ impl NatAction {
         let old_with_prefix = params[1];
         let new_addr_s = params[2];
         if params.len() > 3 {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "nat: unexpected token `{}` after `{} {} {}` (only the 3 positional args are supported)",
                 params[3], direction, old_with_prefix, new_addr_s
             )));
@@ -1831,12 +1831,12 @@ impl NatAction {
         let (old_addr_s, prefix) = match old_with_prefix.split_once('/') {
             Some((a, p)) => {
                 let pl: u8 = p.parse().map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "nat: invalid old-address prefix `{p}` (expected 0–32)"
                     ))
                 })?;
                 if pl > 32 {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "nat: prefix `{pl}` out of range (0–32)"
                     )));
                 }
@@ -1845,17 +1845,17 @@ impl NatAction {
             None => (old_with_prefix, 32),
         };
         let old_addr: Ipv4Addr = old_addr_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("nat: invalid old address `{old_addr_s}`"))
+            Error::invalid_message(format!("nat: invalid old address `{old_addr_s}`"))
         })?;
         let new_addr: Ipv4Addr = new_addr_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("nat: invalid new address `{new_addr_s}`"))
+            Error::invalid_message(format!("nat: invalid new address `{new_addr_s}`"))
         })?;
 
         let mut act = match direction {
             "egress" => Self::snat(old_addr, new_addr),
             "ingress" => Self::dnat(old_addr, new_addr),
             other => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "nat: direction `{other}` (expected `ingress` or `egress`)"
                 )));
             }
@@ -2110,7 +2110,7 @@ impl TunnelKeyAction {
         for &t in params {
             if matches!(t, "set" | "release") {
                 if op.is_some() {
-                    return Err(Error::InvalidMessage(
+                    return Err(Error::invalid_message(
                         "tunnel_key: only one of `set` / `release` may be specified".to_string(),
                     ));
                 }
@@ -2121,7 +2121,7 @@ impl TunnelKeyAction {
             Some("set") => Self::set(),
             Some("release") => Self::release(),
             _ => {
-                return Err(Error::InvalidMessage(
+                return Err(Error::invalid_message(
                     "tunnel_key: missing operation (`set` or `release`)".to_string(),
                 ));
             }
@@ -2136,10 +2136,10 @@ impl TunnelKeyAction {
                 "src" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let addr: Ipv4Addr = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tunnel_key: invalid src `{s}`"))
+                        Error::invalid_message(format!("tunnel_key: invalid src `{s}`"))
                     })?;
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2149,10 +2149,10 @@ impl TunnelKeyAction {
                 "dst" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let addr: Ipv4Addr = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tunnel_key: invalid dst `{s}`"))
+                        Error::invalid_message(format!("tunnel_key: invalid dst `{s}`"))
                     })?;
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2162,10 +2162,10 @@ impl TunnelKeyAction {
                 "src6" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let addr: std::net::Ipv6Addr = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tunnel_key: invalid src6 `{s}`"))
+                        Error::invalid_message(format!("tunnel_key: invalid src6 `{s}`"))
                     })?;
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2175,10 +2175,10 @@ impl TunnelKeyAction {
                 "dst6" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let addr: std::net::Ipv6Addr = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!("tunnel_key: invalid dst6 `{s}`"))
+                        Error::invalid_message(format!("tunnel_key: invalid dst6 `{s}`"))
                     })?;
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2189,7 +2189,7 @@ impl TunnelKeyAction {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let id = action_parse_u32("tunnel_key", "id", s)?;
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2200,12 +2200,12 @@ impl TunnelKeyAction {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let port = action_parse_u32("tunnel_key", "dst_port", s)?;
                     if port > u16::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "tunnel_key: dst_port `{port}` out of range (0–65535)"
                         )));
                     }
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2216,12 +2216,12 @@ impl TunnelKeyAction {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let v = action_parse_u32("tunnel_key", "tos", s)?;
                     if v > u8::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "tunnel_key: tos `{v}` out of range (0–255)"
                         )));
                     }
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2232,12 +2232,12 @@ impl TunnelKeyAction {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let v = action_parse_u32("tunnel_key", "ttl", s)?;
                     if v > u8::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "tunnel_key: ttl `{v}` out of range (0–255)"
                         )));
                     }
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
                         ));
                     }
@@ -2246,7 +2246,7 @@ impl TunnelKeyAction {
                 }
                 "no_csum" => {
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: no_csum only valid with `set`".to_string(),
                         ));
                     }
@@ -2255,7 +2255,7 @@ impl TunnelKeyAction {
                 }
                 "no_frag" => {
                     if !is_set {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "tunnel_key: no_frag only valid with `set`".to_string(),
                         ));
                     }
@@ -2263,7 +2263,7 @@ impl TunnelKeyAction {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "tunnel_key: unknown token `{other}` (recognised: set/release, src/dst[6] <addr>, id <vni>, dst_port <port>, tos/ttl <0-255>, no_csum, no_frag)"
                     )));
                 }
@@ -2416,7 +2416,7 @@ impl ConnmarkAction {
                     let s = action_need_value(params, i, "connmark", key)?;
                     let z = action_parse_u32("connmark", "zone", s)?;
                     if z > u16::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "connmark: zone `{z}` out of range (0–65535)"
                         )));
                     }
@@ -2424,7 +2424,7 @@ impl ConnmarkAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "connmark: unknown token `{other}` (recognised: zone <0–65535>)"
                     )));
                 }
@@ -2584,7 +2584,7 @@ impl CtinfoAction {
                     let s = action_need_value(params, i, "ctinfo", "zone")?;
                     let z = ctinfo_parse_u32("zone", s)?;
                     if z > u16::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "ctinfo: zone `{z}` out of range (0–65535)"
                         )));
                     }
@@ -2592,14 +2592,14 @@ impl CtinfoAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "ctinfo: unknown token `{other}` (recognised: dscp <mask>[/<statemask>], cpmark [<mask>], zone <0–65535>)"
                     )));
                 }
             }
         }
         if !any {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "ctinfo: at least one of `dscp`/`cpmark` is required".to_string(),
             ));
         }
@@ -2770,7 +2770,7 @@ impl IfeAction {
             "mark" => Ok(IfeMeta::Mark),
             "prio" => Ok(IfeMeta::Prio),
             "tcindex" => Ok(IfeMeta::TcIndex),
-            other => Err(Error::InvalidMessage(format!(
+            other => Err(Error::invalid_message(format!(
                 "{kind}: unknown metadata `{other}` (expected mark, prio, tcindex)"
             ))),
         }
@@ -2793,7 +2793,7 @@ impl IfeAction {
             Some(&"encode") => Self::encode(),
             Some(&"decode") => Self::decode(),
             _ => {
-                return Err(Error::InvalidMessage(
+                return Err(Error::invalid_message(
                     "ife: first token must be `encode` or `decode`".to_string(),
                 ));
             }
@@ -2811,7 +2811,7 @@ impl IfeAction {
                     let what = action_need_value(params, i, "ife", "use")?;
                     let meta = Self::meta_from_str("ife", what)?;
                     let val_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(format!("ife: `use {what}` requires a value"))
+                        Error::invalid_message(format!("ife: `use {what}` requires a value"))
                     })?;
                     let val = action_parse_u32("ife", "use value", val_s)?;
                     a = a.use_value(meta, val);
@@ -2820,14 +2820,14 @@ impl IfeAction {
                 "dst" => {
                     let s = action_need_value(params, i, "ife", "dst")?;
                     a = a.dst(crate::util::addr::parse_mac(s).map_err(|_| {
-                        Error::InvalidMessage(format!("ife: invalid dst MAC `{s}`"))
+                        Error::invalid_message(format!("ife: invalid dst MAC `{s}`"))
                     })?);
                     i += 2;
                 }
                 "src" => {
                     let s = action_need_value(params, i, "ife", "src")?;
                     a = a.src(crate::util::addr::parse_mac(s).map_err(|_| {
-                        Error::InvalidMessage(format!("ife: invalid src MAC `{s}`"))
+                        Error::invalid_message(format!("ife: invalid src MAC `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -2837,7 +2837,7 @@ impl IfeAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "ife: unknown token `{other}` (recognised: encode|decode, allow <meta>, use <meta> <val>, dst/src <MAC>, type <ethertype>)"
                     )));
                 }
@@ -3024,7 +3024,7 @@ impl GateAction {
             "BOOTTIME" => 7,
             "TAI" => 11,
             other => other.parse::<i32>().map_err(|_| {
-                Error::InvalidMessage(format!(
+                Error::invalid_message(format!(
                     "gate: unknown clockid `{other}` (expected TAI/REALTIME/MONOTONIC/BOOTTIME or a number)"
                 ))
             })?,
@@ -3072,7 +3072,7 @@ impl GateAction {
             crate::util::parse::get_time(s)
                 .map(|d| d.as_nanos() as u64)
                 .map_err(|_| {
-                    Error::InvalidMessage(format!(
+                    Error::invalid_message(format!(
                         "gate: invalid {key} `{s}` (expected a tc-style time)"
                     ))
                 })
@@ -3084,7 +3084,7 @@ impl GateAction {
                 "priority" => {
                     let s = action_need_value(params, i, "gate", "priority")?;
                     a.priority = Some(s.parse::<i32>().map_err(|_| {
-                        Error::InvalidMessage(format!("gate: invalid priority `{s}`"))
+                        Error::invalid_message(format!("gate: invalid priority `{s}`"))
                     })?);
                     i += 2;
                 }
@@ -3114,19 +3114,19 @@ impl GateAction {
                         "open" => true,
                         "close" => false,
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "gate: sched-entry state `{other}` (expected open or close)"
                             )));
                         }
                     };
                     let interval_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "gate: `sched-entry` requires an interval".to_string(),
                         )
                     })?;
                     let interval_ns = parse_ns("sched-entry interval", interval_s)?;
                     let interval_ns: u32 = interval_ns.try_into().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "gate: sched-entry interval `{interval_s}` exceeds u32 nanoseconds"
                         ))
                     })?;
@@ -3139,14 +3139,14 @@ impl GateAction {
                         && !Self::is_keyword(tok)
                     {
                         ipv = Some(tok.parse::<i32>().map_err(|_| {
-                            Error::InvalidMessage(format!("gate: invalid sched-entry ipv `{tok}`"))
+                            Error::invalid_message(format!("gate: invalid sched-entry ipv `{tok}`"))
                         })?);
                         i += 1;
                         if let Some(tok2) = params.get(i)
                             && !Self::is_keyword(tok2)
                         {
                             max_octets = Some(tok2.parse::<i32>().map_err(|_| {
-                                Error::InvalidMessage(format!(
+                                Error::invalid_message(format!(
                                     "gate: invalid sched-entry max-octets `{tok2}`"
                                 ))
                             })?);
@@ -3161,7 +3161,7 @@ impl GateAction {
                     });
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "gate: unknown token `{other}` (recognised: priority, base-time, cycle-time, cycle-time-ext, clockid, sched-entry open|close <interval> [ipv [max-octets]])"
                     )));
                 }
@@ -3335,7 +3335,7 @@ impl CsumAction {
                 "udplite" => act.udplite(),
                 "sctp" => act.sctp(),
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "csum: unknown checksum kind `{other}` (recognised: iph/icmp/igmp/tcp/udp/udplite/sctp)"
                     )));
                 }
@@ -3462,16 +3462,16 @@ impl SampleAction {
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "sample: unknown token `{other}` (recognised: rate <N>, group <G>, trunc <bytes>)"
                     )));
                 }
             }
         }
         let rate =
-            rate.ok_or_else(|| Error::InvalidMessage("sample: `rate <N>` required".to_string()))?;
+            rate.ok_or_else(|| Error::invalid_message("sample: `rate <N>` required".to_string()))?;
         let group = group
-            .ok_or_else(|| Error::InvalidMessage("sample: `group <G>` required".to_string()))?;
+            .ok_or_else(|| Error::invalid_message("sample: `group <G>` required".to_string()))?;
         let mut act = Self::new(rate, group);
         if let Some(t) = trunc {
             act = act.trunc(t);
@@ -3767,7 +3767,7 @@ impl CtAction {
                     let s = action_need_value(params, i, "ct", key)?;
                     let z = action_parse_u32("ct", "zone", s)?;
                     if z > u16::MAX as u32 {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "ct: zone `{z}` out of range (0–65535)"
                         )));
                     }
@@ -3777,7 +3777,7 @@ impl CtAction {
                 "mark" => {
                     let mark_s = action_need_value(params, i, "ct", key)?;
                     let mask_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage("ct: `mark` requires `<value> <mask>`".to_string())
+                        Error::invalid_message("ct: `mark` requires `<value> <mask>`".to_string())
                     })?;
                     let m = action_parse_u32("ct", "mark", mark_s)?;
                     let mk = action_parse_u32("ct", "mark mask", mask_s)?;
@@ -3787,13 +3787,13 @@ impl CtAction {
                 "nat" => {
                     // Form: nat src|dst <addr> | nat src|dst <min>-<max>
                     let dir = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::InvalidMessage(
+                        Error::invalid_message(
                             "ct: `nat` requires `src|dst <addr>` or `src|dst <min>-<max>`"
                                 .to_string(),
                         )
                     })?;
                     let range_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "ct: `nat {dir}` requires an address or `<min>-<max>` range"
                         ))
                     })?;
@@ -3802,7 +3802,7 @@ impl CtAction {
                         "src" => act.nat_src(min, max),
                         "dst" => act.nat_dst(min, max),
                         other => {
-                            return Err(Error::InvalidMessage(format!(
+                            return Err(Error::invalid_message(format!(
                                 "ct: `nat` direction must be `src` or `dst` (got `{other}`)"
                             )));
                         }
@@ -3810,7 +3810,7 @@ impl CtAction {
                     i += 3;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "ct: unknown token `{other}` (recognised: commit, clear, force, zone, mark <v> <m>, nat src|dst <addr>|<min>-<max>)"
                     )));
                 }
@@ -4201,7 +4201,7 @@ impl PeditAction {
                     i += 1;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "pedit: unexpected token `{other}` (expected `munge` or a control \
                          verdict like pipe/pass/drop)"
                     )));
@@ -4209,7 +4209,7 @@ impl PeditAction {
             }
         }
         if !any {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "pedit: requires at least one `munge <field> set <value>` spec".to_string(),
             ));
         }
@@ -4221,7 +4221,7 @@ impl PeditAction {
     /// and the number of tokens consumed.
     fn parse_one_munge(self, rest: &[&str]) -> Result<(Self, usize)> {
         let layer = rest.first().copied().ok_or_else(|| {
-            Error::InvalidMessage("pedit: `munge` requires a field spec".to_string())
+            Error::invalid_message("pedit: `munge` requires a field spec".to_string())
         })?;
 
         // Raw form: `offset <off> [u8|u16|u32] (set|add) <u32> [retain <mask>]`
@@ -4231,18 +4231,18 @@ impl PeditAction {
 
         // Layered form: `<layer> <field> set <value>` — 4 tokens.
         let field = rest.get(1).copied().ok_or_else(|| {
-            Error::InvalidMessage(format!("pedit: `munge {layer}` requires a field name"))
+            Error::invalid_message(format!("pedit: `munge {layer}` requires a field name"))
         })?;
         let op = rest.get(2).copied().ok_or_else(|| {
-            Error::InvalidMessage(format!("pedit: `munge {layer} {field}` requires an op"))
+            Error::invalid_message(format!("pedit: `munge {layer} {field}` requires an op"))
         })?;
         let value = rest.get(3).copied().ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "pedit: `munge {layer} {field} {op}` requires a value"
             ))
         })?;
         if op != "set" {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "pedit: op `{op}` on `{layer} {field}` is not modelled by the typed builder — \
                  use `munge offset <off> {op} <val>` or PeditAction::set_raw / add_raw"
             )));
@@ -4260,7 +4260,7 @@ impl PeditAction {
             ("eth", "src") => self.set_eth_src(pedit_mac(layer, field, value)?),
             ("eth", "dst") => self.set_eth_dst(pedit_mac(layer, field, value)?),
             _ => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "pedit: `{layer} {field}` is not modelled by the typed builder \
                      (modelled: ip src|dst|ttl|tos, tcp/udp sport|dport, eth src|dst) — \
                      use `munge offset <off> set <val> [retain <mask>]` for raw edits"
@@ -4274,7 +4274,7 @@ impl PeditAction {
     fn parse_raw_munge(self, rest: &[&str]) -> Result<(Self, usize)> {
         // rest[0] == "offset"
         let off = rest.get(1).copied().ok_or_else(|| {
-            Error::InvalidMessage("pedit: `munge offset` requires an offset".to_string())
+            Error::invalid_message("pedit: `munge offset` requires an offset".to_string())
         })?;
         let off = pedit_u32("offset", "offset", off)?;
 
@@ -4285,10 +4285,10 @@ impl PeditAction {
         }
 
         let op = rest.get(idx).copied().ok_or_else(|| {
-            Error::InvalidMessage("pedit: `munge offset` requires `set` or `add`".to_string())
+            Error::invalid_message("pedit: `munge offset` requires `set` or `add`".to_string())
         })?;
         let value = rest.get(idx + 1).copied().ok_or_else(|| {
-            Error::InvalidMessage(format!("pedit: `munge offset {off} {op}` requires a value"))
+            Error::invalid_message(format!("pedit: `munge offset {off} {op}` requires a value"))
         })?;
         let val = pedit_u32("offset", "value", value)?;
         idx += 2;
@@ -4296,7 +4296,7 @@ impl PeditAction {
         // Optional `retain <mask>` — defaults to 0 (write the whole word).
         let mask = if matches!(rest.get(idx).copied(), Some("retain")) {
             let m = rest.get(idx + 1).copied().ok_or_else(|| {
-                Error::InvalidMessage("pedit: `retain` requires a mask value".to_string())
+                Error::invalid_message("pedit: `retain` requires a mask value".to_string())
             })?;
             idx += 2;
             pedit_u32("offset", "retain", m)?
@@ -4309,7 +4309,7 @@ impl PeditAction {
             "set" => self.set_raw(htype, off, val, mask),
             "add" => self.add_raw(htype, off, val, mask),
             other => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "pedit: op `{other}` on `offset` is not modelled (expected set or add)"
                 )));
             }
@@ -4330,8 +4330,8 @@ impl ActionConfig for PeditAction {
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         if self.keys.is_empty() {
-            return Err(Error::InvalidMessage(
-                "pedit requires at least one key".into(),
+            return Err(Error::invalid_message(
+                "pedit requires at least one key",
             ));
         }
 
@@ -4622,12 +4622,12 @@ impl BpfAction {
                 "pinned" => {
                     let s = action_need_value(params, i, "bpf", key)?;
                     if source.is_some() {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "bpf: only one of `pinned` / `fd` may be specified".to_string(),
                         ));
                     }
                     source = Some(Self::from_pinned(s).map_err(|e| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "bpf: failed to open pinned program `{s}`: {e}"
                         ))
                     })?);
@@ -4636,7 +4636,7 @@ impl BpfAction {
                 "fd" => {
                     let s = action_need_value(params, i, "bpf", key)?;
                     if source.is_some() {
-                        return Err(Error::InvalidMessage(
+                        return Err(Error::invalid_message(
                             "bpf: only one of `pinned` / `fd` may be specified".to_string(),
                         ));
                     }
@@ -4654,12 +4654,12 @@ impl BpfAction {
                     let s = action_need_value(params, i, "bpf", key)?;
                     verdict = Some(parse_gact_verdict(s).map_err(|e| {
                         // Re-prefix gact: → bpf:.
-                        Error::InvalidMessage(e.to_string().replace("gact:", "bpf:"))
+                        Error::invalid_message(e.to_string().replace("gact:", "bpf:"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "bpf: unknown token `{other}` (recognised: pinned <path>, fd <n>, name <text>, verdict <kw>)"
                     )));
                 }
@@ -4667,7 +4667,7 @@ impl BpfAction {
         }
 
         let mut act = source.ok_or_else(|| {
-            Error::InvalidMessage(
+            Error::invalid_message(
                 "bpf: program source required (`pinned <path>` or `fd <n>`)".to_string(),
             )
         })?;
@@ -4807,19 +4807,19 @@ impl SimpleAction {
                 "verdict" => {
                     let s = action_need_value(params, i, "simple", key)?;
                     verdict = Some(parse_gact_verdict(s).map_err(|e| {
-                        Error::InvalidMessage(e.to_string().replace("gact:", "simple:"))
+                        Error::invalid_message(e.to_string().replace("gact:", "simple:"))
                     })?);
                     i += 2;
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "simple: unknown token `{other}` (recognised: sdata <text>, verdict <kw>)"
                     )));
                 }
             }
         }
         let sdata = sdata
-            .ok_or_else(|| Error::InvalidMessage("simple: `sdata <text>` required".to_string()))?;
+            .ok_or_else(|| Error::invalid_message("simple: `sdata <text>` required".to_string()))?;
         let mut act = Self::new(sdata);
         if let Some(v) = verdict {
             act = act.verdict(v);
@@ -5039,13 +5039,13 @@ fn action_need_value<'a>(params: &[&'a str], i: usize, kind: &str, key: &str) ->
     params
         .get(i + 1)
         .copied()
-        .ok_or_else(|| Error::InvalidMessage(format!("{kind}: `{key}` requires a value")))
+        .ok_or_else(|| Error::invalid_message(format!("{kind}: `{key}` requires a value")))
 }
 
 /// Parse a decimal `u32` with kind-prefixed error context.
 fn action_parse_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
     s.parse::<u32>().map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "{kind}: invalid {key} `{s}` (expected unsigned integer)"
         ))
     })
@@ -5060,7 +5060,7 @@ fn ctinfo_parse_u32(what: &str, s: &str) -> Result<u32> {
         s.parse::<u32>()
     };
     parsed.map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "ctinfo: invalid {what} `{s}` (expected 0x-hex or decimal u32)"
         ))
     })
@@ -5074,7 +5074,7 @@ fn parse_ethertype(kind: &str, s: &str) -> Result<u16> {
     s.parse::<crate::EthProto>()
         .map(crate::EthProto::as_u16)
         .map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "{kind}: invalid protocol `{s}` (expected a protocol name such as ipv4, ipv6, \
                  mpls_uc, or a number)"
             ))
@@ -5087,16 +5087,16 @@ fn parse_ethertype(kind: &str, s: &str) -> Result<u16> {
 fn parse_ipv4_range_or_single(s: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
     if let Some((min_s, max_s)) = s.split_once('-') {
         let min: Ipv4Addr = min_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("ct: invalid min address `{min_s}` in range"))
+            Error::invalid_message(format!("ct: invalid min address `{min_s}` in range"))
         })?;
         let max: Ipv4Addr = max_s.parse().map_err(|_| {
-            Error::InvalidMessage(format!("ct: invalid max address `{max_s}` in range"))
+            Error::invalid_message(format!("ct: invalid max address `{max_s}` in range"))
         })?;
         Ok((min, max))
     } else {
         let addr: Ipv4Addr = s
             .parse()
-            .map_err(|_| Error::InvalidMessage(format!("ct: invalid address `{s}`")))?;
+            .map_err(|_| Error::invalid_message(format!("ct: invalid address `{s}`")))?;
         Ok((addr, addr))
     }
 }
@@ -5108,7 +5108,7 @@ fn pedit_u32(layer: &str, field: &str, s: &str) -> Result<u32> {
         None => s.parse::<u32>(),
     };
     parsed.map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "pedit: invalid {layer} {field} value `{s}` (expected integer or 0x-hex)"
         ))
     })
@@ -5118,7 +5118,7 @@ fn pedit_u32(layer: &str, field: &str, s: &str) -> Result<u32> {
 fn pedit_u8(layer: &str, field: &str, s: &str) -> Result<u8> {
     let v = pedit_u32(layer, field, s)?;
     u8::try_from(v).map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "pedit: {layer} {field} value `{s}` out of range for u8 (0..=255)"
         ))
     })
@@ -5128,7 +5128,7 @@ fn pedit_u8(layer: &str, field: &str, s: &str) -> Result<u8> {
 fn pedit_u16(layer: &str, field: &str, s: &str) -> Result<u16> {
     let v = pedit_u32(layer, field, s)?;
     u16::try_from(v).map_err(|_| {
-        Error::InvalidMessage(format!(
+        Error::invalid_message(format!(
             "pedit: {layer} {field} value `{s}` out of range for u16 (0..=65535)"
         ))
     })
@@ -5137,14 +5137,14 @@ fn pedit_u16(layer: &str, field: &str, s: &str) -> Result<u16> {
 /// Parse a pedit IPv4 address value.
 fn pedit_ipv4(layer: &str, field: &str, s: &str) -> Result<Ipv4Addr> {
     s.parse::<Ipv4Addr>().map_err(|_| {
-        Error::InvalidMessage(format!("pedit: invalid {layer} {field} IPv4 address `{s}`"))
+        Error::invalid_message(format!("pedit: invalid {layer} {field} IPv4 address `{s}`"))
     })
 }
 
 /// Parse a pedit MAC address value (`aa:bb:cc:dd:ee:ff`).
 fn pedit_mac(layer: &str, field: &str, s: &str) -> Result<[u8; 6]> {
     crate::util::addr::parse_mac(s).map_err(|_| {
-        Error::InvalidMessage(format!("pedit: invalid {layer} {field} MAC address `{s}`"))
+        Error::invalid_message(format!("pedit: invalid {layer} {field} MAC address `{s}`"))
     })
 }
 
@@ -5159,7 +5159,7 @@ fn parse_gact_verdict(s: &str) -> Result<i32> {
         "stolen" => action::TC_ACT_STOLEN,
         "continue" => action::TC_ACT_UNSPEC,
         other => {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "gact: unknown verdict `{other}` (expected pass/drop/pipe/reclassify/stolen/continue)"
             )));
         }

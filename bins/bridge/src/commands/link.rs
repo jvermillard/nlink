@@ -35,7 +35,7 @@ impl FromStr for OnOff {
         match s {
             "on" | "1" | "yes" | "true" => Ok(OnOff(true)),
             "off" | "0" | "no" | "false" => Ok(OnOff(false)),
-            other => Err(Error::InvalidMessage(format!(
+            other => Err(Error::invalid_message(format!(
                 "bridge link set: invalid on/off value `{other}` (expected `on` or `off`)"
             ))),
         }

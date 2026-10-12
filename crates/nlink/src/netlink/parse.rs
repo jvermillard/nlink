@@ -54,7 +54,7 @@ pub trait FromNetlink: Sized {
     fn from_bytes(data: &[u8]) -> Result<Self> {
         Self::parse
             .parse(data)
-            .map_err(|e| Error::InvalidMessage(format!("parse error: {}", e)))
+            .map_err(|e| Error::invalid_message(format!("parse error: {}", e)))
     }
 
     /// Write the header required for dump requests.
@@ -229,10 +229,10 @@ pub fn parse_ip_addr(data: &[u8], family: u8) -> Result<IpAddr> {
         2 => {
             // AF_INET
             if data.len() < 4 {
-                return Err(Error::Truncated {
+                return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                     expected: 4,
                     actual: data.len(),
-                });
+                }));
             }
             Ok(IpAddr::V4(Ipv4Addr::new(
                 data[0], data[1], data[2], data[3],
@@ -241,15 +241,15 @@ pub fn parse_ip_addr(data: &[u8], family: u8) -> Result<IpAddr> {
         10 => {
             // AF_INET6
             if data.len() < 16 {
-                return Err(Error::Truncated {
+                return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                     expected: 16,
                     actual: data.len(),
-                });
+                }));
             }
             let arr: [u8; 16] = data[..16].try_into().unwrap();
             Ok(IpAddr::V6(Ipv6Addr::from(arr)))
         }
-        _ => Err(Error::InvalidMessage(format!(
+        _ => Err(Error::invalid_message(format!(
             "unknown address family: {}",
             family
         ))),

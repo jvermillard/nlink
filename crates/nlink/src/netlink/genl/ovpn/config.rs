@@ -183,7 +183,7 @@ impl OvpnConfig {
         if post.is_empty() {
             return Ok(());
         }
-        Err(Error::InvalidMessage(format!(
+        Err(Error::invalid_message(format!(
             "ovpn apply_reconcile: kernel state diverged from config after apply \
              ({post})"
         )))

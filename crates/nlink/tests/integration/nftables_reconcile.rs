@@ -1785,7 +1785,7 @@ async fn a_refused_batch_names_each_refused_operation() -> nlink::Result<()> {
         );
         // The predicates answer for the first failure.
         assert!(err.is_not_found(), "{shown}");
-        let nlink::Error::NftBatch { failures, .. } = &err else {
+        let nlink::ErrorDetail::NftBatch { failures, .. } = err.detail() else {
             panic!("expected Error::NftBatch, got {err:?}");
         };
         assert_eq!(failures.len(), 2, "{shown}");

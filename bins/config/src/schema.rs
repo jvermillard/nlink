@@ -127,16 +127,16 @@ impl ConfigFile {
     /// content-sniff fallback for `{`-leading documents).
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::InvalidMessage(format!("config: read {}: {e}", path.display())))?;
+            .map_err(|e| Error::invalid_message(format!("config: read {}: {e}", path.display())))?;
         let is_json = path.extension().and_then(|e| e.to_str()) == Some("json")
             || text.trim_start().starts_with('{');
         if is_json {
             serde_json::from_str(&text).map_err(|e| {
-                Error::InvalidMessage(format!("config: parse JSON {}: {e}", path.display()))
+                Error::invalid_message(format!("config: parse JSON {}: {e}", path.display()))
             })
         } else {
             serde_yaml::from_str(&text).map_err(|e| {
-                Error::InvalidMessage(format!("config: parse YAML {}: {e}", path.display()))
+                Error::invalid_message(format!("config: parse YAML {}: {e}", path.display()))
             })
         }
     }
@@ -165,7 +165,7 @@ impl ConfigFile {
                 ));
             }
             cfg = cfg.address(&addr.dev, &addr.address).map_err(|e| {
-                Error::InvalidMessage(format!(
+                Error::invalid_message(format!(
                     "config: invalid address `{}` on {}: {e}",
                     addr.address, addr.dev
                 ))
@@ -486,7 +486,7 @@ fn add_route(cfg: NetworkConfig, route: &RouteConfig) -> Result<NetworkConfig> {
     let table = match &route.table {
         None => None,
         Some(t) => Some(parse_table(t).ok_or_else(|| {
-            Error::InvalidMessage(format!("config: route {dst}: invalid table `{t}`"))
+            Error::invalid_message(format!("config: route {dst}: invalid table `{t}`"))
         })?),
     };
     let rtype = match route.route_type.as_deref() {
@@ -495,7 +495,7 @@ fn add_route(cfg: NetworkConfig, route: &RouteConfig) -> Result<NetworkConfig> {
         Some("unreachable") => RouteTypePlan::Unreachable,
         Some("prohibit") => RouteTypePlan::Prohibit,
         Some(other) => {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "config: route {dst}: unsupported type `{other}`"
             )));
         }
@@ -524,7 +524,7 @@ fn add_route(cfg: NetworkConfig, route: &RouteConfig) -> Result<NetworkConfig> {
             RouteTypePlan::Prohibit => r.prohibit(),
         }
     })
-    .map_err(|e| Error::InvalidMessage(format!("config: invalid route `{dst}`: {e}")))
+    .map_err(|e| Error::invalid_message(format!("config: invalid route `{dst}`: {e}")))
 }
 
 enum RouteTypePlan {
@@ -537,7 +537,7 @@ enum RouteTypePlan {
 // --- option helpers --------------------------------------------------
 
 fn err(link: &str, msg: String) -> Error {
-    Error::InvalidMessage(format!("config: link {link}: {msg}"))
+    Error::invalid_message(format!("config: link {link}: {msg}"))
 }
 
 fn opt_str(o: &Options, key: &str) -> Option<String> {

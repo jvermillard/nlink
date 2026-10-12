@@ -330,7 +330,7 @@ pub struct ChainRecreate {
     pub reason: String,
     /// Rules in the chain that nlink did not write, which it could not put
     /// back. Non-empty means the apply refuses, with
-    /// [`Error::NotSupported`](crate::Error::NotSupported), rather than
+    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported), rather than
     /// delete them. An [`exclusive`](super::DeclaredChainBuilder::exclusive)
     /// chain deletes them instead.
     pub blocked_by: Vec<String>,
@@ -494,7 +494,7 @@ pub struct NftablesDiff {
     /// name, why)`. Only `NFT_TABLE_F_DORMANT` can change; turning persist
     /// or owner on or off needs the table deleted with everything in it,
     /// which the diff will not do. The apply fails on the first, with
-    /// [`Error::NotSupported`](crate::Error::NotSupported) (#479).
+    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported) (#479).
     pub tables_refused: Vec<(Family, String, String)>,
     /// Chains to create — (owning table, owning family, chain).
     pub chains_to_add: Vec<(String, Family, DeclaredChain)>,

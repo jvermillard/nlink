@@ -112,7 +112,7 @@ impl Connection<Devlink> {
         let response = self.devlink_get(DEVLINK_CMD_INFO_GET, bus, device).await?;
 
         if response.len() < GENL_HDRLEN {
-            return Err(Error::InvalidMessage("empty info response".into()));
+            return Err(Error::invalid_message("empty info response"));
         }
 
         parse_info(&response[GENL_HDRLEN..])
@@ -593,7 +593,7 @@ impl Connection<Devlink> {
                 }
             }
 
-            result_payload.ok_or_else(|| Error::InvalidMessage("no response received".into()))
+            result_payload.ok_or_else(|| Error::invalid_message("no response received"))
         })
         .await
     }

@@ -267,6 +267,29 @@ All notable changes to this project will be documented in this file.
     target, by its id and a link only it has. It also checks a GENL
     family, the facade and the pool.
 
+- **`Error` is a struct, one pointer wide (#526).** The old variants are
+  `ErrorDetail`, reached through `e.detail()`.
+  - **Every error carries its context.** `e.context()` lists what was being
+    done, outermost first. `with_context` and `ResultExt::context` used to
+    keep a context only on a kernel error, and returned an I/O error, a
+    refused batch, a validation failure or a parse unchanged.
+  - **Kernel errors.** `KernelWithContext` is folded into
+    `ErrorDetail::Kernel` plus `context()`. Kernel errors read as before.
+  - **Construction.** Every `Error::InvalidMessage(…)` and similar variant
+    constructor (about 1,200 sites) now goes through a helper:
+    `invalid_message`, `invalid_attribute`, `not_supported`, `validation`,
+    `truncated`, `timeout`, `dump_interrupted`, `pool_closed`,
+    `Error::from(io::Error)`.
+  - **`nlink-macros`'** generated code uses the helpers too.
+  - **Unchanged:** `kind()`, `errno()`, `ext_ack()`, the `is_*`
+    predicates and `source()`.
+  - **Size.** A `Result<T>` used to carry an error of several words; it now
+    carries one pointer.
+  - **Test.** A unit test keeps a context on an I/O error, a validation
+    failure and an invalid message, and pins the kernel error formats. With
+    `with_context` back to the kernel-only rule it fails: the I/O error's
+    context is empty. A second test pins the size.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on

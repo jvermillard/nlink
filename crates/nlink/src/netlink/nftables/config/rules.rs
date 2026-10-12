@@ -91,7 +91,7 @@ impl super::types::NftablesConfig {
                 .iter()
                 .any(|t| t.family() == *family && t.name() == name)
             {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "table {name}: declared and declared absent (#519)"
                 )));
             }
@@ -104,7 +104,7 @@ impl super::types::NftablesConfig {
             for rule in table.rules() {
                 let chain = rule.chain();
                 if !table.chains().iter().any(|c| c.name() == chain) {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "{}/{chain}: a rule in a chain the table does not declare, which the \
                          diff deletes; declare the chain",
                         table.name()
@@ -112,7 +112,7 @@ impl super::types::NftablesConfig {
                 }
                 rule.body.check()?;
                 if rule.body.position.is_some() {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "{}/{chain}: a declared rule cannot carry a position; the diff \
                          places rules in declared order",
                         table.name()
@@ -121,7 +121,7 @@ impl super::types::NftablesConfig {
                 if let Some(key) = rule.handle_key() {
                     validate_key(table.name(), chain, key)?;
                     if !seen.insert((chain, key)) {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "{}/{chain}: rule key `{key}` is declared twice",
                             table.name()
                         )));
@@ -134,7 +134,7 @@ impl super::types::NftablesConfig {
                     rule.body.comment.as_deref(),
                 )
                 .map_err(|e| {
-                    Error::InvalidMessage(format!("{}/{}: {e}", table.name(), rule.chain()))
+                    Error::invalid_message(format!("{}/{}: {e}", table.name(), rule.chain()))
                 })?;
             }
             for set in table.sets() {
@@ -158,7 +158,7 @@ fn validate_chain(
     use crate::netlink::nftables::{ChainType, Family, Hook, Priority};
 
     let at = format!("{table}/{}", chain.name());
-    let refuse = |why: String| Err(Error::InvalidMessage(format!("{at}: {why}")));
+    let refuse = |why: String| Err(Error::invalid_message(format!("{at}: {why}")));
     let Some(hook) = chain.hook() else {
         if chain.policy().is_some() {
             return refuse("a policy needs a base chain; a chain without a hook has none".into());
@@ -207,7 +207,7 @@ fn fnv_feed(mut hash: u64, bytes: &[u8]) -> u64 {
 /// keys).
 pub(crate) fn validate_key(table: &str, chain: &str, key: &str) -> Result<()> {
     let bad = |why: &str| {
-        Err(Error::InvalidMessage(format!(
+        Err(Error::invalid_message(format!(
             "{table}/{chain}: rule key `{key}` {why}"
         )))
     };

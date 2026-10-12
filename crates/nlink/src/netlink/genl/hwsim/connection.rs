@@ -171,7 +171,7 @@ impl Connection<Hwsim> {
         let mut builder = self.request(HWSIM_CMD_NEW_RADIO, NLM_F_REQUEST | NLM_F_ACK);
         radio.append(&mut builder);
         let id = self.send_ack_value(builder).await?;
-        u32::try_from(id).map_err(|_| Error::InvalidMessage(format!("hwsim: radio id {id}")))
+        u32::try_from(id).map_err(|_| Error::invalid_message(format!("hwsim: radio id {id}")))
     }
 
     /// Delete radio `id`.

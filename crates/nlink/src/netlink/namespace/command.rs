@@ -164,7 +164,7 @@ impl NetnsCommand {
             .chain(self.cmd.get_args())
             .map(|a| CString::new(a.as_bytes()))
             .collect::<std::result::Result<_, _>>()
-            .map_err(|_| Error::InvalidMessage("null byte in an argument".into()))?;
+            .map_err(|_| Error::invalid_message("null byte in an argument"))?;
         let mut env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> = std::env::vars_os().collect();
         for (k, v) in self.cmd.get_envs() {
             match v {
@@ -176,7 +176,7 @@ impl NetnsCommand {
             .iter()
             .map(|(k, v)| CString::new([k.as_bytes(), b"=", v.as_bytes()].concat()))
             .collect::<std::result::Result<_, _>>()
-            .map_err(|_| Error::InvalidMessage("null byte in the environment".into()))?;
+            .map_err(|_| Error::invalid_message("null byte in the environment"))?;
         let cwd = match self.cmd.get_current_dir() {
             Some(dir) => Some(path_to_cstring(dir)?),
             None => None,
@@ -193,7 +193,7 @@ impl NetnsCommand {
             .read(true)
             .write(true)
             .open("/dev/null")
-            .map_err(Error::Io)?;
+            .map_err(Error::from)?;
         let devnull_raw = devnull.as_raw_fd();
 
         // The report pipe: tagged 5-byte messages, each atomic — `P` and
@@ -202,7 +202,7 @@ impl NetnsCommand {
         let mut fds = [0 as libc::c_int; 2];
         // SAFETY: pipe2 fills `fds` with two new descriptors.
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         let (rd, wr) = (fds[0], fds[1]);
 
@@ -216,7 +216,7 @@ impl NetnsCommand {
                 libc::close(rd);
                 libc::close(wr);
             }
-            return Err(Error::Io(e));
+            return Err(Error::from(e));
         }
         if first == 0 {
             unsafe {
@@ -293,15 +293,15 @@ impl NetnsCommand {
             use std::io::Read;
             // SAFETY: `rd` is ours, and the File closes it.
             let mut file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(rd) };
-            file.read_to_end(&mut report).map_err(Error::Io)?;
+            file.read_to_end(&mut report).map_err(Error::from)?;
         }
         drop(keep);
         drop(devnull);
         let (pid, errno) = parse_report(&report);
         match (pid, errno) {
-            (_, Some(errno)) => Err(Error::Io(std::io::Error::from_raw_os_error(errno as i32))),
+            (_, Some(errno)) => Err(Error::from(std::io::Error::from_raw_os_error(errno as i32))),
             (Some(pid), None) => Ok(pid),
-            (None, None) => Err(Error::InvalidMessage("the detached spawn reported no pid".into())),
+            (None, None) => Err(Error::invalid_message("the detached spawn reported no pid")),
         }
     }
 
@@ -316,7 +316,7 @@ impl NetnsCommand {
     pub fn spawn(mut self) -> Result<Child> {
         let (prepared, keep) = self.prepare()?;
         self.install(prepared);
-        let child = self.cmd.spawn().map_err(Error::Io);
+        let child = self.cmd.spawn().map_err(Error::from);
         drop(keep);
         child
     }
@@ -325,7 +325,7 @@ impl NetnsCommand {
     pub fn output(mut self) -> Result<Output> {
         let (prepared, keep) = self.prepare()?;
         self.install(prepared);
-        let output = self.cmd.output().map_err(Error::Io);
+        let output = self.cmd.output().map_err(Error::from);
         drop(keep);
         output
     }
@@ -335,7 +335,7 @@ impl NetnsCommand {
     pub fn spawn_tokio(mut self) -> Result<tokio::process::Child> {
         let (prepared, keep) = self.prepare()?;
         self.install(prepared);
-        let child = tokio::process::Command::from(self.cmd).spawn().map_err(Error::Io);
+        let child = tokio::process::Command::from(self.cmd).spawn().map_err(Error::from);
         drop(keep);
         child
     }
@@ -346,7 +346,7 @@ impl NetnsCommand {
     pub async fn output_async(mut self) -> Result<Output> {
         let (prepared, keep) = self.prepare()?;
         self.install(prepared);
-        let output = tokio::process::Command::from(self.cmd).output().await.map_err(Error::Io);
+        let output = tokio::process::Command::from(self.cmd).output().await.map_err(Error::from);
         drop(keep);
         output
     }
@@ -366,8 +366,8 @@ impl NetnsCommand {
             (Overlay::Off, _) => Vec::new(),
             (_, Some(name)) => prepare_etc_binds(name)?,
             (_, None) => {
-                return Err(Error::InvalidMessage(
-                    "an /etc/netns overlay needs a namespace opened by name".into(),
+                return Err(Error::invalid_message(
+                    "an /etc/netns overlay needs a namespace opened by name",
                 ));
             }
         };
@@ -376,7 +376,7 @@ impl NetnsCommand {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(dir.join("cgroup.procs"))
-                    .map_err(|e| Error::InvalidMessage(format!("cgroup {}: {e}", dir.display())))?,
+                    .map_err(|e| Error::invalid_message(format!("cgroup {}: {e}", dir.display())))?,
             ),
             None => None,
         };
@@ -387,7 +387,7 @@ impl NetnsCommand {
             strict: self.overlay == Overlay::Strict,
             binds,
             ns_name: CString::new(self.name.clone().unwrap_or_default())
-                .map_err(|_| Error::InvalidMessage("null byte in namespace name".into()))?,
+                .map_err(|_| Error::invalid_message("null byte in namespace name"))?,
             c_root: path_to_cstring(Path::new("/"))?,
             c_none: CString::new("none").expect("no null byte"),
             c_sys: path_to_cstring(Path::new("/sys"))?,
@@ -540,7 +540,7 @@ fn resolve_program(cmd: &Command) -> Result<CString> {
             std::fs::metadata(candidate).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
         .ok_or_else(|| {
-            Error::Io(std::io::Error::new(
+            Error::from(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("{} not found on PATH", program.display()),
             ))

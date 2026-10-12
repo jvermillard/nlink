@@ -287,12 +287,12 @@ impl TunnelCmd {
     ) -> Result<()> {
         // Parse addresses
         let remote_addr: Ipv4Addr = remote.parse().map_err(|_| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid remote address: {}", remote))
+            nlink::netlink::Error::invalid_message(format!("invalid remote address: {}", remote))
         })?;
 
         let local_addr: Option<Ipv4Addr> = if let Some(l) = local {
             Some(l.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid local address: {}", l))
+                nlink::netlink::Error::invalid_message(format!("invalid local address: {}", l))
             })?)
         } else {
             None
@@ -302,8 +302,8 @@ impl TunnelCmd {
         // --nopmtudisc disables, neither leaves the kernel default. Both at
         // once is contradictory and must error, not silently pick one.
         if pmtudisc && nopmtudisc {
-            return Err(nlink::netlink::Error::InvalidMessage(
-                "cannot specify both --pmtudisc and --nopmtudisc".into(),
+            return Err(nlink::netlink::Error::invalid_message(
+                "cannot specify both --pmtudisc and --nopmtudisc",
             ));
         }
         let pmtudisc_val = if pmtudisc {
@@ -404,13 +404,13 @@ impl TunnelCmd {
                 // VtiLink models neither tos nor pmtudisc — reject rather than
                 // silently dropping them (CLAUDE.md "never silently fall back").
                 if tos.is_some() {
-                    return Err(nlink::netlink::Error::InvalidMessage(
-                        "tos is not modelled for vti tunnels".into(),
+                    return Err(nlink::netlink::Error::invalid_message(
+                        "tos is not modelled for vti tunnels",
                     ));
                 }
                 if pmtudisc_val.is_some() {
-                    return Err(nlink::netlink::Error::InvalidMessage(
-                        "pmtudisc is not modelled for vti tunnels".into(),
+                    return Err(nlink::netlink::Error::invalid_message(
+                        "pmtudisc is not modelled for vti tunnels",
                     ));
                 }
                 let mut link = VtiLink::new(name).remote(remote_addr);
@@ -426,7 +426,7 @@ impl TunnelCmd {
                 conn.add_link(link).await?;
             }
             _ => {
-                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                return Err(nlink::netlink::Error::invalid_message(format!(
                     "unknown tunnel mode '{}', supported: gre, gretap, ipip, sit, vti",
                     mode
                 )));
@@ -454,7 +454,7 @@ impl TunnelCmd {
     ) -> Result<()> {
         // Changing tunnel parameters in-place is not well supported by the kernel
         // for most tunnel types. The recommended approach is to delete and recreate.
-        Err(nlink::netlink::Error::InvalidMessage(format!(
+        Err(nlink::netlink::Error::invalid_message(format!(
             "changing tunnel '{}' parameters is not supported; use 'ip tunnel del' followed by 'ip tunnel add'",
             name
         )))

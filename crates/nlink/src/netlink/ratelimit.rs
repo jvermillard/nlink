@@ -492,7 +492,7 @@ impl RateLimiter {
                         }
                         return Ok(true);
                     }
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "RateLimiter::reconcile({ctx}): root qdisc is {conflict}; pass \
                          ReconcileOptions::with_fallback_to_apply(true) to rebuild"
                     )));
@@ -654,7 +654,7 @@ impl RateLimiter {
         Ok(conn
             .get_link_by_name(&self.dev)
             .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?
+            .ok_or_else(|| Error::invalid_message(format!("interface not found: {}", self.dev)))?
             .ifindex())
     }
 
@@ -674,7 +674,7 @@ impl RateLimiter {
         match self.find_ifb(conn).await? {
             Ifb::Missing => Ok(None),
             Ifb::Ours(link) => Ok(Some(*link)),
-            Ifb::Foreign(why) => Err(Error::InvalidMessage(format!(
+            Ifb::Foreign(why) => Err(Error::invalid_message(format!(
                 "RateLimiter({}): {why}; it will not use or delete it",
                 self.dev
             ))),
@@ -709,7 +709,7 @@ impl RateLimiter {
             .get_link_by_name(&name)
             .await?
             .ok_or_else(|| {
-                Error::InvalidMessage(format!("IFB device vanished after creation: {name}"))
+                Error::invalid_message(format!("IFB device vanished after creation: {name}"))
             })?
             .ifindex();
         conn.set_link_alias_by_index(ifindex, &self.ifb_tag())
@@ -1367,7 +1367,7 @@ impl PerHostLimiter {
         let link = conn
             .get_link_by_name(&self.dev)
             .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?;
+            .ok_or_else(|| Error::invalid_message(format!("interface not found: {}", self.dev)))?;
         let ifindex = link.ifindex();
         // Each attempt dumps the tree again (#532).
         let (mut report, attempts) = opts
@@ -1427,7 +1427,7 @@ impl PerHostLimiter {
                         }
                         return self.apply_as_reconcile(conn).await;
                     }
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "PerHostLimiter::reconcile: root qdisc on {} is {conflict}; pass \
                          ReconcileOptions::with_fallback_to_apply(true) to rebuild",
                         self.dev
@@ -1915,7 +1915,7 @@ impl PerHostLimiter {
         for (i, rule) in self.rules.iter().enumerate() {
             for (_, prio, _) in rule_filters(i, rule, TcHandle::new(1, (i + 2) as u16))? {
                 if let Some(other) = taken.insert(prio, i) {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "PerHostLimiter: rules {other} and {i} both need filter priority \
                          {prio}"
                     )));
@@ -1998,7 +1998,7 @@ fn rule_filters(
     // L4 ones do not.
 
     if index >= MAX_RULES {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "PerHostLimiter: rule {index} is past the last filter priority — a limiter holds \
              at most {MAX_RULES} rules (four priorities each, from {FIRST_RULE_PRIORITY})"
         )));
@@ -2076,7 +2076,7 @@ fn rule_filters(
             tcp_and_udp(&|f| f.dst_port_range(*start, *end))
         }
         HostMatch::PortRange(start, end) => {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "PerHostLimiter: port range {start}-{end} is empty (start is above end)"
             )));
         }
@@ -2087,7 +2087,7 @@ fn rule_filters(
 fn parse_subnet(subnet: &str) -> Result<(IpAddr, u8)> {
     let parts: Vec<&str> = subnet.split('/').collect();
     if parts.len() != 2 {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "invalid subnet format: {}",
             subnet
         )));
@@ -2095,16 +2095,16 @@ fn parse_subnet(subnet: &str) -> Result<(IpAddr, u8)> {
 
     let addr: IpAddr = parts[0]
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid IP address: {}", parts[0])))?;
+        .map_err(|_| Error::invalid_message(format!("invalid IP address: {}", parts[0])))?;
 
     let prefix: u8 = parts[1]
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid prefix length: {}", parts[1])))?;
+        .map_err(|_| Error::invalid_message(format!("invalid prefix length: {}", parts[1])))?;
 
     // Validate prefix length
     let max_prefix = if addr.is_ipv4() { 32 } else { 128 };
     if prefix > max_prefix {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "prefix length {} exceeds maximum {} for address type",
             prefix, max_prefix
         )));

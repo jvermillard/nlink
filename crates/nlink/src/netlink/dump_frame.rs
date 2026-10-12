@@ -22,7 +22,7 @@
 //!
 //! **`NLM_F_DUMP_INTR`** says the snapshot is torn — the dump
 //! iterator's data structure was mutated mid-dump. The crate already
-//! decided this matters (there is an `Error::DumpInterrupted` and tests
+//! decided this matters (there is an `Error::dump_interrupted()` and tests
 //! for it) and then checked it in four loops out of nine. The
 //! unchecked ones include `dump_stream` (which feeds the `Store`
 //! watch-cache) and the nftables dumps that `diff()` builds an
@@ -76,7 +76,7 @@ pub(crate) fn classify<'a>(
     //     The kernel sets NLM_F_DUMP_INTR on whichever frame was
     //     generated after the mutation.
     if header.is_dump_interrupted() {
-        return Classification::Error(Error::DumpInterrupted);
+        return Classification::Error(Error::dump_interrupted());
     }
 
     if header.is_error() {
@@ -101,7 +101,7 @@ pub(crate) fn classify<'a>(
 /// error that ends it?
 ///
 /// For reading an interrupted dump to its end (#494): once
-/// [`classify`] has said [`Error::DumpInterrupted`], the frames that follow
+/// [`classify`] has said [`Error::dump_interrupted()`], the frames that follow
 /// are skipped up to this one, whatever flags they carry (the `DONE` itself
 /// can carry `NLM_F_DUMP_INTR`).
 pub(crate) fn ends_dump(header: &NlMsgHdr, seq: u32) -> bool {

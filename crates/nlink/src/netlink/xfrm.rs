@@ -1788,7 +1788,7 @@ impl Connection<Xfrm> {
                     }
                     // NLM_F_DUMP_INTR = 0x10
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {
@@ -1898,7 +1898,7 @@ impl Connection<Xfrm> {
                         continue;
                     }
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {
@@ -3107,10 +3107,10 @@ impl FromNetlink for SecurityAssociation {
     }
 
     /// Parse from the post-nlmsghdr body (`xfrm_usersa_info` +
-    /// attrs). Returns `Error::InvalidMessage` on a truncated body.
+    /// attrs). Returns `Error::invalid_message` on a truncated body.
     fn from_bytes(payload: &[u8]) -> Result<Self> {
         parse_sa_payload(payload).ok_or_else(|| {
-            super::error::Error::InvalidMessage("truncated xfrm_usersa_info body".into())
+            super::error::Error::invalid_message("truncated xfrm_usersa_info body")
         })
     }
 }
@@ -3129,7 +3129,7 @@ impl FromNetlink for SecurityPolicy {
 
     fn from_bytes(payload: &[u8]) -> Result<Self> {
         parse_sp_payload(payload).ok_or_else(|| {
-            super::error::Error::InvalidMessage("truncated xfrm_userpolicy_info body".into())
+            super::error::Error::invalid_message("truncated xfrm_userpolicy_info body")
         })
     }
 }

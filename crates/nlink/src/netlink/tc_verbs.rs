@@ -192,10 +192,10 @@ impl QdiscAt<'_> {
     /// is refused — [`replace`](Self::replace) does those.
     pub async fn change(&self, spec: impl QdiscConfig) -> Result<()> {
         let Some(live) = self.get().await? else {
-            return Err(Error::QdiscNotFound {
+            return Err(Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
                 kind: spec.kind().to_string(),
                 interface: self.dev.to_string(),
-            });
+            }));
         };
         if live.kind() != Some(spec.kind()) {
             return Err(Error::not_supported(format!(

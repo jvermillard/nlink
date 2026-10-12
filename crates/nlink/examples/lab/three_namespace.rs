@@ -131,7 +131,7 @@ fn alpha_level_addr_dump(ns_name: &str) -> nlink::Result<String> {
     cmd.args(["-br", "addr"]);
     let output = nlink::netlink::namespace::spawn_output(ns_name, cmd)?;
     if !output.status.success() {
-        return Err(nlink::Error::InvalidMessage(
+        return Err(nlink::Error::invalid_message(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }

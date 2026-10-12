@@ -166,7 +166,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
                 && e.orig.dst_port == Some(80)
         })
         .ok_or_else(|| {
-            nlink::Error::InvalidMessage("injected TCP entry not found in dump".into())
+            nlink::Error::invalid_message("injected TCP entry not found in dump")
         })?;
     let id = injected.id.expect("kernel always assigns an id");
     println!(
@@ -278,7 +278,7 @@ async fn find_entry(
                 && e.orig.dst_port == Some(dst_port)
         })
         .ok_or_else(|| {
-            nlink::Error::InvalidMessage("expected conntrack entry not found in dump".into())
+            nlink::Error::invalid_message("expected conntrack entry not found in dump")
         })
 }
 

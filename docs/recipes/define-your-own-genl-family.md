@@ -240,13 +240,15 @@ in-tree families:
 
 - Resolution failure (kernel doesn't have the family registered
   — typically missing kernel module or feature disabled) →
-  `Err(Error::FamilyNotFound { name })`. Use `e.is_not_found()`.
+  an error whose detail is `ErrorDetail::FamilyNotFound { name }`. Use
+  `e.is_not_found()`.
 - `EPERM` on send (your family requires CAP_NET_ADMIN or
   similar) → `e.is_permission_denied()`.
-- Malformed wire frames → `Error::InvalidMessage` /
-  `Error::Truncated`. Treat as bugs; surface to logs.
+- Malformed wire frames → `ErrorDetail::InvalidMessage` /
+  `ErrorDetail::Truncated` (`e.kind()` is `Invalid` / `Truncated`).
+  Treat as bugs; surface to logs.
 - Kernel error TLVs (ext-ack-enabled, default) carry
-  human-readable diagnostic text → `Error::Kernel::ext_ack`.
+  human-readable diagnostic text → `e.ext_ack()`.
 
 See [`error-handling-patterns.md`](error-handling-patterns.md)
 for the canonical predicate-dispatch idiom.

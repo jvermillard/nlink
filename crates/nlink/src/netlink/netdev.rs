@@ -1200,7 +1200,7 @@ mod tests {
 
         let mut h = Harness::new();
         h.links
-            .push(Err(crate::Error::InvalidMessage("boom".into())));
+            .push(Err(crate::Error::invalid_message("boom")));
         assert!(matches!(
             Pin::new(&mut h.lifecycle).poll_next(&mut cx),
             Poll::Ready(Some(Err(_)))
@@ -1208,7 +1208,7 @@ mod tests {
 
         let mut h = Harness::new();
         h.uevents
-            .push(Err(crate::Error::InvalidMessage("boom".into())));
+            .push(Err(crate::Error::invalid_message("boom")));
         assert!(matches!(
             Pin::new(&mut h.lifecycle).poll_next(&mut cx),
             Poll::Ready(Some(Err(_)))

@@ -219,7 +219,7 @@ async fn an_ifb_redirect_shapes_what_a_device_receives() -> nlink::Result<()> {
             .apply_with_options(&b, ApplyOptions::default().with_previous(redirected))
             .await?;
         assert!(applied.is_success(), "{:?}", applied.errors);
-        let filters = filters_at(&pair.b, pair.b_if, "ffff:").map_err(nlink::Error::InvalidMessage)?;
+        let filters = filters_at(&pair.b, pair.b_if, "ffff:").map_err(nlink::Error::invalid_message)?;
         assert!(filters.is_empty(), "the redirect should be gone: {filters:?}");
         assert_eq!(deliver_udp(&pair.a, &pair.b, dst, 5), 5, "the redirect is gone");
         Ok(())

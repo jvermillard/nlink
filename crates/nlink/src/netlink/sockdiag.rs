@@ -356,8 +356,8 @@ impl Connection<SockDiag> {
             loop {
                 let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 if data.len() < 16 {
-                    return Err(crate::netlink::Error::InvalidMessage(
-                        "response too short".into(),
+                    return Err(crate::netlink::Error::invalid_message(
+                        "response too short",
                     ));
                 }
                 let resp_seq =
@@ -619,7 +619,7 @@ impl Connection<SockDiag> {
                         continue;
                     }
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {
@@ -736,7 +736,7 @@ impl Connection<SockDiag> {
                         continue;
                     }
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {
@@ -861,7 +861,7 @@ impl Connection<SockDiag> {
                         continue;
                     }
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {
@@ -981,7 +981,7 @@ impl Connection<SockDiag> {
                         continue;
                     }
                     if nlmsg_flags & 0x10 != 0 {
-                        return Err(crate::netlink::Error::DumpInterrupted);
+                        return Err(crate::netlink::Error::dump_interrupted());
                     }
 
                     match nlmsg_type {

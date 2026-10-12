@@ -57,9 +57,9 @@ impl Connection<Wireguard> {
                     .get_link_by_index(*idx)
                     .await?
                     .and_then(|l| l.name().map(|s| s.to_string()))
-                    .ok_or_else(|| Error::InterfaceNotFound {
+                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                         name: format!("ifindex {}", idx),
-                    })
+                    }))
             }
         }
     }
@@ -164,9 +164,9 @@ impl Connection<Wireguard> {
             .await?;
 
         if responses.is_empty() {
-            return Err(Error::InterfaceNotFound {
+            return Err(Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                 name: ifname.to_string(),
-            });
+            }));
         }
 
         // Parse the response(s) - may be split across multiple messages for large peer lists

@@ -411,10 +411,10 @@ impl Srv6LocalRoute {
     /// Parse an SRv6 local route from netlink message payload.
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < RtMsg::SIZE {
-            return Err(Error::Truncated {
+            return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: RtMsg::SIZE,
                 actual: data.len(),
-            });
+            }));
         }
 
         let rtmsg = RtMsg::from_bytes(data)?;

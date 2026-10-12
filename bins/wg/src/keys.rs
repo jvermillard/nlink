@@ -61,13 +61,13 @@ fn derive_public(private: [u8; 32]) -> [u8; 32] {
 /// Derive public key from private key read from stdin.
 pub fn pubkey() -> Result<()> {
     let mut input = String::new();
-    io::stdin().read_to_string(&mut input).map_err(Error::Io)?;
+    io::stdin().read_to_string(&mut input).map_err(Error::from)?;
 
     let private_bytes = base64_decode(&input)
-        .map_err(|e| Error::InvalidMessage(format!("Invalid base64: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("Invalid base64: {}", e)))?;
 
     if private_bytes.len() != 32 {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "Invalid private key length: expected 32, got {}",
             private_bytes.len()
         )));

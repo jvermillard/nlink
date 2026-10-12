@@ -545,8 +545,8 @@ async fn pids_names_what_is_inside() -> nlink::Result<()> {
     let inside = netns.run(|| netns.pids())??;
     assert!(inside.contains(&std::process::id()), "{inside:?}");
 
-    child.kill().map_err(nlink::Error::Io)?;
-    child.wait().map_err(nlink::Error::Io)?;
+    child.kill().map_err(nlink::Error::from)?;
+    child.wait().map_err(nlink::Error::from)?;
     assert_eq!(netns.pids()?, Vec::<u32>::new());
     Ok(())
 }

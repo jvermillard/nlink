@@ -133,7 +133,7 @@ async fn show_nexthops(
             } else {
                 serde_json::to_string(&value)
             }
-            .map_err(|e| Error::InvalidMessage(e.to_string()))?;
+            .map_err(|e| Error::invalid_message(e.to_string()))?;
             println!("{}", json);
         }
         OutputFormat::Text => {
@@ -344,11 +344,11 @@ async fn add_nexthop(conn: &Connection<Route>, args: NexthopAddArgs, replace: bo
             let parts: Vec<&str> = member_str.split(',').collect();
             let nh_id: u32 = parts[0]
                 .parse()
-                .map_err(|_| Error::InvalidMessage(format!("invalid nexthop id: {}", parts[0])))?;
+                .map_err(|_| Error::invalid_message(format!("invalid nexthop id: {}", parts[0])))?;
             let weight: u16 = if parts.len() > 1 {
                 parts[1]
                     .parse()
-                    .map_err(|_| Error::InvalidMessage(format!("invalid weight: {}", parts[1])))?
+                    .map_err(|_| Error::invalid_message(format!("invalid weight: {}", parts[1])))?
             } else {
                 1
             };
@@ -365,7 +365,7 @@ async fn add_nexthop(conn: &Connection<Route>, args: NexthopAddArgs, replace: bo
                     builder = builder.multipath();
                 }
                 _ => {
-                    return Err(Error::InvalidMessage(format!("unknown group type: {}", gt)));
+                    return Err(Error::invalid_message(format!("unknown group type: {}", gt)));
                 }
             }
         }

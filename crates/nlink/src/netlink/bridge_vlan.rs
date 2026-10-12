@@ -252,7 +252,7 @@ impl BridgeVlanTunnelBuilder {
     ) -> Result<()> {
         // Validate tunnel ID
         if self.tunnel_id > Self::MAX_TUNNEL_ID {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "tunnel_id {} exceeds maximum {}",
                 self.tunnel_id,
                 Self::MAX_TUNNEL_ID
@@ -270,7 +270,7 @@ impl BridgeVlanTunnelBuilder {
 
         if let Some(vid_end) = self.vid_end {
             if vid_end < self.vid {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "VLAN tunnel range {}..={vid_end} ends before it starts",
                     self.vid
                 )));
@@ -286,7 +286,7 @@ impl BridgeVlanTunnelBuilder {
             // Calculate the end tunnel ID (1:1 mapping)
             let tunnel_id_end = self.tunnel_id + (vid_end - self.vid) as u32;
             if tunnel_id_end > Self::MAX_TUNNEL_ID {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "tunnel_id range end {} exceeds maximum {}",
                     tunnel_id_end,
                     Self::MAX_TUNNEL_ID
@@ -1071,8 +1071,8 @@ impl Connection<Route> {
     async fn resolve_bridge_vlan_interface(&self, config: &BridgeVlanBuilder) -> Result<u32> {
         match config.device_ref() {
             Some(iface) => self.resolve_interface(iface).await,
-            None => Err(Error::InvalidMessage(
-                "device name or ifindex required".into(),
+            None => Err(Error::invalid_message(
+                "device name or ifindex required",
             )),
         }
     }
@@ -1084,8 +1084,8 @@ impl Connection<Route> {
     ) -> Result<u32> {
         match config.device_ref() {
             Some(iface) => self.resolve_interface(iface).await,
-            None => Err(Error::InvalidMessage(
-                "device name or ifindex required".into(),
+            None => Err(Error::invalid_message(
+                "device name or ifindex required",
             )),
         }
     }
@@ -1578,8 +1578,8 @@ impl Connection<Route> {
         let ifindex = match config.device_ref() {
             Some(iface) => self.resolve_interface(iface).await?,
             None => {
-                return Err(Error::InvalidMessage(
-                    "device name or ifindex required".into(),
+                return Err(Error::invalid_message(
+                    "device name or ifindex required",
                 ));
             }
         };
@@ -1687,8 +1687,8 @@ impl Connection<Route> {
         let ifindex = match config.device_ref() {
             Some(iface) => self.resolve_interface(iface).await?,
             None => {
-                return Err(Error::InvalidMessage(
-                    "device name or ifindex required".into(),
+                return Err(Error::invalid_message(
+                    "device name or ifindex required",
                 ));
             }
         };

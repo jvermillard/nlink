@@ -288,19 +288,19 @@ fn parse_vid_range(s: &str) -> Result<(u16, Option<u16>)> {
         let start_vid: u16 = start
             .trim()
             .parse()
-            .map_err(|_| Error::InvalidMessage(format!("invalid VLAN ID: {}", start)))?;
+            .map_err(|_| Error::invalid_message(format!("invalid VLAN ID: {}", start)))?;
         let end_vid: u16 = end
             .trim()
             .parse()
-            .map_err(|_| Error::InvalidMessage(format!("invalid VLAN ID: {}", end)))?;
+            .map_err(|_| Error::invalid_message(format!("invalid VLAN ID: {}", end)))?;
 
         if start_vid > end_vid {
-            return Err(Error::InvalidMessage(
-                "VLAN range start must be <= end".into(),
+            return Err(Error::invalid_message(
+                "VLAN range start must be <= end",
             ));
         }
         if start_vid == 0 || start_vid > 4094 || end_vid > 4094 {
-            return Err(Error::InvalidMessage("VLAN ID must be 1-4094".into()));
+            return Err(Error::invalid_message("VLAN ID must be 1-4094"));
         }
 
         Ok((start_vid, Some(end_vid)))
@@ -308,10 +308,10 @@ fn parse_vid_range(s: &str) -> Result<(u16, Option<u16>)> {
         let vid: u16 = s
             .trim()
             .parse()
-            .map_err(|_| Error::InvalidMessage(format!("invalid VLAN ID: {}", s)))?;
+            .map_err(|_| Error::invalid_message(format!("invalid VLAN ID: {}", s)))?;
 
         if vid == 0 || vid > 4094 {
-            return Err(Error::InvalidMessage("VLAN ID must be 1-4094".into()));
+            return Err(Error::invalid_message("VLAN ID must be 1-4094"));
         }
 
         Ok((vid, None))

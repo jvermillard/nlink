@@ -166,7 +166,7 @@ async fn update_sa_succeeds_when_existing() -> Result<()> {
         xfrm.update_sa(updated).await.map_err(|e| {
             // Pre-fix this would EEXIST. Surface the failure with
             // the Plan 221 context so the test failure is self-explaining.
-            nlink::Error::InvalidMessage(format!(
+            nlink::Error::invalid_message(format!(
                 "Plan 221 W5: update_sa(existing) must succeed via XFRM_MSG_UPDSA; \
                  pre-fix it always failed because NEWSA + NLM_F_REPLACE was ignored \
                  by the kernel. Underlying error: {e}"
@@ -206,7 +206,7 @@ async fn update_sp_succeeds_when_existing() -> Result<()> {
             .template(tmpl);
 
         xfrm.update_sp(updated).await.map_err(|e| {
-            nlink::Error::InvalidMessage(format!(
+            nlink::Error::invalid_message(format!(
                 "Plan 221 W6: update_sp(existing) must succeed via XFRM_MSG_UPDPOLICY; \
                  pre-fix it always failed because NEWPOLICY + NLM_F_REPLACE called \
                  xfrm_policy_insert(excl=1). Underlying error: {e}"

@@ -278,7 +278,7 @@ impl UeventTrigger {
         write_uevent(&path, self.action).map_err(|e| {
             tracing::debug!(path = %path.display(), action = %self.action, error = %e,
                             "uevent trigger failed");
-            Error::Io(e)
+            Error::from(e)
         })
     }
 
@@ -302,7 +302,7 @@ impl UeventTrigger {
         // believing its state had been re-announced. Propagating the
         // raw `io::Error` also keeps the errno, so `is_not_found()` and
         // friends work on the result.
-        std::fs::read_dir(&root).map_err(Error::Io)?;
+        std::fs::read_dir(&root).map_err(Error::from)?;
 
         let mut summary = TriggerSummary::default();
         let mut stack = vec![root];
@@ -398,7 +398,7 @@ pub fn resync_factory<T: Send + 'static>(
             let summary =
                 tokio::task::spawn_blocking(move || trigger.subtree(&relative)).await
                     .map_err(|e| {
-                        Error::Io(std::io::Error::other(format!("trigger task panicked: {e}")))
+                        Error::from(std::io::Error::other(format!("trigger task panicked: {e}")))
                     })??;
             tracing::info!(
                 triggered = summary.triggered,

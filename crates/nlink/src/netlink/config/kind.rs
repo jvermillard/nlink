@@ -120,7 +120,7 @@ pub struct LinkRecreate {
     /// What deleting the link would destroy that the config does not
     /// declare, and so cannot restore, or why it cannot be recreated at
     /// all. Non-empty means the apply refuses, with
-    /// [`Error::NotSupported`](crate::Error::NotSupported), rather than
+    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported), rather than
     /// recreate the link; nothing else in the diff depends on it then.
     /// Typed since 0.32 (#513); each blocker's `Display` is the text the
     /// list held before.
@@ -501,7 +501,7 @@ pub struct LinkRemoval {
     pub stacked_on: Option<String>,
     /// What deleting it would destroy that no config declares. Non-empty
     /// means the apply refuses, with
-    /// [`Error::NotSupported`](crate::Error::NotSupported).
+    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported).
     pub blocked_by: Vec<Blocker>,
     /// What deleting it destroys that the caller owns or the
     /// [`RecreatePolicy`] lets go (#513).

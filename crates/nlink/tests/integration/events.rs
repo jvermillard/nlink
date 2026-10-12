@@ -585,7 +585,7 @@ fn flaky_factory(
             let name = name.clone();
             Box::pin(async move {
                 if n < failures {
-                    return Err(nlink::Error::InvalidMessage(format!("attempt {n} fails")));
+                    return Err(nlink::Error::invalid_message(format!("attempt {n} fails")));
                 }
                 nlink::Connection::new_in(&name)
             })

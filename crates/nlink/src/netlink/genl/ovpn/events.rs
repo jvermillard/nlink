@@ -76,7 +76,7 @@ impl crate::netlink::Connection<Ovpn> {
     /// After this returns, [`self.events()`](crate::netlink::Connection::events)
     /// yields a stream of [`OvpnEvent`] values.
     ///
-    /// Returns [`Error::FamilyNotFound`](crate::Error::FamilyNotFound)
+    /// Returns [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound)
     /// (with `"ovpn::peers"` in the name) when the kernel doesn't
     /// register the group — typically a too-old kernel (< 6.16).
     pub fn subscribe_peers(&self) -> crate::Result<()> {

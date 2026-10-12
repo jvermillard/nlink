@@ -121,14 +121,14 @@ fn format_mac(mac: &[u8; 6]) -> String {
 fn parse_mac(s: &str) -> Result<[u8; 6]> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "wifi: invalid BSSID `{s}` (expected aa:bb:cc:dd:ee:ff)"
         )));
     }
     let mut mac = [0u8; 6];
     for (i, p) in parts.iter().enumerate() {
         mac[i] = u8::from_str_radix(p, 16).map_err(|_| {
-            Error::InvalidMessage(format!("wifi: invalid BSSID byte `{p}` in `{s}`"))
+            Error::invalid_message(format!("wifi: invalid BSSID byte `{p}` in `{s}`"))
         })?;
     }
     Ok(mac)
@@ -143,7 +143,7 @@ fn parse_auth_type(s: &str) -> Result<AuthType> {
         "sae" => Ok(AuthType::Sae),
         "ft" => Ok(AuthType::Ft),
         "eap" | "network-eap" => Ok(AuthType::NetworkEap),
-        other => Err(Error::InvalidMessage(format!(
+        other => Err(Error::invalid_message(format!(
             "wifi: unknown auth type `{other}` (expected open/shared/sae/ft/eap)"
         ))),
     }
@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 None => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "interface {interface} not found"
                     )));
                 }
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
             let target_ifindex = conn
                 .get_interface(&interface)
                 .await?
-                .ok_or_else(|| Error::InvalidMessage(format!("interface {interface} not found")))?
+                .ok_or_else(|| Error::invalid_message(format!("interface {interface} not found")))?
                 .ifindex;
 
             // Subscribe on a second connection so the event stream
@@ -543,7 +543,7 @@ async fn main() -> Result<()> {
                     "on" | "true" | "1" => true,
                     "off" | "false" | "0" => false,
                     _ => {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "unknown power-save mode `{mode}` (expected on/off)"
                         )));
                     }

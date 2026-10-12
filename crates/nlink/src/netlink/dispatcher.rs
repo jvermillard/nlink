@@ -506,10 +506,10 @@ impl Dispatcher {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         match msg {
-            Some(m) => Error::Io(std::io::Error::other(format!(
+            Some(m) => Error::from(std::io::Error::other(format!(
                 "netlink dispatcher driver stopped: {m}"
             ))),
-            None => Error::Io(std::io::Error::other(
+            None => Error::from(std::io::Error::other(
                 "netlink dispatcher driver stopped before the response arrived",
             )),
         }
@@ -698,8 +698,10 @@ async fn run_driver(socket: Arc<NetlinkSocket>, dispatcher: Dispatcher) {
                 Ok((buf, multicast)) => dispatcher.route_buffer(Arc::new(buf), multicast),
                 // A notification past the receive cap was dropped: lost
                 // events, as with an overflow (#505).
-                Err(crate::Error::FrameTruncated { received, .. }) => {
-                    tracing::warn!(received, "dispatcher driver: dropped an oversized frame");
+                Err(e) if e.is_truncated() => {
+                    if let crate::ErrorDetail::FrameTruncated { received, .. } = e.detail() {
+                        tracing::warn!(received, "dispatcher driver: dropped an oversized frame");
+                    }
                     dispatcher.emit_enobufs();
                     continue;
                 }

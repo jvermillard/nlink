@@ -888,8 +888,8 @@ async fn show_fec(device: &str, json: bool) -> nlink::Result<()> {
 
 async fn set_fec(device: &str, modes: &[String], auto: Option<bool>) -> nlink::Result<()> {
     if modes.is_empty() && auto.is_none() {
-        return Err(nlink::Error::InvalidMessage(
-            "set-fec: specify at least one encoding (off/none/rs/baser/llrs) or --auto".into(),
+        return Err(nlink::Error::invalid_message(
+            "set-fec: specify at least one encoding (off/none/rs/baser/llrs) or --auto",
         ));
     }
     let conn = Connection::<Ethtool>::new_async().await?;
@@ -1166,7 +1166,7 @@ fn parse_duplex(s: &str) -> nlink::Result<Duplex> {
     match s {
         "full" => Ok(Duplex::Full),
         "half" => Ok(Duplex::Half),
-        other => Err(nlink::netlink::Error::InvalidMessage(format!(
+        other => Err(nlink::netlink::Error::invalid_message(format!(
             "ethtool: invalid duplex `{other}` (expected `full` or `half`)"
         ))),
     }
@@ -1177,12 +1177,12 @@ fn parse_duplex(s: &str) -> nlink::Result<Duplex> {
 /// `on`/`off` is an error rather than a silently-dropped change.
 fn parse_feature_pairs(tokens: &[String]) -> nlink::Result<Vec<(String, bool)>> {
     if tokens.is_empty() {
-        return Err(nlink::netlink::Error::InvalidMessage(
-            "ethtool set-features: expected at least one `<feature> on|off` pair".into(),
+        return Err(nlink::netlink::Error::invalid_message(
+            "ethtool set-features: expected at least one `<feature> on|off` pair",
         ));
     }
     if !tokens.len().is_multiple_of(2) {
-        return Err(nlink::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::invalid_message(format!(
             "ethtool set-features: expected `<feature> on|off` pairs, got an odd number of \
              tokens ({})",
             tokens.len()
@@ -1195,7 +1195,7 @@ fn parse_feature_pairs(tokens: &[String]) -> nlink::Result<Vec<(String, bool)>> 
                 "on" | "true" => true,
                 "off" | "false" => false,
                 other => {
-                    return Err(nlink::netlink::Error::InvalidMessage(format!(
+                    return Err(nlink::netlink::Error::invalid_message(format!(
                         "ethtool set-features: invalid value `{other}` for `{}` \
                          (expected on/off)",
                         pair[0]

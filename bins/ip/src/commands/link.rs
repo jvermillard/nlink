@@ -176,7 +176,7 @@ impl LinkCmd {
         // Set MAC address if specified
         if let Some(addr_str) = address {
             let mac = nlink::util::addr::parse_mac(&addr_str).map_err(|e| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
+                nlink::netlink::Error::invalid_message(format!("invalid MAC address: {}", e))
             })?;
             conn.set_link_address(dev, mac).await?;
         }
@@ -198,7 +198,7 @@ impl LinkCmd {
                 .get_link_by_name(dev)
                 .await?
                 .ok_or_else(|| {
-                    nlink::netlink::Error::InvalidMessage(format!("device `{dev}` not found"))
+                    nlink::netlink::Error::invalid_message(format!("device `{dev}` not found"))
                 })?
                 .ifindex();
             if let Ok(pid) = ns.parse::<u32>() {

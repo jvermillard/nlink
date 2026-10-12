@@ -90,7 +90,7 @@ async fn show_chains(
     let parent = args
         .parent
         .parse::<nlink::TcHandle>()
-        .map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+        .map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
     let chains = conn.get_tc_chains(&args.dev, parent).await?;
 
     match format {
@@ -119,7 +119,7 @@ fn print_chains_json(dev: &str, parent: &str, chains: &[u32], opts: &OutputOptio
     } else {
         serde_json::to_string(&obj)
     }
-    .map_err(|e| nlink::Error::InvalidMessage(format!("JSON serialization failed: {e}")))?;
+    .map_err(|e| nlink::Error::invalid_message(format!("JSON serialization failed: {e}")))?;
     println!("{}", output);
     Ok(())
 }
@@ -128,7 +128,7 @@ async fn add_chain(conn: &Connection<Route>, args: ChainAddArgs) -> Result<()> {
     let parent = args
         .parent
         .parse::<nlink::TcHandle>()
-        .map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+        .map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
     conn.add_tc_chain(&args.dev, parent, args.chain).await
 }
 
@@ -136,6 +136,6 @@ async fn del_chain(conn: &Connection<Route>, args: ChainDelArgs) -> Result<()> {
     let parent = args
         .parent
         .parse::<nlink::TcHandle>()
-        .map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+        .map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
     conn.del_tc_chain(&args.dev, parent, args.chain).await
 }

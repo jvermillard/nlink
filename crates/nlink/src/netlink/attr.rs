@@ -80,10 +80,10 @@ impl NlAttr {
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
         Self::ref_from_prefix(data)
             .map(|(r, _)| r)
-            .map_err(|_| Error::Truncated {
+            .map_err(|_| Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: std::mem::size_of::<Self>(),
                 actual: data.len(),
-            })
+            }))
     }
 }
 
@@ -144,7 +144,7 @@ pub mod get {
     /// Extract a u8 value.
     pub fn u8(data: &[u8]) -> Result<u8> {
         if data.is_empty() {
-            return Err(Error::InvalidAttribute("empty u8 attribute".into()));
+            return Err(Error::invalid_attribute("empty u8 attribute"));
         }
         Ok(data[0])
     }
@@ -152,7 +152,7 @@ pub mod get {
     /// Extract a u16 value (native endian).
     pub fn u16_ne(data: &[u8]) -> Result<u16> {
         if data.len() < 2 {
-            return Err(Error::InvalidAttribute("truncated u16 attribute".into()));
+            return Err(Error::invalid_attribute("truncated u16 attribute"));
         }
         Ok(u16::from_ne_bytes([data[0], data[1]]))
     }
@@ -160,7 +160,7 @@ pub mod get {
     /// Extract a u32 value (native endian).
     pub fn u32_ne(data: &[u8]) -> Result<u32> {
         if data.len() < 4 {
-            return Err(Error::InvalidAttribute("truncated u32 attribute".into()));
+            return Err(Error::invalid_attribute("truncated u32 attribute"));
         }
         Ok(u32::from_ne_bytes([data[0], data[1], data[2], data[3]]))
     }
@@ -168,7 +168,7 @@ pub mod get {
     /// Extract a u64 value (native endian).
     pub fn u64_ne(data: &[u8]) -> Result<u64> {
         if data.len() < 8 {
-            return Err(Error::InvalidAttribute("truncated u64 attribute".into()));
+            return Err(Error::invalid_attribute("truncated u64 attribute"));
         }
         Ok(u64::from_ne_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
@@ -178,7 +178,7 @@ pub mod get {
     /// Extract a u16 value (big endian / network order).
     pub fn u16_be(data: &[u8]) -> Result<u16> {
         if data.len() < 2 {
-            return Err(Error::InvalidAttribute("truncated u16 attribute".into()));
+            return Err(Error::invalid_attribute("truncated u16 attribute"));
         }
         Ok(u16::from_be_bytes([data[0], data[1]]))
     }
@@ -186,7 +186,7 @@ pub mod get {
     /// Extract a u32 value (big endian / network order).
     pub fn u32_be(data: &[u8]) -> Result<u32> {
         if data.len() < 4 {
-            return Err(Error::InvalidAttribute("truncated u32 attribute".into()));
+            return Err(Error::invalid_attribute("truncated u32 attribute"));
         }
         Ok(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
     }
@@ -194,7 +194,7 @@ pub mod get {
     /// Extract a u64 value (big endian / network order).
     pub fn u64_be(data: &[u8]) -> Result<u64> {
         if data.len() < 8 {
-            return Err(Error::InvalidAttribute("truncated u64 attribute".into()));
+            return Err(Error::invalid_attribute("truncated u64 attribute"));
         }
         Ok(u64::from_be_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
@@ -206,7 +206,7 @@ pub mod get {
         // Find null terminator or use whole buffer
         let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
         std::str::from_utf8(&data[..len])
-            .map_err(|e| Error::InvalidAttribute(format!("invalid UTF-8: {}", e)))
+            .map_err(|e| Error::invalid_attribute(format!("invalid UTF-8: {}", e)))
     }
 
     /// Extract bytes (no interpretation).
@@ -217,7 +217,7 @@ pub mod get {
     /// Extract an i32 value (native endian).
     pub fn i32_ne(data: &[u8]) -> Result<i32> {
         if data.len() < 4 {
-            return Err(Error::InvalidAttribute("truncated i32 attribute".into()));
+            return Err(Error::invalid_attribute("truncated i32 attribute"));
         }
         Ok(i32::from_ne_bytes([data[0], data[1], data[2], data[3]]))
     }

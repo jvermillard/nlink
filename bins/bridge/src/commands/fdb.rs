@@ -140,8 +140,8 @@ async fn show_fdb(
         // `bridge fdb show br <dev> brport <port>` — entries learned on a
         // specific port of a specific bridge. The bridge device is required.
         let Some(ref bridge) = dev else {
-            return Err(nlink::netlink::Error::InvalidMessage(
-                "bridge fdb show --brport requires a bridge device".into(),
+            return Err(nlink::netlink::Error::invalid_message(
+                "bridge fdb show --brport requires a bridge device",
             ));
         };
         conn.get_fdb_for_port(bridge.as_str(), port.as_str()).await?
@@ -291,7 +291,7 @@ fn print_fdb_json(
 
 async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> Result<()> {
     let mac = FdbEntryBuilder::parse_mac(&args.mac)
-        .map_err(|e| Error::InvalidMessage(format!("invalid MAC address: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("invalid MAC address: {}", e)))?;
 
     let mut builder = FdbEntryBuilder::new(mac).dev(&args.dev);
 
@@ -312,8 +312,8 @@ async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> R
     }
 
     if [args.permanent, args.static_entry, args.dynamic].iter().filter(|s| **s).count() > 1 {
-        return Err(Error::InvalidMessage(
-            "bridge fdb: --permanent, --static and --dynamic are mutually exclusive".into(),
+        return Err(Error::invalid_message(
+            "bridge fdb: --permanent, --static and --dynamic are mutually exclusive",
         ));
     }
     if args.permanent {
@@ -343,7 +343,7 @@ async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> R
 
 async fn del_fdb(conn: &Connection<Route>, args: FdbDelArgs) -> Result<()> {
     let mac = FdbEntryBuilder::parse_mac(&args.mac)
-        .map_err(|e| Error::InvalidMessage(format!("invalid MAC address: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("invalid MAC address: {}", e)))?;
 
     conn.del_fdb(&args.dev, mac, args.vlan).await
 }

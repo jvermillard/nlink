@@ -672,8 +672,8 @@ impl NexthopGroupBuilder {
     /// Build the netlink message.
     fn build(&self, msg_type: u16, flags: u16) -> Result<MessageBuilder> {
         if self.members.is_empty() {
-            return Err(Error::InvalidMessage(
-                "nexthop group must have at least one member".into(),
+            return Err(Error::invalid_message(
+                "nexthop group must have at least one member",
             ));
         }
 

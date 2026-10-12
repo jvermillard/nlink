@@ -111,7 +111,7 @@ async fn a_recreate_that_would_destroy_a_tc_tree_is_refused() -> nlink::Result<(
             Err(_) => {}
         }
         let id = at_path(
-            &ip_link_json(&ns, "v1").map_err(nlink::Error::InvalidMessage)?,
+            &ip_link_json(&ns, "v1").map_err(nlink::Error::invalid_message)?,
             "linkinfo.info_data.id",
         )
         .clone();
@@ -312,7 +312,7 @@ async fn a_declared_link_that_does_not_exist_is_reported() -> nlink::Result<()> 
     assert!(diff.to_string().contains("! link dO (missing"), "{diff}");
     let err = cfg.apply(&conn).await.expect_err("the apply is refused");
     assert!(
-        matches!(&err, nlink::Error::InterfaceNotFound { name } if name == "dO"),
+        matches!(err.detail(), nlink::ErrorDetail::InterfaceNotFound { name } if name == "dO"),
         "{err}"
     );
     assert!(
@@ -1889,7 +1889,7 @@ async fn a_recreate_that_would_destroy_undeclared_state_is_refused() -> nlink::R
             ));
         }
         let (dev, path, want) = &case.unchanged;
-        let link = ip_link_json(&ns, dev).map_err(nlink::Error::InvalidMessage)?;
+        let link = ip_link_json(&ns, dev).map_err(nlink::Error::invalid_message)?;
         if at_path(&link, path) != want {
             failures.push(format!(
                 "[{}] the kernel changed: {dev} {path} is {}",
@@ -1942,7 +1942,7 @@ async fn netkit_kind_parameters() -> nlink::Result<()> {
     let l2 = nk(NetkitMode::L2, NetkitPolicy::Forward, NetkitPolicy::Forward);
     let applied = l2.apply(&conn).await?;
     assert!(applied.is_success(), "{applied:?}");
-    let before = ip_link_json(&ns, "nk0").map_err(nlink::Error::InvalidMessage)?;
+    let before = ip_link_json(&ns, "nk0").map_err(nlink::Error::invalid_message)?;
     let err = nk(NetkitMode::L3, NetkitPolicy::Forward, NetkitPolicy::Forward)
         .apply(&conn)
         .await
@@ -1950,7 +1950,7 @@ async fn netkit_kind_parameters() -> nlink::Result<()> {
     assert!(err.is_not_supported(), "{err}");
     assert!(err.to_string().contains("mode"), "the error must name the mode: {err}");
     // Refused before anything changed: the same link, still L2.
-    let link = ip_link_json(&ns, "nk0").map_err(nlink::Error::InvalidMessage)?;
+    let link = ip_link_json(&ns, "nk0").map_err(nlink::Error::invalid_message)?;
     assert_eq!(link["ifindex"], before["ifindex"], "the refused apply recreated nk0");
     if link["linkinfo"]["info_data"].is_null() {
         eprintln!("this `ip` does not decode netkit link data; the mode is not cross-checked");

@@ -57,12 +57,12 @@ pub fn run(args: ExampleArgs) -> Result<()> {
         OutputFormat::Json => {
             // Convert YAML to JSON
             let value: serde_yaml::Value = serde_yaml::from_str(example).map_err(|e| {
-                nlink::netlink::Error::InvalidMessage(format!("YAML parse failed: {}", e))
+                nlink::netlink::Error::invalid_message(format!("YAML parse failed: {}", e))
             })?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&value).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!(
+                    nlink::netlink::Error::invalid_message(format!(
                         "JSON serialization failed: {}",
                         e
                     ))

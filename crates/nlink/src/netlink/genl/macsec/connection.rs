@@ -55,7 +55,7 @@ impl Connection<Macsec> {
                     .get_link_by_name(name)
                     .await?
                     .map(|l| l.ifindex())
-                    .ok_or_else(|| Error::InterfaceNotFound { name: name.clone() })
+                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound { name: name.clone() }))
             }
         }
     }
@@ -117,9 +117,9 @@ impl Connection<Macsec> {
             .await?;
 
         if responses.is_empty() {
-            return Err(Error::InterfaceNotFound {
+            return Err(Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                 name: format!("ifindex {}", ifindex),
-            });
+            }));
         }
 
         // One device per response, and only the one that was asked for.
@@ -152,9 +152,9 @@ impl Connection<Macsec> {
             }
         }
 
-        Err(Error::InterfaceNotFound {
+        Err(Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
             name: format!("ifindex {}", ifindex),
-        })
+        }))
     }
 
     /// Add a TX Security Association by interface index.

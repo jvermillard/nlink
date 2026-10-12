@@ -32,7 +32,7 @@
 //! command level (`uns-admin-perm` in the kernel's netlink spec).
 //! Privileged callers get the device including `WGDEVICE_A_PRIVATE_KEY`
 //! (as `wg showconf` does); unprivileged callers hit the gate and
-//! see `Error::Kernel { errno: EPERM }` on the whole call — there's
+//! see `Error::from(crate::netlink::ErrorDetail::Kernel { errno: EPERM })` on the whole call — there's
 //! no partial-reply path where `WgDevice::private_key` comes back as
 //! `None` due to insufficient privilege. [`WgDevice::private_key`]
 //! is `None` only when the device has no key configured (i.e. before
@@ -115,7 +115,7 @@ impl FromStr for PublicKey {
     fn from_str(s: &str) -> Result<Self> {
         b64_decode_32(s)
             .map(Self)
-            .ok_or_else(|| Error::InvalidMessage(format!("invalid WireGuard public key: {s:?}")))
+            .ok_or_else(|| Error::invalid_message(format!("invalid WireGuard public key: {s:?}")))
     }
 }
 
@@ -217,7 +217,7 @@ impl FromStr for PrivateKey {
         // The input is not echoed: it is a secret.
         b64_decode_32(s)
             .map(Self::from_bytes)
-            .ok_or_else(|| Error::InvalidMessage("invalid WireGuard private key".into()))
+            .ok_or_else(|| Error::invalid_message("invalid WireGuard private key"))
     }
 }
 
@@ -630,16 +630,16 @@ fn parse_cidr(s: &str) -> Result<AllowedIp> {
     };
     let addr: IpAddr = addr_str
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid IP `{addr_str}`")))?;
+        .map_err(|_| Error::invalid_message(format!("wireguard config: invalid IP `{addr_str}`")))?;
     let max = if addr.is_ipv4() { 32 } else { 128 };
     let cidr = match cidr_str {
         Some(c) => c.parse::<u8>().map_err(|_| {
-            Error::InvalidMessage(format!("wireguard config: invalid prefix `{c}`"))
+            Error::invalid_message(format!("wireguard config: invalid prefix `{c}`"))
         })?,
         None => max,
     };
     if cidr > max {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "wireguard config: prefix /{cidr} out of range for {} (max /{max})",
             if addr.is_ipv4() { "IPv4" } else { "IPv6" }
         )));
@@ -653,7 +653,7 @@ fn parse_cidr(s: &str) -> Result<AllowedIp> {
 /// Decode a base64 WireGuard key, mapping failure to a clear error.
 fn parse_key(field: &str, value: &str) -> Result<[u8; WG_KEY_LEN]> {
     b64_decode_32(value)
-        .ok_or_else(|| Error::InvalidMessage(format!("wireguard config: invalid {field} key")))
+        .ok_or_else(|| Error::invalid_message(format!("wireguard config: invalid {field} key")))
 }
 
 /// `wg-quick`/`wg setconf` INI parser. Builds a single device named
@@ -715,7 +715,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                     });
                 }
                 other => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "wireguard config: unknown section `[{other}]` at line {}",
                         lineno + 1
                     )));
@@ -725,7 +725,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
         }
 
         let (key, value) = line.split_once('=').ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "wireguard config: expected `key = value` at line {}: `{line}`",
                 lineno + 1
             ))
@@ -735,7 +735,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
 
         match section {
             Section::None => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "wireguard config: key `{}` before any [Interface]/[Peer] section (line {})",
                     key.trim(),
                     lineno + 1
@@ -745,7 +745,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                 "privatekey" => device.private_key = Some(parse_key("PrivateKey", value)?),
                 "listenport" => {
                     device.listen_port = Some(value.parse::<u16>().map_err(|_| {
-                        Error::InvalidMessage(format!(
+                        Error::invalid_message(format!(
                             "wireguard config: invalid ListenPort `{value}`"
                         ))
                     })?);
@@ -753,7 +753,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                 "fwmark" => device.fwmark = Some(parse_fwmark(value)?),
                 k if IGNORED_INTERFACE_KEYS.contains(&k) => { /* wg-quick userspace key */ }
                 _ => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "wireguard config: unknown [Interface] key `{}` (line {})",
                         key.trim(),
                         lineno + 1
@@ -769,7 +769,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                     "presharedkey" => peer.preshared_key = Some(parse_key("PresharedKey", value)?),
                     "endpoint" => {
                         peer.endpoint = Some(value.parse::<SocketAddr>().map_err(|_| {
-                            Error::InvalidMessage(format!(
+                            Error::invalid_message(format!(
                                 "wireguard config: Endpoint `{value}` must be IP:port \
                                  (hostnames are not resolved)"
                             ))
@@ -787,7 +787,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                     "persistentkeepalive" => {
                         if !value.eq_ignore_ascii_case("off") {
                             let secs = value.parse::<u16>().map_err(|_| {
-                                Error::InvalidMessage(format!(
+                                Error::invalid_message(format!(
                                     "wireguard config: invalid PersistentKeepalive `{value}`"
                                 ))
                             })?;
@@ -797,7 +797,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                         }
                     }
                     _ => {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "wireguard config: unknown [Peer] key `{}` (line {})",
                             key.trim(),
                             lineno + 1
@@ -815,7 +815,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
     // A peer with no PublicKey set is malformed.
     for (i, p) in device.peers.iter().enumerate() {
         if p.public_key == [0u8; WG_KEY_LEN] {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "wireguard config: [Peer] #{} is missing PublicKey",
                 i + 1
             )));
@@ -836,7 +836,7 @@ fn parse_fwmark(s: &str) -> Result<u32> {
         Some(hex) => u32::from_str_radix(hex, 16),
         None => s.parse::<u32>(),
     };
-    parsed.map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid FwMark `{s}`")))
+    parsed.map_err(|_| Error::invalid_message(format!("wireguard config: invalid FwMark `{s}`")))
 }
 
 /// Allowed IPs as the kernel's trie holds them: each masked to its prefix
@@ -1433,8 +1433,8 @@ impl WireguardConfigDiff {
             return Ok(WireguardApplyResult::default());
         }
         let Some(config) = self.source.clone() else {
-            return Err(crate::netlink::Error::InvalidMessage(
-                "wireguard apply: this diff was not computed by WireguardConfig::diff".into(),
+            return Err(crate::netlink::Error::invalid_message(
+                "wireguard apply: this diff was not computed by WireguardConfig::diff",
             ));
         };
         self.apply_declared(conn, &config).await
@@ -1446,7 +1446,7 @@ impl WireguardConfigDiff {
         config: &WireguardConfig,
     ) -> Result<WireguardApplyResult> {
         if !self.devices_to_add.is_empty() {
-            return Err(crate::netlink::Error::InvalidMessage(format!(
+            return Err(crate::netlink::Error::invalid_message(format!(
                 "wireguard apply: declared device(s) {} do not exist; create them first \
                  (WireguardConfig::ensure_devices with a same-namespace Connection<Route>, \
                  or declare the links in a NetworkConfig/Stack)",
@@ -1470,7 +1470,7 @@ impl WireguardConfigDiff {
                 .iter()
                 .find(|d| &d.ifname == ifname)
                 .ok_or_else(|| {
-                    crate::netlink::Error::InvalidMessage(format!(
+                    crate::netlink::Error::invalid_message(format!(
                         "wireguard apply: diff references undeclared device `{ifname}`"
                     ))
                 })?;
@@ -1514,7 +1514,7 @@ impl WireguardConfigDiff {
                     .iter()
                     .find(|p| &p.public_key == pk)
                     .ok_or_else(|| {
-                        crate::netlink::Error::InvalidMessage(format!(
+                        crate::netlink::Error::invalid_message(format!(
                             "wireguard apply: diff references undeclared peer for `{ifname}`"
                         ))
                     })?;

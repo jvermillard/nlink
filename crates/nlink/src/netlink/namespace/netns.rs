@@ -61,7 +61,7 @@ impl NetnsId {
         // fd is borrowed for the call.
         let ret = unsafe { libc::fstat(fd.as_fd().as_raw_fd(), st.as_mut_ptr()) };
         if ret < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         // SAFETY: fstat returned 0, so the struct is initialized.
         let st = unsafe { st.assume_init() };
@@ -134,7 +134,7 @@ impl Netns {
     ///
     /// # Errors
     ///
-    /// [`Error::NamespaceNotFound`] (`is_not_found()`) when there is no
+    /// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (`is_not_found()`) when there is no
     /// live namespace by that name: no marker, or a stale marker with no
     /// mount behind it.
     pub fn open(name: &str) -> Result<Self> {
@@ -149,7 +149,7 @@ impl Netns {
     ///
     /// # Errors
     ///
-    /// [`Error::NamespaceNotFound`] when nothing is at `path`, and an
+    /// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) when nothing is at `path`, and an
     /// invalid-argument error when it is not a network namespace.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -186,7 +186,7 @@ impl Netns {
         }
         let err = std::io::Error::last_os_error();
         if !matches!(err.raw_os_error(), Some(libc::ENOTTY | libc::EINVAL)) {
-            return Err(Error::Io(err));
+            return Err(Error::from(err));
         }
         let pid = pidfd_pid(pidfd)?;
         let ns = Self::from_pid(pid)?;
@@ -201,7 +201,7 @@ impl Netns {
             )
         };
         if alive < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         Ok(ns)
     }
@@ -241,14 +241,14 @@ impl Netns {
     /// no socket, no other handle.
     pub fn delete(self) -> Result<()> {
         let Some(name) = self.name.clone() else {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "namespace {}: only a namespace opened by name can be deleted",
                 self.label
             )));
         };
         let now = Self::open(&name)?;
         if now.id != self.id {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "namespace {name}: the name now names another namespace ({}, not {}); \
                  not deleting it",
                 now.id, self.id
@@ -264,7 +264,7 @@ impl Netns {
     /// overlay needs a namespace opened by name.
     pub fn command(&self, cmd: std::process::Command) -> Result<super::NetnsCommand> {
         use std::os::fd::AsFd;
-        let fd = self.as_fd().try_clone_to_owned().map_err(Error::Io)?;
+        let fd = self.as_fd().try_clone_to_owned().map_err(Error::from)?;
         Ok(super::NetnsCommand::with_fd(fd, self.name.as_deref().map(str::to_string), cmd))
     }
 
@@ -312,13 +312,13 @@ impl Netns {
                     if here != Some(target)
                         && unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) } < 0
                     {
-                        return Err(Error::Io(std::io::Error::last_os_error()));
+                        return Err(Error::from(std::io::Error::last_os_error()));
                     }
                     Ok(f())
                 })
-                .map_err(Error::Io)?;
+                .map_err(Error::from)?;
             worker.join().unwrap_or_else(|_| {
-                Err(Error::InvalidMessage(format!(
+                Err(Error::invalid_message(format!(
                     "namespace {}: the closure panicked",
                     self.label
                 )))
@@ -349,7 +349,7 @@ impl Netns {
             // SAFETY: socket(2) returns a fresh fd or -1.
             let fd = unsafe { libc::socket(domain, ty | libc::SOCK_CLOEXEC, protocol) };
             if fd < 0 {
-                Err(Error::Io(std::io::Error::last_os_error()))
+                Err(Error::from(std::io::Error::last_os_error()))
             } else {
                 // SAFETY: the fd was just made and nothing else owns it.
                 Ok(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -365,7 +365,7 @@ impl Netns {
     ///
     /// The socket is made on the handle's worker thread, so a thousand
     /// connections cost one thread, not a thousand. A stream on it ends
-    /// with [`Error::NamespaceDeleted`] once the namespace's name is
+    /// with [`ErrorDetail::NamespaceDeleted`](crate::ErrorDetail::NamespaceDeleted) once the namespace's name is
     /// deleted, as one opened by path does.
     pub(crate) fn connection<P: ProtocolState + Default + SyncConstructible>(
         &self,
@@ -389,7 +389,7 @@ impl Netns {
     /// Another handle to the same namespace, with its own fd.
     pub fn try_clone(&self) -> Result<Self> {
         Ok(Self {
-            fd: self.fd.try_clone().map_err(Error::Io)?,
+            fd: self.fd.try_clone().map_err(Error::from)?,
             id: self.id,
             name: self.name.clone(),
             label: self.label.clone(),
@@ -419,12 +419,12 @@ impl Netns {
         let ty = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_NSTYPE as _, 0) };
         if ty < 0 {
             let err = std::io::Error::last_os_error();
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "{label}: not a namespace file ({err})"
             )));
         }
         if ty != libc::CLONE_NEWNET {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "{label}: not a network namespace"
             )));
         }
@@ -455,19 +455,19 @@ impl Netns {
         });
         if worker.as_ref().is_some_and(|w| w.send(job).is_err()) {
             *worker = None;
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "namespace {}: the worker thread has gone",
                 self.label
             )));
         }
         drop(worker);
         rx.recv().map_err(|_| {
-            Error::InvalidMessage(format!("namespace {}: the job panicked", self.label))
+            Error::invalid_message(format!("namespace {}: the job panicked", self.label))
         })
     }
 
     fn start_worker(&self) -> Result<std::sync::mpsc::Sender<Job>> {
-        let fd = self.fd.try_clone().map_err(Error::Io)?;
+        let fd = self.fd.try_clone().map_err(Error::from)?;
         let target = self.id;
         let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
@@ -480,7 +480,7 @@ impl Netns {
                 if here != Some(target)
                     && unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) } < 0
                 {
-                    let _ = ready_tx.send(Err(Error::Io(std::io::Error::last_os_error())));
+                    let _ = ready_tx.send(Err(Error::from(std::io::Error::last_os_error())));
                     return;
                 }
                 drop(fd);
@@ -490,9 +490,9 @@ impl Netns {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
                 }
             })
-            .map_err(Error::Io)?;
+            .map_err(Error::from)?;
         ready_rx.recv().map_err(|_| {
-            Error::InvalidMessage(format!("namespace {}: the worker thread died", self.label))
+            Error::invalid_message(format!("namespace {}: the worker thread died", self.label))
         })??;
         Ok(jobs)
     }
@@ -502,7 +502,7 @@ impl Netns {
     fn netlink_socket(&self, protocol: crate::netlink::Protocol) -> Result<NetlinkSocket> {
         let (raw, pid) = self.on_worker(move || NetlinkSocket::create_raw_socket(protocol))??;
         let mut socket = NetlinkSocket::from_raw_socket(raw, pid, protocol)?;
-        let fd = self.fd.try_clone().map_err(Error::Io)?;
+        let fd = self.fd.try_clone().map_err(Error::from)?;
         socket.set_namespace(Arc::new(fd), self.marker.clone());
         Ok(socket)
     }
@@ -517,12 +517,12 @@ impl Netns {
 
     /// The error for a namespace whose marker is gone.
     pub(crate) fn deleted(&self) -> Error {
-        Error::NamespaceDeleted {
+        Error::from(crate::netlink::ErrorDetail::NamespaceDeleted {
             path: self
                 .marker
                 .as_ref()
                 .map_or_else(|| PathBuf::from(&*self.label), |m| m.path().to_path_buf()),
-        }
+        })
     }
 
     /// The namespace's sysctls (#520): `/proc/sys`, read and written on
@@ -566,7 +566,7 @@ impl Netns {
     ///
     /// # Errors
     ///
-    /// [`Error::Timeout`] (`is_timeout()`) when the namespace outlives
+    /// [`Error::timeout()`] (`is_timeout()`) when the namespace outlives
     /// `timeout`: something still holds it. [`pids`](Self::pids) names the
     /// processes, and the warning this logs lists them; a socket or handle
     /// of this process's — a [`Connection`] from
@@ -597,7 +597,7 @@ impl Netns {
                 Ok(Some(Ok(_))) => {}
                 Ok(Some(Err(e))) => return Err(e),
                 Ok(None) => {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "namespace {label}: the nsid event stream ended"
                     )));
                 }
@@ -608,7 +608,7 @@ impl Netns {
                         pids = ?pids_in(id).unwrap_or_default(),
                         "namespace deleted but not destroyed: something still holds it"
                     );
-                    return Err(Error::Timeout);
+                    return Err(Error::timeout());
                 }
             }
         }
@@ -626,7 +626,7 @@ fn pids_in(id: NetnsId) -> Result<Vec<u32>> {
         std::fs::metadata(path).is_ok_and(|m| m.dev() == id.dev && m.ino() == id.ino)
     };
     let mut pids = Vec::new();
-    for entry in std::fs::read_dir("/proc").map_err(Error::Io)?.flatten() {
+    for entry in std::fs::read_dir("/proc").map_err(Error::from)?.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
@@ -709,7 +709,7 @@ impl fmt::Display for Netns {
 /// The pid a pidfd names, from its `/proc/self/fdinfo` entry.
 fn pidfd_pid(pidfd: BorrowedFd<'_>) -> Result<u32> {
     let path = format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd());
-    let info = std::fs::read_to_string(&path).map_err(Error::Io)?;
+    let info = std::fs::read_to_string(&path).map_err(Error::from)?;
     let pid = info
         .lines()
         .find_map(|l| l.strip_prefix("Pid:"))
@@ -718,8 +718,8 @@ fn pidfd_pid(pidfd: BorrowedFd<'_>) -> Result<u32> {
     match pid {
         Some(p) if p > 0 => Ok(p as u32),
         // -1: the process has exited (and been reaped).
-        Some(_) => Err(Error::Io(std::io::Error::from_raw_os_error(libc::ESRCH))),
-        None => Err(Error::InvalidMessage(format!("{path}: not a pidfd"))),
+        Some(_) => Err(Error::from(std::io::Error::from_raw_os_error(libc::ESRCH))),
+        None => Err(Error::invalid_message(format!("{path}: not a pidfd"))),
     }
 }
 
@@ -822,7 +822,7 @@ impl NetnsTarget<'_> {
             Self::Netns(netns) => netns.try_clone().map(Some),
             Self::Ref(r) if r.is_default() => Ok(None),
             Self::Ref(r) => r.open().map(Some),
-            Self::Fd(fd) => Netns::from_fd(fd.try_clone_to_owned().map_err(Error::Io)?).map(Some),
+            Self::Fd(fd) => Netns::from_fd(fd.try_clone_to_owned().map_err(Error::from)?).map(Some),
         }
     }
 

@@ -978,9 +978,9 @@ async fn a_duplicate_ipv6_address_fails_the_wait() -> Result<()> {
         .await
         .expect_err("DAD finds b's address");
     assert!(err.is_dad_failed(), "{err}");
-    match err {
-        nlink::Error::DadFailed { addresses } => {
-            assert_eq!(addresses, [std::net::IpAddr::from(pair.b_addr6)]);
+    match err.detail() {
+        nlink::ErrorDetail::DadFailed { addresses } => {
+            assert_eq!(*addresses, [std::net::IpAddr::from(pair.b_addr6)]);
         }
         other => panic!("{other}"),
     }

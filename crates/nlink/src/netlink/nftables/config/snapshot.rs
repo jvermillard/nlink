@@ -81,7 +81,7 @@ impl RulesetSnapshot {
             .get(&(family, table.to_string(), set.to_string()))
             .cloned()
             .ok_or_else(|| {
-                Error::InvalidMessage(format!(
+                Error::invalid_message(format!(
                     "nftables snapshot: the elements of set {family} {table} {set} were not read"
                 ))
             })

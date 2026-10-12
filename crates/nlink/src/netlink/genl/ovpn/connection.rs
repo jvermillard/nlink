@@ -79,7 +79,7 @@ impl Connection<Ovpn> {
             .send_typed(OvpnPeerGetRequest::by_id(ifindex, peer_id))
             .await?;
         reply.peer.ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "peer_get(ifindex={ifindex}, peer_id={peer_id}): kernel reply missing OVPN_A_PEER"
             ))
         })
@@ -141,7 +141,7 @@ impl Connection<Ovpn> {
             .send_typed(OvpnKeyGetRequest::new(ifindex, peer_id, slot))
             .await?;
         reply.keyconf.ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "key_get(ifindex={ifindex}, peer_id={peer_id}, slot={slot:?}): \
                  kernel reply missing OVPN_A_KEYCONF"
             ))

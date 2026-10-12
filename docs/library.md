@@ -567,19 +567,19 @@ match conn.del_qdisc("eth0", TcHandle::ROOT).await {
 let netem = NetemConfig::new().delay(Duration::from_millis(50)).build();
 match conn.change_qdisc("eth0", TcHandle::ROOT, netem.clone()).await {
     Ok(()) => {}
-    Err(Error::QdiscNotFound { .. }) => {
+    Err(e) if e.is_not_found() => {
         // Qdisc doesn't exist yet — add instead of change
         conn.add_qdisc("eth0", netem).await?;
     }
     Err(e) => return Err(e),
 }
 
-// Errors include operation context (KernelWithContext)
+// Errors carry what was being done: err.context(), and in Display
 // e.g., "add_link(veth0, kind=veth): File exists (errno 17)"
 
 // Interface name validation catches bad names early
 // e.g., names > 15 chars, containing '/' or whitespace
-// Returns Error::Interface before sending to kernel
+// Returns an ErrorDetail::Interface error before sending to kernel
 
 // Automatic error conversion from util types
 use nlink::util::parse::get_rate;
@@ -933,7 +933,7 @@ let listeners = conn
 // predicates hoist into the request header, and a client-side
 // backstop applies automatically when the lowering is inexact.
 let expr = FilterExpr::parse("( sport = :80 or sport = :443 ) and state established")
-    .map_err(nlink::Error::InvalidMessage)?;
+    .map_err(nlink::Error::invalid_message)?;
 let busy = conn
     .query(&SocketFilter::tcp().with_tcp_info().filter_expr(expr).build())
     .await?;

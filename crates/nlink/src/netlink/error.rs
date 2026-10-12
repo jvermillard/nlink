@@ -7,10 +7,120 @@ use crate::util::{addr::AddrError, ifname::IfError, parse::ParseError};
 /// Result type for netlink operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Errors that can occur during netlink operations.
+/// An nlink error (#526).
+///
+/// One error carries three things:
+/// - **[`kind`](Self::kind):** what kind of failure it is, for matching
+///   and for reports;
+/// - **[`detail`](Self::detail):** where it came from. That is the
+///   kernel's errno and extended ack, an I/O error, a parse, …;
+/// - **[`context`](Self::context):** what was being done, outermost
+///   first. A context added with [`with_context`](Self::with_context) or
+///   [`ResultExt::context`] is kept on every error, kernel or not.
+///
+/// Recover with [`kind`](Self::kind), or with the `is_*` predicates,
+/// rather than by matching [`ErrorDetail`]. One kind can come from several
+/// details: a missing interface is a kernel `ENODEV`, or a lookup by name.
+///
+/// It is one pointer wide, so a `Result<T>` costs what a `T` does, and
+/// there is no reason to box it. Carry it inline in an error type of your
+/// own:
+///
+/// ```no_run
+/// #[derive(thiserror::Error, Debug)]
+/// enum MyError {
+///     #[error("netlink failed: {0}")]
+///     Netlink(#[from] nlink::Error),
+/// }
+/// ```
+///
+/// [`Error::chain_walk`] finds it through `#[source]` chains, boxed or not.
+pub struct Error(Box<Inner>);
+
+struct Inner {
+    detail: ErrorDetail,
+    /// Outermost first.
+    context: Vec<String>,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for operation in &self.0.context {
+            write!(f, "{operation}: ")?;
+        }
+        match &self.0.detail {
+            // Under a context a kernel error is just what the kernel said:
+            // `add_link(d0): File exists (errno 17)`.
+            ErrorDetail::Kernel {
+                errno,
+                message,
+                ext_ack,
+                ext_ack_offset,
+            } if !self.0.context.is_empty() => f.write_str(&format_kernel_tail(
+                message,
+                *errno,
+                ext_ack.as_deref(),
+                *ext_ack_offset,
+            )),
+            detail => detail.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.context.is_empty() {
+            return self.0.detail.fmt(f);
+        }
+        f.debug_struct("Error")
+            .field("context", &self.0.context)
+            .field("detail", &self.0.detail)
+            .finish()
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&self.0.detail)
+    }
+}
+
+impl From<ErrorDetail> for Error {
+    fn from(detail: ErrorDetail) -> Self {
+        Self(Box::new(Inner {
+            detail,
+            context: Vec::new(),
+        }))
+    }
+}
+
+/// `From` for each source an [`ErrorDetail`] wraps, so `?` converts it.
+macro_rules! from_detail {
+    ($($ty:ty),* $(,)?) => {$(
+        impl From<$ty> for Error {
+            fn from(source: $ty) -> Self {
+                ErrorDetail::from(source).into()
+            }
+        }
+    )*};
+}
+from_detail!(
+    io::Error,
+    ParseError,
+    AddrError,
+    IfError,
+    crate::netlink::config::AddressParseError,
+    crate::netlink::config::RouteParseError,
+);
+#[cfg(feature = "output")]
+from_detail!(serde_json::Error);
+
+/// Where an [`Error`] came from: the kernel's answer, an I/O error, a
+/// parse, a limit nlink hit, … (#526). Read it with [`Error::detail`].
+/// Most code needs only [`Error::kind`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum ErrorDetail {
     /// I/O error from socket operations.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
@@ -26,27 +136,6 @@ pub enum Error {
     /// [`ext_ack_offset`](Self::Kernel::ext_ack_offset)) populated by
     /// the kernel when `NETLINK_EXT_ACK` is enabled (on by default in
     /// nlink).
-    ///
-    /// # Wrapping in a downstream error type
-    ///
-    /// If you wrap this error in a `#[source]` field on your own
-    /// error enum, **prefer carrying it inline**:
-    ///
-    /// ```no_run
-    /// #[derive(thiserror::Error, Debug)]
-    /// enum MyError {
-    ///     #[error("netlink failed: {0}")]
-    ///     Netlink(#[from] nlink::Error),  // inline — works
-    /// }
-    /// ```
-    ///
-    /// Boxing breaks `downcast_ref::<nlink::Error>()` on the
-    /// `&dyn Error` source — the concrete type becomes
-    /// `Box<nlink::Error>`, not `nlink::Error`. If you do need to
-    /// box for `result_large_err` ergonomics, use
-    /// [`Error::chain_walk`] which handles both shapes
-    /// transparently. Plan 187 §2.2 documented the trap; the
-    /// `chain_walk` helper closes it.
     #[error("{}", format_kernel(message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
     #[non_exhaustive]
     Kernel {
@@ -65,26 +154,6 @@ pub enum Error {
         ext_ack_offset: Option<u32>,
     },
 
-    /// Kernel error with operation context.
-    ///
-    /// Like [`Self::Kernel`] but carries the calling-site operation
-    /// label (`"add_link(veth0, kind=veth)"` etc.) for readable
-    /// `tracing` events.
-    #[error("{}", format_kernel_ctx(operation, message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
-    #[non_exhaustive]
-    KernelWithContext {
-        /// The operation that failed.
-        operation: String,
-        /// The errno value from the kernel.
-        errno: i32,
-        /// Human-readable error message (from `strerror(errno)`).
-        message: String,
-        /// See [`Self::Kernel::ext_ack`].
-        ext_ack: Option<String>,
-        /// See [`Self::Kernel::ext_ack_offset`].
-        ext_ack_offset: Option<u32>,
-    },
-
     /// The kernel refused an nftables batch.
     ///
     /// `nfnetlink` processes every message of a batch, reports each one it
@@ -93,7 +162,7 @@ pub enum Error {
     /// batch order, each naming the operation and — where the kernel
     /// pointed at one — the attribute or expression it blamed (#481).
     ///
-    /// [`errno`](Self::errno), [`ext_ack`](Self::ext_ack) and the `is_*`
+    /// [`errno`](Error::errno), [`ext_ack`](Error::ext_ack) and the `is_*`
     /// predicates answer for the first failure, so `e.is_busy()` still
     /// works on a refused batch.
     #[error("{}", format_nft_batch(failures))]
@@ -337,7 +406,7 @@ pub enum Error {
     /// Cilium's `safenetlink` wrapper retries up to 30 times.
     ///
     /// nlink surfaces this as a typed error so callers choose their
-    /// own retry policy. Recover via [`Self::is_dump_interrupted`]:
+    /// own retry policy. Recover via [`Error::is_dump_interrupted`]:
     ///
     /// ```no_run
     /// # async fn example() -> nlink::Result<Vec<nlink::netlink::messages::LinkMessage>> {
@@ -361,7 +430,7 @@ pub enum Error {
     /// Connection pool was unable to hand out a connection within
     /// the configured `acquire_timeout`.
     ///
-    /// Recover via [`Self::is_pool_exhausted`]. Typical responses:
+    /// Recover via [`Error::is_pool_exhausted`]. Typical responses:
     /// retry with a longer timeout, scale the pool size up, or
     /// shed load.
     #[error("connection pool exhausted: {size} connections all busy, waited {timeout:?}")]
@@ -375,7 +444,7 @@ pub enum Error {
     /// The connection pool was dropped while an `acquire()` was
     /// pending, or while waiting to send a connection back to it.
     ///
-    /// Recover via [`Self::is_pool_closed`]. Indicates a teardown
+    /// Recover via [`Error::is_pool_closed`]. Indicates a teardown
     /// race; the surviving task should fail through.
     #[error("connection pool is closed (all handles dropped)")]
     PoolClosed,
@@ -405,7 +474,7 @@ pub enum ErrorKind {
     /// Not allowed: EPERM, EACCES.
     PermissionDenied,
     /// The kernel, the device or nlink does not do this: EOPNOTSUPP, or
-    /// [`Error::NotSupported`].
+    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported).
     NotSupported,
     /// The kernel refused an argument: EINVAL.
     InvalidArgument,
@@ -419,7 +488,7 @@ pub enum ErrorKind {
     /// Messages were lost: ENOBUFS on a socket that fell behind, or an
     /// event stream's own backpressure.
     Overrun,
-    /// No answer in time: [`Error::Timeout`] or ETIMEDOUT.
+    /// No answer in time: [`Error::timeout()`] or ETIMEDOUT.
     Timeout,
     /// A frame or message was cut short.
     Truncated,
@@ -600,7 +669,7 @@ fn format_validation_errors(errors: &[ValidationErrorInfo]) -> String {
         .join("; ")
 }
 
-/// Format the Display output for [`Error::Kernel`], stitching the
+/// Format the Display output for [`ErrorDetail::Kernel`](crate::ErrorDetail::Kernel), stitching the
 /// ext-ack message in when present. Pulled into a free fn so the
 /// `#[error(...)]` attribute stays readable.
 fn format_kernel(
@@ -609,7 +678,20 @@ fn format_kernel(
     ext_ack: Option<&str>,
     ext_ack_offset: Option<u32>,
 ) -> String {
-    let mut out = format!("kernel error: {message} (errno {errno})");
+    format!(
+        "kernel error: {}",
+        format_kernel_tail(message, errno, ext_ack, ext_ack_offset)
+    )
+}
+
+/// What the kernel said: `File exists (errno 17)`, then its extended ack.
+fn format_kernel_tail(
+    message: &str,
+    errno: i32,
+    ext_ack: Option<&str>,
+    ext_ack_offset: Option<u32>,
+) -> String {
+    let mut out = format!("{message} (errno {errno})");
     if let Some(msg) = ext_ack {
         out.push_str(": ");
         out.push_str(msg);
@@ -631,32 +713,13 @@ pub(crate) fn strerror(errno: i32) -> String {
         .unwrap_or(full)
 }
 
-/// Format the Display output for [`Error::NftBatch`].
+/// Format the Display output for [`ErrorDetail::NftBatch`](crate::ErrorDetail::NftBatch).
 fn format_nft_batch(failures: &[crate::netlink::nftables::NftBatchFailure]) -> String {
     let shown: Vec<String> = failures.iter().map(|f| f.to_string()).collect();
     format!(
         "nftables batch refused, nothing committed: {}",
         shown.join("; ")
     )
-}
-
-/// Format the Display output for [`Error::KernelWithContext`].
-fn format_kernel_ctx(
-    operation: &str,
-    message: &str,
-    errno: i32,
-    ext_ack: Option<&str>,
-    ext_ack_offset: Option<u32>,
-) -> String {
-    let mut out = format!("{operation}: {message} (errno {errno})");
-    if let Some(msg) = ext_ack {
-        out.push_str(": ");
-        out.push_str(msg);
-    }
-    if let Some(off) = ext_ack_offset {
-        out.push_str(&format!(" (at request offset {off})"));
-    }
-    out
 }
 
 impl Error {
@@ -694,12 +757,13 @@ impl Error {
     ) -> Self {
         let errno = errno.abs();
         let message = strerror(errno);
-        Self::Kernel {
+        ErrorDetail::Kernel {
             errno,
             message,
             ext_ack,
             ext_ack_offset,
         }
+        .into()
     }
 
     /// Create a kernel error with operation context (no ext-ack info).
@@ -719,72 +783,55 @@ impl Error {
         ext_ack: Option<String>,
         ext_ack_offset: Option<u32>,
     ) -> Self {
-        let errno = errno.abs();
-        let message = strerror(errno);
-        Self::KernelWithContext {
-            operation: operation.into(),
-            errno,
-            message,
-            ext_ack,
-            ext_ack_offset,
-        }
+        Self::from_errno_ext_ack(errno, ext_ack, ext_ack_offset).with_context(operation)
     }
 
-    /// Add context to this error.
+    /// Add what was being done: `operation` goes in front of any context
+    /// the error has (`"outer: inner"`), on any error (#526).
     ///
-    /// Wraps kernel errors with operation context. A kernel error that has
-    /// a context already keeps it, after the new one (`"outer: inner"`); a
-    /// second context used to be dropped (#526). Other errors are returned
-    /// unchanged.
-    pub fn with_context(self, operation: impl Into<String>) -> Self {
-        match self {
-            Self::Kernel {
-                errno,
-                message,
-                ext_ack,
-                ext_ack_offset,
-            } => Self::KernelWithContext {
-                operation: operation.into(),
-                errno,
-                message,
-                ext_ack,
-                ext_ack_offset,
-            },
-            Self::KernelWithContext {
-                operation: inner,
-                errno,
-                message,
-                ext_ack,
-                ext_ack_offset,
-            } => {
-                let outer = operation.into();
-                // The same label twice — a helper and its caller naming
-                // one operation — is said once.
-                let operation = if outer == inner || inner.starts_with(&format!("{outer}(")) {
-                    inner
-                } else {
-                    format!("{outer}: {inner}")
-                };
-                Self::KernelWithContext {
-                    operation,
-                    errno,
-                    message,
-                    ext_ack,
-                    ext_ack_offset,
-                }
-            }
-            other => other,
+    /// Until 0.32 only a kernel error kept a context, and only one: an
+    /// I/O error, a refused nftables batch or a validation failure lost it.
+    /// The same label twice — a helper and its caller naming one
+    /// operation — is said once.
+    pub fn with_context(mut self, operation: impl Into<String>) -> Self {
+        let outer = operation.into();
+        let repeated = self
+            .0
+            .context
+            .first()
+            .is_some_and(|inner| *inner == outer || inner.starts_with(&format!("{outer}(")));
+        if !repeated {
+            self.0.context.insert(0, outer);
         }
+        self
+    }
+
+    /// Where the error came from (#526): the kernel's answer, an I/O
+    /// error, a parse, …. Most code needs only [`kind`](Self::kind).
+    pub fn detail(&self) -> &ErrorDetail {
+        &self.0.detail
+    }
+
+    /// [`detail`](Self::detail), by value; the context is dropped.
+    pub fn into_detail(self) -> ErrorDetail {
+        self.0.detail
+    }
+
+    /// What was being done, outermost first (#526): each
+    /// [`with_context`](Self::with_context) and
+    /// [`ResultExt::context`]. Empty for an error with none.
+    pub fn context(&self) -> &[String] {
+        &self.0.context
     }
 
     /// Create a validation error from a list of field errors.
     pub fn validation(errors: impl IntoIterator<Item = ValidationErrorInfo>) -> Self {
-        Self::Validation(errors.into_iter().collect())
+        ErrorDetail::Validation(errors.into_iter().collect()).into()
     }
 
     /// Create a single validation error.
     pub fn validation_error(field: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Validation(vec![ValidationErrorInfo::new(field, message)])
+        ErrorDetail::Validation(vec![ValidationErrorInfo::new(field, message)]).into()
     }
 
     /// Create an invalid message error.
@@ -800,40 +847,65 @@ impl Error {
     /// let err = Error::invalid_message("invalid MAC address format");
     /// ```
     pub fn invalid_message(message: impl Into<String>) -> Self {
-        Self::InvalidMessage(message.into())
+        ErrorDetail::InvalidMessage(message.into()).into()
     }
 
     /// Create an invalid attribute error.
     pub fn invalid_attribute(message: impl Into<String>) -> Self {
-        Self::InvalidAttribute(message.into())
+        ErrorDetail::InvalidAttribute(message.into()).into()
     }
 
     /// Create a not supported error.
     pub fn not_supported(message: impl Into<String>) -> Self {
-        Self::NotSupported(message.into())
+        ErrorDetail::NotSupported(message.into()).into()
     }
 
     /// Create an interface not found error.
     pub fn interface_not_found(name: impl Into<String>) -> Self {
-        Self::InterfaceNotFound { name: name.into() }
+        ErrorDetail::InterfaceNotFound { name: name.into() }.into()
     }
 
     /// Create a namespace not found error.
     pub fn namespace_not_found(name: impl Into<String>) -> Self {
-        Self::NamespaceNotFound { name: name.into() }
+        ErrorDetail::NamespaceNotFound { name: name.into() }.into()
     }
 
     /// Create a qdisc not found error.
     pub fn qdisc_not_found(kind: impl Into<String>, interface: impl Into<String>) -> Self {
-        Self::QdiscNotFound {
+        ErrorDetail::QdiscNotFound {
             kind: kind.into(),
             interface: interface.into(),
         }
+        .into()
     }
 
     /// Create a GENL family not found error.
     pub fn family_not_found(name: impl Into<String>) -> Self {
-        Self::FamilyNotFound { name: name.into() }
+        ErrorDetail::FamilyNotFound { name: name.into() }.into()
+    }
+
+    /// A short buffer: `expected` bytes needed, `actual` there.
+    pub fn truncated(expected: usize, actual: usize) -> Self {
+        ErrorDetail::Truncated { expected, actual }.into()
+    }
+
+    /// The operation timed out ([`ErrorDetail::Timeout`]).
+    pub fn timeout() -> Self {
+        ErrorDetail::Timeout.into()
+    }
+
+    /// A dump the kernel interrupted ([`ErrorDetail::DumpInterrupted`]).
+    pub fn dump_interrupted() -> Self {
+        ErrorDetail::DumpInterrupted.into()
+    }
+
+    /// The connection pool is gone ([`ErrorDetail::PoolClosed`]).
+    pub fn pool_closed() -> Self {
+        ErrorDetail::PoolClosed.into()
+    }
+
+    pub(crate) fn event_stream_active() -> Self {
+        ErrorDetail::EventStreamActive.into()
     }
 
     /// What kind of failure this is (#526). One answer per error; see
@@ -847,25 +919,25 @@ impl Error {
     /// assert!(err.is_already_exists());
     /// ```
     pub fn kind(&self) -> ErrorKind {
-        match self {
-            Self::Interface(IfError::NotFound(_))
-            | Self::InterfaceNotFound { .. }
-            | Self::NamespaceNotFound { .. }
-            | Self::QdiscNotFound { .. }
-            | Self::FamilyNotFound { .. } => ErrorKind::NotFound,
-            Self::NotSupported(_) => ErrorKind::NotSupported,
-            Self::Timeout => ErrorKind::Timeout,
-            Self::FrameTruncated { .. } | Self::Truncated { .. } => ErrorKind::Truncated,
-            Self::Backpressure { .. } => ErrorKind::Overrun,
-            Self::DumpInterrupted => ErrorKind::DumpInterrupted,
-            Self::Validation(_) => ErrorKind::Validation,
-            Self::NamespaceDeleted { .. } => ErrorKind::NamespaceDeleted,
-            Self::EventStreamActive => ErrorKind::EventStreamActive,
-            Self::PoolExhausted { .. } => ErrorKind::PoolExhausted,
-            Self::PoolClosed => ErrorKind::PoolClosed,
-            Self::DadFailed { .. } => ErrorKind::DadFailed,
-            Self::NotConverged { .. } | Self::StackNotConverged { .. } => ErrorKind::NotConverged,
-            Self::Io(e) if e.raw_os_error().is_none() => match e.kind() {
+        match self.detail() {
+            ErrorDetail::Interface(IfError::NotFound(_))
+            | ErrorDetail::InterfaceNotFound { .. }
+            | ErrorDetail::NamespaceNotFound { .. }
+            | ErrorDetail::QdiscNotFound { .. }
+            | ErrorDetail::FamilyNotFound { .. } => ErrorKind::NotFound,
+            ErrorDetail::NotSupported(_) => ErrorKind::NotSupported,
+            ErrorDetail::Timeout => ErrorKind::Timeout,
+            ErrorDetail::FrameTruncated { .. } | ErrorDetail::Truncated { .. } => ErrorKind::Truncated,
+            ErrorDetail::Backpressure { .. } => ErrorKind::Overrun,
+            ErrorDetail::DumpInterrupted => ErrorKind::DumpInterrupted,
+            ErrorDetail::Validation(_) => ErrorKind::Validation,
+            ErrorDetail::NamespaceDeleted { .. } => ErrorKind::NamespaceDeleted,
+            ErrorDetail::EventStreamActive => ErrorKind::EventStreamActive,
+            ErrorDetail::PoolExhausted { .. } => ErrorKind::PoolExhausted,
+            ErrorDetail::PoolClosed => ErrorKind::PoolClosed,
+            ErrorDetail::DadFailed { .. } => ErrorKind::DadFailed,
+            ErrorDetail::NotConverged { .. } | ErrorDetail::StackNotConverged { .. } => ErrorKind::NotConverged,
+            ErrorDetail::Io(e) if e.raw_os_error().is_none() => match e.kind() {
                 std::io::ErrorKind::NotFound => ErrorKind::NotFound,
                 std::io::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
                 std::io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
@@ -876,21 +948,20 @@ impl Error {
                 }
                 _ => ErrorKind::Other,
             },
-            Self::InvalidMessage(_)
-            | Self::InvalidAttribute(_)
-            | Self::Parse(_)
-            | Self::Address(_)
-            | Self::Interface(_)
-            | Self::AddressParse(_)
-            | Self::RouteParse(_) => ErrorKind::Invalid,
+            ErrorDetail::InvalidMessage(_)
+            | ErrorDetail::InvalidAttribute(_)
+            | ErrorDetail::Parse(_)
+            | ErrorDetail::Address(_)
+            | ErrorDetail::Interface(_)
+            | ErrorDetail::AddressParse(_)
+            | ErrorDetail::RouteParse(_) => ErrorKind::Invalid,
             _ => self.errno().map_or(ErrorKind::Other, ErrorKind::from_errno),
         }
     }
 
     /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
     ///
-    /// Matches `Error::Kernel`, `Error::KernelWithContext`, and
-    /// `Error::Io` shapes carrying ENOENT/ENODEV — routed through
+    /// Matches kernel and I/O errors carrying ENOENT/ENODEV — routed through
     /// the common [`Self::errno`] accessor that Plan 187 §2.5
     /// established as the canonical errno-shape merge point.
     ///
@@ -898,9 +969,8 @@ impl Error {
     /// (`InterfaceNotFound`, `NamespaceNotFound`, `QdiscNotFound`,
     /// `FamilyNotFound`, `Interface(IfError::NotFound)`).
     ///
-    /// Pre-0.19 this predicate matched on `Self::Kernel` /
-    /// `Self::KernelWithContext` variants directly, missing the
-    /// `Error::Io(io_err with ENOENT)` shape that sibling predicates
+    /// Pre-0.19 this predicate matched the kernel variants directly,
+    /// missing an I/O error carrying ENOENT, which sibling predicates
     /// (`is_busy`, `is_permission_denied`, `is_already_exists`)
     /// already handled. Plan 212 closes the asymmetry.
     pub fn is_not_found(&self) -> bool {
@@ -908,19 +978,19 @@ impl Error {
             return true;
         }
         matches!(
-            self,
-            Self::Interface(IfError::NotFound(_))
-                | Self::InterfaceNotFound { .. }
-                | Self::NamespaceNotFound { .. }
-                | Self::QdiscNotFound { .. }
-                | Self::FamilyNotFound { .. }
+            self.detail(),
+            ErrorDetail::Interface(IfError::NotFound(_))
+                | ErrorDetail::InterfaceNotFound { .. }
+                | ErrorDetail::NamespaceNotFound { .. }
+                | ErrorDetail::QdiscNotFound { .. }
+                | ErrorDetail::FamilyNotFound { .. }
         )
     }
 
     /// Check if this is a permission error (EPERM, EACCES).
     ///
     /// Plan 187 §2.5: matches both `Error::Kernel*` and
-    /// `Error::Io` variants carrying EPERM/EACCES via the
+    /// `Error::from` variants carrying EPERM/EACCES via the
     /// `errno()` unwrap.
     pub fn is_permission_denied(&self) -> bool {
         matches!(self.errno(), Some(libc::EPERM) | Some(libc::EACCES))
@@ -929,7 +999,7 @@ impl Error {
     /// Check if this is a "already exists" error (EEXIST).
     ///
     /// Plan 187 §2.5: matches both `Error::Kernel*` and
-    /// `Error::Io(EEXIST)` shapes. Also matches `Error::Io`
+    /// `Error::from(EEXIST)` shapes. Also matches `Error::from`
     /// carrying `ErrorKind::AlreadyExists` without a raw errno —
     /// the shape `namespace::create_path` builds for its
     /// already-exists rejection (same predicate-widening move as
@@ -938,13 +1008,13 @@ impl Error {
         if self.errno() == Some(libc::EEXIST) {
             return true;
         }
-        matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists)
+        matches!(self.detail(), ErrorDetail::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists)
     }
 
     /// Check if this is a "device busy" error (EBUSY).
     ///
     /// Plan 187 §2.5: matches both `Error::Kernel*` and
-    /// `Error::Io(EBUSY)` shapes. Used by
+    /// `Error::from(EBUSY)` shapes. Used by
     /// `NftablesConfig::apply_reconcile` for retry
     /// classification — a missed match here used to silently
     /// skip the retry budget.
@@ -954,40 +1024,37 @@ impl Error {
 
     /// Get the POSIX errno value if this error carries one.
     ///
-    /// Handles three shapes:
-    /// - `Error::Kernel { errno, .. }` — from `NLMSGERR`.
-    /// - `Error::KernelWithContext { errno, .. }` — context-wrapped.
-    /// - `Error::Io(io_err)` — from raw socket-layer errors;
-    ///   reads `io_err.raw_os_error()`. This is the shape
-    ///   `recvmsg` returns `-ENOBUFS` in (the Plan 185 bug
-    ///   class that Plan 187 fixes at the single-point of
-    ///   `errno()`).
+    /// Handles these details:
+    /// - [`ErrorDetail::Kernel`] — from `NLMSGERR`;
+    /// - [`ErrorDetail::NftBatch`] — the first refused operation's;
+    /// - [`ErrorDetail::Io`] and [`ErrorDetail::Sysctl`] — reads
+    ///   `raw_os_error()`. This is the shape `recvmsg` returns `-ENOBUFS`
+    ///   in (the Plan 185 bug class that Plan 187 fixes at the
+    ///   single-point of `errno()`).
     ///
     /// Returns `None` for the other variants (Timeout, Truncated,
     /// InvalidMessage, etc.) — they don't carry an errno.
     pub fn errno(&self) -> Option<i32> {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => Some(*errno),
-            Self::NftBatch { failures } => failures.first().map(|f| f.errno),
-            Self::Io(io_err) | Self::Sysctl { source: io_err, .. } => io_err.raw_os_error(),
+        match self.detail() {
+            ErrorDetail::Kernel { errno, .. } => Some(*errno),
+            ErrorDetail::NftBatch { failures } => failures.first().map(|f| f.errno),
+            ErrorDetail::Io(io_err) | ErrorDetail::Sysctl { source: io_err, .. } => io_err.raw_os_error(),
             _ => None,
         }
     }
 
     /// Return the kernel's `NLMSGERR_ATTR_MSG` extended-ack
     /// string if this is a kernel error that carries one.
-    /// Plan 182 — sugar over destructuring `Error::Kernel` /
-    /// `Error::KernelWithContext`, both of which are
-    /// `#[non_exhaustive]` and so force a wildcard arm at
-    /// every call site. Equivalent to:
+    /// Plan 182 — sugar over destructuring [`ErrorDetail::Kernel`],
+    /// which is `#[non_exhaustive]` and so forces a wildcard arm at
+    /// every call site. Equivalent, for a kernel error, to:
     ///
     /// ```no_run
-    /// # use nlink::Error;
+    /// # use nlink::{Error, ErrorDetail};
     /// # fn example(err: Error) -> Option<&'static str> {
     /// # let ext: Option<&str> =
-    /// match &err {
-    ///     Error::Kernel { ext_ack, .. }
-    ///     | Error::KernelWithContext { ext_ack, .. } => ext_ack.as_deref(),
+    /// match err.detail() {
+    ///     ErrorDetail::Kernel { ext_ack, .. } => ext_ack.as_deref(),
     ///     _ => None,
     /// }
     /// # ;
@@ -995,11 +1062,9 @@ impl Error {
     /// # }
     /// ```
     pub fn ext_ack(&self) -> Option<&str> {
-        match self {
-            Self::Kernel { ext_ack, .. } | Self::KernelWithContext { ext_ack, .. } => {
-                ext_ack.as_deref()
-            }
-            Self::NftBatch { failures } => failures.first().and_then(|f| f.ext_ack.as_deref()),
+        match self.detail() {
+            ErrorDetail::Kernel { ext_ack, .. } => ext_ack.as_deref(),
+            ErrorDetail::NftBatch { failures } => failures.first().and_then(|f| f.ext_ack.as_deref()),
             _ => None,
         }
     }
@@ -1009,10 +1074,9 @@ impl Error {
     /// kernel sent one. Pair with [`Self::ext_ack`] when
     /// constructing structured error reports. Plan 182.
     pub fn ext_ack_offset(&self) -> Option<u32> {
-        match self {
-            Self::Kernel { ext_ack_offset, .. }
-            | Self::KernelWithContext { ext_ack_offset, .. } => *ext_ack_offset,
-            Self::NftBatch { failures } => failures.first().and_then(|f| f.offset),
+        match self.detail() {
+            ErrorDetail::Kernel { ext_ack_offset, .. } => *ext_ack_offset,
+            ErrorDetail::NftBatch { failures } => failures.first().and_then(|f| f.offset),
             _ => None,
         }
     }
@@ -1033,14 +1097,14 @@ impl Error {
     }
 
     /// Check if this is a "not supported" error (EOPNOTSUPP, or the
-    /// library-level [`Error::NotSupported`] variant).
+    /// library-level [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported) variant).
     ///
     /// This indicates the requested operation is not supported by the kernel
     /// or the specific device/driver, or that nlink itself does not support
     /// the operation in the current mode (e.g. an event stream on a
     /// dispatcher-mode connection).
     pub fn is_not_supported(&self) -> bool {
-        matches!(self, Self::NotSupported(_)) || self.errno() == Some(libc::EOPNOTSUPP)
+        matches!(self.detail(), ErrorDetail::NotSupported(_)) || self.errno() == Some(libc::EOPNOTSUPP)
     }
 
     /// Check if this is a "network unreachable" error (ENETUNREACH).
@@ -1064,7 +1128,7 @@ impl Error {
     /// ```no_run
     /// use nlink::Error;
     /// # let outer_err: Box<dyn std::error::Error> =
-    /// #     Box::new(Error::Timeout);
+    /// #     Box::new(Error::timeout());
     /// // Find the first kernel ENOBUFS anywhere in the chain.
     /// let enobufs = Error::chain_walk(outer_err.as_ref())
     ///     .find(|e| e.is_no_buffer_space());
@@ -1093,54 +1157,54 @@ impl Error {
         Self::chain_walk(self).collect()
     }
 
-    /// Check if this is [`Error::DadFailed`].
+    /// Check if this is [`ErrorDetail::DadFailed`](crate::ErrorDetail::DadFailed).
     pub fn is_dad_failed(&self) -> bool {
-        matches!(self, Self::DadFailed { .. })
+        matches!(self.detail(), ErrorDetail::DadFailed { .. })
     }
 
     /// Check if this is a timeout error.
     ///
-    /// Returns `true` for both the [`Error::Timeout`] variant and
+    /// Returns `true` for both the [`Error::timeout()`] variant and
     /// kernel ETIMEDOUT errors.
     pub fn is_timeout(&self) -> bool {
-        matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
+        matches!(self.detail(), ErrorDetail::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
     }
 
-    /// Check if this is an [`Error::FrameTruncated`] error — the
+    /// Check if this is an [`ErrorDetail::FrameTruncated`](crate::ErrorDetail::FrameTruncated) error — the
     /// kernel emitted a netlink frame larger than nlink's
     /// receive cap (1 MiB).
     ///
     /// Added in 0.20.1 (Plan 224 — closes B4).
     pub fn is_truncated(&self) -> bool {
-        matches!(self, Self::FrameTruncated { .. })
+        matches!(self.detail(), ErrorDetail::FrameTruncated { .. })
     }
 
-    /// Check if this is an [`Error::Backpressure`] error — the
+    /// Check if this is an [`ErrorDetail::Backpressure`](crate::ErrorDetail::Backpressure) error — the
     /// kernel send buffer is full and back-to-back `WouldBlock`
     /// returns exceeded the backpressure threshold.
     ///
     /// Added in 0.20.1 (Plan 232 — closes B19).
     pub fn is_backpressure(&self) -> bool {
-        matches!(self, Self::Backpressure { .. })
+        matches!(self.detail(), ErrorDetail::Backpressure { .. })
     }
 
-    /// Check if this is an [`Error::EventStreamActive`] — a request on a
+    /// Check if this is an [`Error::event_stream_active()`] — a request on a
     /// mutex-mode connection whose event stream owns it.
     ///
     /// Added in 0.31.0 (#505).
     pub fn is_event_stream_active(&self) -> bool {
-        matches!(self, Self::EventStreamActive)
+        matches!(self.detail(), ErrorDetail::EventStreamActive)
     }
 
-    /// Check if this is an [`Error::NamespaceDeleted`] — an event stream
+    /// Check if this is an [`ErrorDetail::NamespaceDeleted`](crate::ErrorDetail::NamespaceDeleted) — an event stream
     /// whose namespace was deleted under it, and which has ended.
     ///
     /// Added in 0.31.0 (#504).
     pub fn is_namespace_deleted(&self) -> bool {
-        matches!(self, Self::NamespaceDeleted { .. })
+        matches!(self.detail(), ErrorDetail::NamespaceDeleted { .. })
     }
 
-    /// Check if this is an [`Error::DumpInterrupted`].
+    /// Check if this is an [`Error::dump_interrupted()`].
     ///
     /// The kernel signaled `NLM_F_DUMP_INTR` on a dump message,
     /// meaning the snapshot was mutated mid-flight and the returned
@@ -1168,26 +1232,26 @@ impl Error {
     /// }
     /// ```
     pub fn is_dump_interrupted(&self) -> bool {
-        matches!(self, Self::DumpInterrupted)
+        matches!(self.detail(), ErrorDetail::DumpInterrupted)
     }
 
-    /// Check if this is a [`Error::PoolExhausted`].
+    /// Check if this is a [`ErrorDetail::PoolExhausted`](crate::ErrorDetail::PoolExhausted).
     ///
     /// All pool slots were busy when `ConnectionPool::acquire` was
     /// called, and the `acquire_timeout` elapsed before any returned.
     /// Typical recovery: retry with a longer timeout, scale the
     /// pool size up, or shed load.
     pub fn is_pool_exhausted(&self) -> bool {
-        matches!(self, Self::PoolExhausted { .. })
+        matches!(self.detail(), ErrorDetail::PoolExhausted { .. })
     }
 
-    /// Check if this is a [`Error::PoolClosed`].
+    /// Check if this is a [`Error::pool_closed()`].
     ///
     /// The pool was dropped while an acquire / return was pending.
     /// Indicates teardown race; the surviving task should fail
     /// through.
     pub fn is_pool_closed(&self) -> bool {
-        matches!(self, Self::PoolClosed)
+        matches!(self.detail(), ErrorDetail::PoolClosed)
     }
 
     /// Check if this is an "address already in use" error (EADDRINUSE).
@@ -1226,7 +1290,7 @@ impl Error {
     /// This typically occurs when the kernel cannot allocate memory
     /// for network operations.
     pub fn is_no_buffer_space(&self) -> bool {
-        // Plan 187 made `errno()` itself unwrap `Error::Io` via
+        // Plan 187 made `errno()` itself unwrap `Error::from` via
         // `raw_os_error()`, so this predicate (and every sibling
         // predicate) catches both the kernel-shape and the
         // socket-shape ENOBUFS via the same path. The Plan 185
@@ -1383,7 +1447,7 @@ mod tests {
             for err in [
                 Error::from_errno(errno),
                 Error::from_errno(errno).with_context("op"),
-                Error::Io(std::io::Error::from_raw_os_error(errno)),
+                Error::from(std::io::Error::from_raw_os_error(errno)),
             ] {
                 assert_eq!(err.kind(), kind, "{err}");
                 assert!(pred(&err), "{err}");
@@ -1395,9 +1459,9 @@ mod tests {
     /// `NotConverged` says what was left, and is its own kind (#518).
     #[test]
     fn not_converged_shows_what_is_left() {
-        let err = Error::NotConverged {
+        let err = Error::from(crate::netlink::ErrorDetail::NotConverged {
             remaining: Box::default(),
-        };
+        });
         assert_eq!(err.kind(), ErrorKind::NotConverged);
         assert!(err.to_string().contains("did not converge"), "{err}");
         assert!(!err.kind().is_retryable());
@@ -1405,7 +1469,7 @@ mod tests {
 
     #[test]
     fn kind_of_the_variants() {
-        assert_eq!(Error::Timeout.kind(), ErrorKind::Timeout);
+        assert_eq!(Error::timeout().kind(), ErrorKind::Timeout);
         assert_eq!(Error::interface_not_found("d0").kind(), ErrorKind::NotFound);
         assert_eq!(
             Error::namespace_not_found("red").kind(),
@@ -1417,8 +1481,8 @@ mod tests {
             Error::validation_error("links.d0", "bad").kind(),
             ErrorKind::Validation
         );
-        assert_eq!(Error::DumpInterrupted.kind(), ErrorKind::DumpInterrupted);
-        let exists = Error::Io(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "x"));
+        assert_eq!(Error::dump_interrupted().kind(), ErrorKind::DumpInterrupted);
+        let exists = Error::from(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "x"));
         assert_eq!(exists.kind(), ErrorKind::AlreadyExists);
         assert!(exists.is_already_exists());
         assert!(ErrorKind::Busy.is_retryable());
@@ -1458,6 +1522,48 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::NotFound);
     }
 
+    /// #526: a context is kept on every error. Until 0.32 `with_context`
+    /// returned anything but a kernel error unchanged, so an I/O error, a
+    /// refused batch or a validation failure lost what was being done.
+    #[test]
+    fn a_context_is_kept_on_any_error() {
+        let io = Error::from(io::Error::from_raw_os_error(libc::EBUSY))
+            .with_context("remove namespace file")
+            .with_context("delete namespace red");
+        assert_eq!(io.context(), ["delete namespace red", "remove namespace file"]);
+        assert!(
+            io.to_string()
+                .starts_with("delete namespace red: remove namespace file: I/O error: "),
+            "{io}"
+        );
+        assert!(io.is_busy(), "the errno survives the context");
+
+        let invalid = Error::invalid_message("bad").with_context("parse rule");
+        assert_eq!(invalid.to_string(), "parse rule: invalid message: bad");
+        assert_eq!(invalid.kind(), ErrorKind::Invalid);
+        let validation = Error::validation_error("links.d0", "no kind").with_context("apply");
+        assert_eq!(validation.context(), ["apply"]);
+        assert_eq!(validation.kind(), ErrorKind::Validation);
+
+        // A kernel error reads as before, with and without one.
+        assert_eq!(
+            Error::from_errno(libc::EEXIST).to_string(),
+            "kernel error: File exists (errno 17)"
+        );
+        assert_eq!(
+            Error::from_errno(libc::EEXIST).with_context("add_link(d0)").to_string(),
+            "add_link(d0): File exists (errno 17)"
+        );
+        assert!(matches!(io.detail(), ErrorDetail::Io(_)));
+        assert!(io.into_detail().to_string().starts_with("I/O error: "));
+    }
+
+    /// One pointer wide: every `Result<T>` in the crate pays for it.
+    #[test]
+    fn an_error_is_one_pointer() {
+        assert_eq!(std::mem::size_of::<Error>(), std::mem::size_of::<usize>());
+    }
+
     #[test]
     fn test_from_errno() {
         let err = Error::from_errno(-1); // EPERM
@@ -1488,22 +1594,22 @@ mod tests {
         assert!(Error::from_errno(-2).is_not_found()); // ENOENT
         assert!(Error::from_errno(-19).is_not_found()); // ENODEV
         assert!(
-            Error::InterfaceNotFound {
+            Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
                 name: "eth0".into()
-            }
+            })
             .is_not_found()
         );
         assert!(
-            Error::NamespaceNotFound {
+            Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
                 name: "test".into()
-            }
+            })
             .is_not_found()
         );
         assert!(
-            Error::QdiscNotFound {
+            Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
                 kind: "netem".into(),
                 interface: "eth0".into()
-            }
+            })
             .is_not_found()
         );
     }
@@ -1520,13 +1626,13 @@ mod tests {
     // is_not_found.
     #[test]
     fn is_already_exists_catches_kind_without_errno() {
-        let err = Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, "x exists"));
+        let err = Error::from(io::Error::new(io::ErrorKind::AlreadyExists, "x exists"));
         assert!(err.is_already_exists());
         assert!(Error::from_errno(-libc::EEXIST).is_already_exists());
-        assert!(!Error::Io(io::Error::new(io::ErrorKind::NotFound, "gone")).is_already_exists());
+        assert!(!Error::from(io::Error::new(io::ErrorKind::NotFound, "gone")).is_already_exists());
     }
 
-    // Plan 212 M9 — is_not_found must match Error::Io(ENOENT/ENODEV)
+    // Plan 212 M9 — is_not_found must match Error::from(ENOENT/ENODEV)
     // through the common `errno()` accessor (sibling predicates
     // `is_busy`, `is_permission_denied`, `is_already_exists` already
     // did per Plan 187 §2.5; this closes the asymmetry).
@@ -1536,7 +1642,7 @@ mod tests {
         let err: Error = io_err.into();
         assert!(
             err.is_not_found(),
-            "is_not_found must catch Error::Io(ENOENT) (Plan 212 M9)"
+            "is_not_found must catch Error::from(ENOENT) (Plan 212 M9)"
         );
     }
 
@@ -1556,7 +1662,7 @@ mod tests {
 
     #[test]
     fn test_timeout() {
-        let err = Error::Timeout;
+        let err = Error::timeout();
         assert!(err.is_timeout());
         assert_eq!(err.to_string(), "operation timed out");
 
@@ -1567,7 +1673,7 @@ mod tests {
 
     #[test]
     fn test_dump_interrupted_predicate() {
-        let err = Error::DumpInterrupted;
+        let err = Error::dump_interrupted();
         assert!(err.is_dump_interrupted());
         // Mutually exclusive with other recovery predicates.
         assert!(!err.is_timeout());
@@ -1582,27 +1688,27 @@ mod tests {
 
     #[test]
     fn test_dump_interrupted_does_not_match_unrelated_errors() {
-        assert!(!Error::Timeout.is_dump_interrupted());
+        assert!(!Error::timeout().is_dump_interrupted());
         assert!(!Error::from_errno(-16).is_dump_interrupted()); // EBUSY
-        assert!(!Error::InterfaceNotFound { name: "x".into() }.is_dump_interrupted());
+        assert!(!Error::from(crate::netlink::ErrorDetail::InterfaceNotFound { name: "x".into() }).is_dump_interrupted());
     }
 
     #[test]
     fn test_error_messages() {
-        let err = Error::InterfaceNotFound {
+        let err = Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
             name: "eth0".into(),
-        };
+        });
         assert_eq!(err.to_string(), "interface not found: eth0");
 
-        let err = Error::NamespaceNotFound {
+        let err = Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
             name: "myns".into(),
-        };
+        });
         assert_eq!(err.to_string(), "namespace not found: myns");
 
-        let err = Error::QdiscNotFound {
+        let err = Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
             kind: "netem".into(),
             interface: "docker0".into(),
-        };
+        });
         assert_eq!(err.to_string(), "qdisc not found: netem on docker0");
     }
 
@@ -1610,12 +1716,12 @@ mod tests {
 
     #[test]
     fn ext_ack_returns_some_for_kernel_with_ack() {
-        let err = Error::Kernel {
+        let err = Error::from(crate::netlink::ErrorDetail::Kernel {
             errno: 22,
             message: "Invalid argument".into(),
             ext_ack: Some("attribute IFLA_MTU rejected: value 0 out of range".into()),
             ext_ack_offset: Some(24),
-        };
+        });
         assert_eq!(
             err.ext_ack(),
             Some("attribute IFLA_MTU rejected: value 0 out of range")
@@ -1625,34 +1731,33 @@ mod tests {
 
     #[test]
     fn ext_ack_returns_some_for_kernel_with_context() {
-        let err = Error::KernelWithContext {
-            operation: "add_link".into(),
-            errno: 17,
-            message: "File exists".into(),
-            ext_ack: Some("interface 'veth0' already exists".into()),
-            ext_ack_offset: None,
-        };
+        let err = Error::from_errno_with_context_ext_ack(
+            17,
+            "add_link",
+            Some("interface 'veth0' already exists".into()),
+            None,
+        );
         assert_eq!(err.ext_ack(), Some("interface 'veth0' already exists"));
         assert_eq!(err.ext_ack_offset(), None);
     }
 
     #[test]
     fn ext_ack_returns_none_for_kernel_without_ack() {
-        let err = Error::Kernel {
+        let err = Error::from(crate::netlink::ErrorDetail::Kernel {
             errno: 22,
             message: "EINVAL".into(),
             ext_ack: None,
             ext_ack_offset: None,
-        };
+        });
         assert_eq!(err.ext_ack(), None);
         assert_eq!(err.ext_ack_offset(), None);
     }
 
     #[test]
     fn ext_ack_returns_none_for_non_kernel_errors() {
-        assert_eq!(Error::Timeout.ext_ack(), None);
-        assert_eq!(Error::Timeout.ext_ack_offset(), None);
-        assert_eq!(Error::InvalidMessage("bad".into()).ext_ack(), None);
+        assert_eq!(Error::timeout().ext_ack(), None);
+        assert_eq!(Error::timeout().ext_ack_offset(), None);
+        assert_eq!(Error::invalid_message("bad").ext_ack(), None);
     }
 
     // Plan 185 fix — `is_no_buffer_space` must catch the OS-shape
@@ -1661,7 +1766,7 @@ mod tests {
     // OS branch.
     #[test]
     fn is_no_buffer_space_matches_io_enobufs() {
-        let err = Error::Io(std::io::Error::from_raw_os_error(libc::ENOBUFS));
+        let err = Error::from(std::io::Error::from_raw_os_error(libc::ENOBUFS));
         assert!(
             err.is_no_buffer_space(),
             "Io(ENOBUFS) must be caught by is_no_buffer_space"
@@ -1670,18 +1775,18 @@ mod tests {
 
     #[test]
     fn is_no_buffer_space_matches_kernel_enobufs() {
-        let err = Error::Kernel {
+        let err = Error::from(crate::netlink::ErrorDetail::Kernel {
             errno: libc::ENOBUFS,
             message: "ENOBUFS".into(),
             ext_ack: None,
             ext_ack_offset: None,
-        };
+        });
         assert!(err.is_no_buffer_space());
     }
 
     #[test]
     fn is_no_buffer_space_rejects_unrelated_io_errors() {
-        let err = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        let err = Error::from(std::io::Error::from_raw_os_error(libc::EAGAIN));
         assert!(!err.is_no_buffer_space());
     }
 
@@ -1726,7 +1831,7 @@ mod tests {
     // ===== Plan 187 §2.5 — predicate Io-shape sweep. =====
     //
     // Every `is_*` predicate must match BOTH `Error::Kernel*`
-    // and `Error::Io` variants carrying the same errno. The
+    // and `Error::from` variants carrying the same errno. The
     // Plan 187 fix to `errno()` (unwrap `Io` via
     // `raw_os_error()`) makes this work uniformly; this sweep
     // pins the contract so future predicates inherit it.
@@ -1737,7 +1842,7 @@ mod tests {
             pred(&kernel),
             "{name}: Kernel({errno}) must match the predicate"
         );
-        let io = Error::Io(std::io::Error::from_raw_os_error(errno));
+        let io = Error::from(std::io::Error::from_raw_os_error(errno));
         assert!(pred(&io), "{name}: Io({errno}) must match the predicate");
         let kctx = Error::from_errno_with_context_ext_ack(errno, "ctx", None, None);
         assert!(
@@ -1801,7 +1906,7 @@ mod tests {
         // specific to its target errno, not "any retryable error".
         let kernel_eagain = Error::from_errno_ext_ack(libc::EAGAIN, None, None);
         assert!(!kernel_eagain.is_busy());
-        let io_eagain = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        let io_eagain = Error::from(std::io::Error::from_raw_os_error(libc::EAGAIN));
         assert!(!io_eagain.is_busy());
     }
 

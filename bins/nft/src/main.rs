@@ -306,7 +306,7 @@ fn parse_family(s: &str) -> Result<Family> {
         "arp" => Ok(Family::Arp),
         "bridge" => Ok(Family::Bridge),
         "netdev" => Ok(Family::Netdev),
-        _ => Err(nlink::netlink::Error::InvalidAttribute(format!(
+        _ => Err(nlink::netlink::Error::invalid_attribute(format!(
             "unknown family: {s}"
         ))),
     }
@@ -327,7 +327,7 @@ fn parse_hook(s: &str) -> Result<Hook> {
         "ingress" | "netdev:ingress" => Ok(Hook::NetdevIngress),
         "inet:ingress" => Ok(Hook::InetIngress),
         "netdev:egress" => Ok(Hook::NetdevEgress),
-        _ => Err(nlink::netlink::Error::InvalidAttribute(format!(
+        _ => Err(nlink::netlink::Error::invalid_attribute(format!(
             "unknown hook: {s}"
         ))),
     }
@@ -349,7 +349,7 @@ fn parse_priority(s: &str) -> Result<Priority> {
         _ => match s.parse::<i32>() {
             Ok(n) => Priority::Custom(n),
             Err(_) => {
-                return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                return Err(nlink::netlink::Error::invalid_attribute(format!(
                     "unknown priority `{s}` — expected a name (raw, mangle, dstnat, \
                      filter, security, srcnat) or a signed integer"
                 )));
@@ -464,7 +464,7 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
             }
             "iif" | "iifname" => {
                 let name = tokens.get(i + 1).ok_or_else(|| {
-                    nlink::netlink::Error::InvalidAttribute(format!(
+                    nlink::netlink::Error::invalid_attribute(format!(
                         "nft: `{}` requires an interface name",
                         tokens[i]
                     ))
@@ -474,7 +474,7 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
             }
             "oif" | "oifname" => {
                 let name = tokens.get(i + 1).ok_or_else(|| {
-                    nlink::netlink::Error::InvalidAttribute(format!(
+                    nlink::netlink::Error::invalid_attribute(format!(
                         "nft: `{}` requires an interface name",
                         tokens[i]
                     ))
@@ -485,8 +485,8 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
             "ct" if tokens.get(i + 1) == Some(&"state") => {
                 use nlink::netlink::nftables::CtState;
                 let state_str = tokens.get(i + 2).ok_or_else(|| {
-                    nlink::netlink::Error::InvalidAttribute(
-                        "nft: `ct state` requires a comma-separated state list".into(),
+                    nlink::netlink::Error::invalid_attribute(
+                        "nft: `ct state` requires a comma-separated state list",
                     )
                 })?;
                 let mut state = CtState(0);
@@ -497,7 +497,7 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
                         "new" => state |= CtState::NEW,
                         "invalid" => state |= CtState::INVALID,
                         other => {
-                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                            return Err(nlink::netlink::Error::invalid_attribute(format!(
                                 "nft: unknown ct state `{other}` — expected \
                                  established/related/new/invalid"
                             )));
@@ -618,7 +618,7 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
                 i += 3;
             }
             other => {
-                return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                return Err(nlink::netlink::Error::invalid_attribute(format!(
                     "nft: unrecognized rule token `{other}` (a mistyped or unmodelled token \
                      is rejected rather than silently dropped)"
                 )));
@@ -906,7 +906,7 @@ async fn main() -> Result<()> {
 /// it atomically (or, with `dry_run`, just report what would apply).
 async fn apply_file(conn: &Connection<Nftables>, path: &str, dry_run: bool) -> Result<()> {
     let contents = std::fs::read_to_string(path).map_err(|e| {
-        nlink::netlink::Error::InvalidMessage(format!("nft apply: cannot read `{path}`: {e}"))
+        nlink::netlink::Error::invalid_message(format!("nft apply: cannot read `{path}`: {e}"))
     })?;
 
     let mut txn = conn.transaction();
@@ -919,7 +919,7 @@ async fn apply_file(conn: &Connection<Nftables>, path: &str, dry_run: bool) -> R
         }
         let tokens: Vec<&str> = line.split_whitespace().collect();
         txn = apply_line(txn, &tokens).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!(
+            nlink::netlink::Error::invalid_message(format!(
                 "nft apply: {path}:{}: {e}",
                 lineno + 1
             ))
@@ -928,8 +928,8 @@ async fn apply_file(conn: &Connection<Nftables>, path: &str, dry_run: bool) -> R
     }
 
     if count == 0 {
-        return Err(nlink::netlink::Error::InvalidMessage(
-            "nft apply: file contains no operations".into(),
+        return Err(nlink::netlink::Error::invalid_message(
+            "nft apply: file contains no operations",
         ));
     }
 
@@ -957,10 +957,10 @@ async fn reconcile_file(
     no_retry: bool,
 ) -> Result<()> {
     let contents = std::fs::read_to_string(path).map_err(|e| {
-        nlink::netlink::Error::InvalidMessage(format!("nft reconcile: cannot read `{path}`: {e}"))
+        nlink::netlink::Error::invalid_message(format!("nft reconcile: cannot read `{path}`: {e}"))
     })?;
     let cfg = parse_ruleset(&contents)
-        .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("nft reconcile: {path}: {e}")))?;
+        .map_err(|e| nlink::netlink::Error::invalid_message(format!("nft reconcile: {path}: {e}")))?;
 
     let diff = cfg.diff(conn).await?;
 
@@ -1003,7 +1003,7 @@ async fn reconcile_file(
 /// builder closures. `delete`/`flush` lines are rejected, because
 /// removal in a desired-state model is inferred from the diff.
 fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
-    let err = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+    let err = |m: String| nlink::netlink::Error::invalid_attribute(m);
 
     /// A chain with its options pre-resolved to typed enums.
     struct PendingChain {
@@ -1276,7 +1276,7 @@ fn parse_chain_type(s: &str) -> Result<ChainType> {
         "filter" => Ok(ChainType::Filter),
         "nat" => Ok(ChainType::Nat),
         "route" => Ok(ChainType::Route),
-        other => Err(nlink::netlink::Error::InvalidAttribute(format!(
+        other => Err(nlink::netlink::Error::invalid_attribute(format!(
             "unknown chain type `{other}` — expected one of `filter`, `nat`, `route`"
         ))),
     }
@@ -1287,7 +1287,7 @@ fn parse_policy(s: &str) -> Result<Policy> {
     match s {
         "drop" => Ok(Policy::Drop),
         "accept" => Ok(Policy::Accept),
-        other => Err(nlink::netlink::Error::InvalidAttribute(format!(
+        other => Err(nlink::netlink::Error::invalid_attribute(format!(
             "unknown policy `{other}` — expected `drop` or `accept`"
         ))),
     }
@@ -1295,7 +1295,7 @@ fn parse_policy(s: &str) -> Result<Policy> {
 
 /// Translate one tokenized operation line into a Transaction step.
 fn apply_line(txn: Transaction, tokens: &[&str]) -> Result<Transaction> {
-    let err = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+    let err = |m: String| nlink::netlink::Error::invalid_attribute(m);
     match tokens {
         ["add", "table", family, name] => Ok(txn.add_table(name, parse_family(family)?)),
         ["delete", "table", family, name] => Ok(txn.del_table(name, parse_family(family)?)),
@@ -1386,7 +1386,7 @@ fn parse_key_type(s: &str) -> Result<SetKeyType> {
         "inet_service" | "port" => Ok(SetKeyType::InetService),
         "ifindex" => Ok(SetKeyType::IfIndex),
         "mark" => Ok(SetKeyType::Mark),
-        _ => Err(nlink::netlink::Error::InvalidAttribute(format!(
+        _ => Err(nlink::netlink::Error::invalid_attribute(format!(
             "unknown key type: {s}"
         ))),
     }
@@ -1399,19 +1399,19 @@ fn parse_elements(s: &str, key_type: &str) -> Result<Vec<SetElement>> {
             match key_type {
                 "ip" | "ipv4" => {
                     let ip: Ipv4Addr = elem.parse().map_err(|_| {
-                        nlink::netlink::Error::InvalidAttribute(format!("invalid IP: {elem}"))
+                        nlink::netlink::Error::invalid_attribute(format!("invalid IP: {elem}"))
                     })?;
                     Ok(SetElement::ipv4(ip))
                 }
                 "port" => {
                     let port: u16 = elem.parse().map_err(|_| {
-                        nlink::netlink::Error::InvalidAttribute(format!("invalid port: {elem}"))
+                        nlink::netlink::Error::invalid_attribute(format!("invalid port: {elem}"))
                     })?;
                     Ok(SetElement::port(port))
                 }
                 _ => {
                     let ip: Ipv4Addr = elem.parse().map_err(|_| {
-                        nlink::netlink::Error::InvalidAttribute(format!("invalid element: {elem}"))
+                        nlink::netlink::Error::invalid_attribute(format!("invalid element: {elem}"))
                     })?;
                     Ok(SetElement::ipv4(ip))
                 }
@@ -1429,7 +1429,7 @@ fn parse_elements(s: &str, key_type: &str) -> Result<Vec<SetElement>> {
 /// than guessed — matching the strict-parser ethos (no silent
 /// fallback).
 fn parse_set_element(text: &str, kt: &SetKeyType) -> Result<SetElement> {
-    let bad = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+    let bad = |m: String| nlink::netlink::Error::invalid_attribute(m);
     // Ranges and prefixes, for interval sets: `10.0.0.0/24`, `a-b`.
     if let Some((addr, len)) = text.split_once('/') {
         let len: u8 = len
@@ -1504,7 +1504,7 @@ fn parse_set_element(text: &str, kt: &SetKeyType) -> Result<SetElement> {
 fn build_elements(key_type: &str, tokens: &[&str]) -> Result<Vec<SetElement>> {
     let kt = parse_key_type(key_type)?;
     if tokens.is_empty() {
-        return Err(nlink::netlink::Error::InvalidAttribute(
+        return Err(nlink::netlink::Error::invalid_attribute(
             "element op requires at least one element".to_string(),
         ));
     }
@@ -1577,7 +1577,7 @@ fn set_lookup_field(
 }
 
 fn rule_err(msg: &str) -> nlink::netlink::Error {
-    nlink::netlink::Error::InvalidAttribute(format!("nft: {msg}"))
+    nlink::netlink::Error::invalid_attribute(format!("nft: {msg}"))
 }
 
 /// Strict `<value>[/<mask>]` parse for a mark token; each part decimal or
@@ -1630,10 +1630,10 @@ fn parse_tcp_flags(tok: Option<&&str>) -> Result<nlink::netlink::nftables::TcpFl
 /// unparseable value instead of silently dropping the clause.
 fn parse_rule_port(tok: Option<&&str>, what: &str) -> Result<u16> {
     let s = tok.ok_or_else(|| {
-        nlink::netlink::Error::InvalidAttribute(format!("nft: `{what}` requires a port number"))
+        nlink::netlink::Error::invalid_attribute(format!("nft: `{what}` requires a port number"))
     })?;
     s.parse::<u16>().map_err(|_| {
-        nlink::netlink::Error::InvalidAttribute(format!(
+        nlink::netlink::Error::invalid_attribute(format!(
             "nft: invalid {what} `{s}` (expected port number 0-65535)"
         ))
     })
@@ -1644,13 +1644,13 @@ fn parse_rule_port(tok: Option<&&str>, what: &str) -> Result<u16> {
 /// missing its target.
 fn parse_rule_nat(tok: Option<&&str>, what: &str) -> Result<(Ipv4Addr, Option<u16>)> {
     let s = tok.ok_or_else(|| {
-        nlink::netlink::Error::InvalidAttribute(format!(
+        nlink::netlink::Error::invalid_attribute(format!(
             "nft: `{what}` requires an address (IP or IP:port)"
         ))
     })?;
     let (addr, port) = parse_nat_target(s);
     let ip = addr.ok_or_else(|| {
-        nlink::netlink::Error::InvalidAttribute(format!(
+        nlink::netlink::Error::invalid_attribute(format!(
             "nft: invalid {what} target `{s}` (expected IPv4 address or IPv4:port)"
         ))
     })?;
@@ -1660,10 +1660,10 @@ fn parse_rule_nat(tok: Option<&&str>, what: &str) -> Result<(Ipv4Addr, Option<u1
 /// Strict CIDR parse for a rule-spec token.
 fn parse_rule_cidr(tok: Option<&&str>, what: &str) -> Result<(Ipv4Addr, u8)> {
     let s = tok.ok_or_else(|| {
-        nlink::netlink::Error::InvalidAttribute(format!("nft: `{what}` requires an address"))
+        nlink::netlink::Error::invalid_attribute(format!("nft: `{what}` requires an address"))
     })?;
     parse_cidr(s).ok_or_else(|| {
-        nlink::netlink::Error::InvalidAttribute(format!(
+        nlink::netlink::Error::invalid_attribute(format!(
             "nft: invalid {what} `{s}` (expected IPv4 address or CIDR like 10.0.0.0/8)"
         ))
     })

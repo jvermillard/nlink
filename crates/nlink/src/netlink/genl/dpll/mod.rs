@@ -100,7 +100,7 @@ pub const DPLL_PIN_MEASURED_FREQUENCY_DIVIDER: u64 = 1000;
 /// Constructed via [`Connection::<Dpll>::new_async()`][Connection]
 /// — the family ID is resolved against the kernel at connection
 /// time. Returns
-/// [`Error::FamilyNotFound`](crate::Error::FamilyNotFound) on
+/// [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound) on
 /// kernels without DPLL support (no CONFIG_DPLL, or driver not
 /// loaded).
 ///

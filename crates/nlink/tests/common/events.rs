@@ -62,7 +62,7 @@ where
             }
         };
         if forbidden(&event) {
-            return Err(nlink::Error::InvalidMessage(format!(
+            return Err(nlink::Error::invalid_message(format!(
                 "expected {what}, but first got a forbidden event: {event:?}"
             )));
         }
@@ -82,5 +82,5 @@ fn missing(what: &str, why: &str, skipped: &VecDeque<String>) -> nlink::Error {
     } else {
         format!("skipped:\n  {}", Vec::from(skipped.clone()).join("\n  "))
     };
-    nlink::Error::InvalidMessage(format!("expected {what}, but {why}; {shown}"))
+    nlink::Error::invalid_message(format!("expected {what}, but {why}; {shown}"))
 }

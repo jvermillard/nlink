@@ -191,7 +191,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
 
     /// The source has nothing right now. Return `Pending` unless the
     /// inactivity deadline has expired, in which case the kernel has
-    /// stalled and the stream fuses with `Error::Timeout`.
+    /// stalled and the stream fuses with `Error::timeout()`.
     fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T>>> {
         let Some(idle) = self.idle.as_mut() else {
             return Poll::Pending;
@@ -199,7 +199,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
         match idle.as_mut().poll(cx) {
             Poll::Ready(()) => {
                 self.errored = true;
-                Poll::Ready(Some(Err(crate::Error::Timeout)))
+                Poll::Ready(Some(Err(crate::Error::timeout())))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -271,7 +271,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             // inconsistent snapshot there atomically evicts every entry
             // missing from it (#271).
             if header.is_dump_interrupted() {
-                self.pending.push_back(Err(Error::DumpInterrupted));
+                self.pending.push_back(Err(Error::dump_interrupted()));
                 self.errored = true;
                 return;
             }

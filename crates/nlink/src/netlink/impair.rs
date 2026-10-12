@@ -411,7 +411,7 @@ impl PerPeerImpairer {
         }
         match conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await {
             Ok(()) => Ok(()),
-            Err(e) if e.is_not_found() || matches!(&e, Error::QdiscNotFound { .. }) => Ok(()),
+            Err(e) if e.is_not_found() || matches!(e.detail(), crate::netlink::ErrorDetail::QdiscNotFound { .. }) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -533,7 +533,7 @@ impl PerPeerImpairer {
                         // Destructive fallback.
                         return self.apply_as_reconcile(conn).await;
                     }
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "PerPeerImpairer::reconcile: root qdisc on ifindex {ifindex} is \
                          {conflict}; pass ReconcileOptions::with_fallback_to_apply(true) to \
                          rebuild"
@@ -702,7 +702,7 @@ impl PerPeerImpairer {
                     .await
                     .map_err(|e| {
                         if e.is_not_supported() {
-                            Error::NotSupported(format!(
+                            Error::not_supported(format!(
                                 "cls_flower not loaded in target namespace; \
                                  try `modprobe cls_flower` (underlying: {e})"
                             ))
@@ -1036,7 +1036,7 @@ impl PerPeerImpairer {
         .await
         .map_err(|e| {
             if e.is_not_supported() {
-                Error::NotSupported(format!(
+                Error::not_supported(format!(
                     "cls_flower not loaded in target namespace; \
                      try `modprobe cls_flower` (underlying: {e})"
                 ))
@@ -1100,19 +1100,19 @@ fn build_flower(classid: TcHandle, priority: FilterPriority, match_: &PeerMatch)
 fn parse_subnet(subnet: &str) -> Result<(IpAddr, u8)> {
     let (addr_part, prefix_part) = subnet
         .split_once('/')
-        .ok_or_else(|| Error::InvalidMessage(format!("invalid subnet (missing '/'): {subnet}")))?;
+        .ok_or_else(|| Error::invalid_message(format!("invalid subnet (missing '/'): {subnet}")))?;
 
     let addr: IpAddr = addr_part
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid IP address: {addr_part}")))?;
+        .map_err(|_| Error::invalid_message(format!("invalid IP address: {addr_part}")))?;
 
     let prefix: u8 = prefix_part
         .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid prefix length: {prefix_part}")))?;
+        .map_err(|_| Error::invalid_message(format!("invalid prefix length: {prefix_part}")))?;
 
     let max = if addr.is_ipv4() { 32 } else { 128 };
     if prefix > max {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "prefix length {prefix} exceeds maximum {max}"
         )));
     }

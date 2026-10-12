@@ -343,8 +343,8 @@ impl Connection<Nftables> {
     pub async fn add_chain(&self, chain: Chain) -> Result<()> {
         // Validate: base chains require type
         if chain.hook.is_some() && chain.chain_type.is_none() {
-            return Err(Error::InvalidMessage(
-                "base chains with a hook require chain_type".into(),
+            return Err(Error::invalid_message(
+                "base chains with a hook require chain_type",
             ));
         }
 
@@ -603,7 +603,7 @@ impl Connection<Nftables> {
         // enforce. The old `> 256` accepted a 256-byte name that the kernel
         // then rejected at apply time rather than at the API boundary (#211).
         if set.name.is_empty() || set.name.len() > 255 {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "set name must be 1-255 bytes, got {}",
                 set.name.len(),
             )));
@@ -792,7 +792,7 @@ impl Connection<Nftables> {
         let (_, payload) = self.nft_get_one(builder).await?;
         super::events::parse_gen(&payload)
             .map(|g| g.id)
-            .ok_or_else(|| Error::InvalidMessage("nftables: GETGEN answer without an id".into()))
+            .ok_or_else(|| Error::invalid_message("nftables: GETGEN answer without an id"))
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(method = "reset_object"))]
@@ -949,12 +949,12 @@ impl Connection<Nftables> {
     ///    `NLMSGERR` (non-ack) means the kernel rejected an op and
     ///    the batch will not commit, but nfnetlink keeps going and
     ///    reports every refused op. Read them all, then return
-    ///    [`Error::NftBatch`] naming each (#481).
+    ///    [`ErrorDetail::NftBatch`](crate::ErrorDetail::NftBatch) naming each (#481).
     /// 4. **Hard-cap with a 30s timeout** — pending Plan 171's
     ///    `Connection<P>`-wide default timeout. If the kernel
     ///    skips the end-seq ACK (unexpected on Linux ≥ 4.6 per
     ///    `net/netfilter/nfnetlink.c`) the call fails fast with
-    ///    `Error::Timeout` instead of hanging.
+    ///    `Error::timeout()` instead of hanging.
     async fn send_batch(&self, messages: Vec<Vec<u8>>) -> Result<()> {
         self.send_batch_at(messages, None).await
     }
@@ -992,7 +992,7 @@ impl Connection<Nftables> {
         // strictly below begin_seq") was simply false — and the recv loop's
         // `seq > end_seq { continue }` filter then *discarded mid-batch kernel
         // errors*. The kernel aborted the batch, its BATCH_END ACK never came,
-        // and the caller got an opaque 30s Error::Timeout with no clue what
+        // and the caller got an opaque 30s Error::timeout() with no clue what
         // failed. Worse, an inner seq that happened to equal end_seq had its
         // per-op ACK mistaken for the BATCH_END ACK, returning Ok(()) for a
         // batch that never committed (#199).
@@ -1042,7 +1042,7 @@ impl Connection<Nftables> {
 
         // (4) Wrap in the Connection-level operation timeout
         // (Plan 171 default: 30s). Surfaces a missing end-seq
-        // ACK as Error::Timeout instead of an indefinite hang.
+        // ACK as Error::timeout() instead of an indefinite hang.
         self.with_timeout(async {
             loop {
                 // nfnetlink processes the whole batch inside our sendmsg and
@@ -1055,7 +1055,7 @@ impl Connection<Nftables> {
                 } else {
                     match session.try_recv(self)? {
                         Some(data) => data,
-                        None => return Err(Error::NftBatch { failures }),
+                        None => return Err(Error::from(crate::netlink::ErrorDetail::NftBatch { failures })),
                     }
                 };
 
@@ -1097,7 +1097,7 @@ impl Connection<Nftables> {
                                 if failures.is_empty() {
                                     return Ok(());
                                 }
-                                return Err(Error::NftBatch { failures });
+                                return Err(Error::from(crate::netlink::ErrorDetail::NftBatch { failures }));
                             }
                             continue;
                         }
@@ -1117,7 +1117,7 @@ impl Connection<Nftables> {
                         };
                         failures.push(failure);
                         if seq == end_seq {
-                            return Err(Error::NftBatch { failures });
+                            return Err(Error::from(crate::netlink::ErrorDetail::NftBatch { failures }));
                         }
                         continue;
                     }
@@ -1129,7 +1129,7 @@ impl Connection<Nftables> {
                     // uncommitted batch as committed (#209). The only success
                     // signal is the BATCH_END ACK above.
                     if header.is_done() {
-                        return Err(Error::InvalidMessage(format!(
+                        return Err(Error::invalid_message(format!(
                             "nftables batch: unexpected NLMSG_DONE at seq {} \
                              (nfnetlink does not terminate batches with DONE)",
                             header.nlmsg_seq,
@@ -1180,8 +1180,8 @@ impl Connection<Nftables> {
                         Classification::Error(e) => return Err(e),
                         Classification::Done(result) => {
                             result?;
-                            return Err(Error::InvalidMessage(
-                                "nftables: GET answered with NLMSG_DONE and no reply".into(),
+                            return Err(Error::invalid_message(
+                                "nftables: GET answered with NLMSG_DONE and no reply",
                             ));
                         }
                         Classification::Data { payload } if payload.len() >= NFGENMSG_HDRLEN => {
@@ -1299,7 +1299,7 @@ impl Connection<Nftables> {
                     // frames are not left for the next request (#494).
                     if interrupted {
                         if ends_dump(header, seq) {
-                            return Err(Error::DumpInterrupted);
+                            return Err(Error::dump_interrupted());
                         }
                         continue;
                     }
@@ -1314,9 +1314,9 @@ impl Connection<Nftables> {
                     // (#267, #271).
                     match classify(header, payload, seq) {
                         Classification::SkipSeq | Classification::Ack => continue,
-                        Classification::Error(Error::DumpInterrupted) => {
+                        Classification::Error(e) if e.is_dump_interrupted() => {
                             if ends_dump(header, seq) {
-                                return Err(Error::DumpInterrupted);
+                                return Err(Error::dump_interrupted());
                             }
                             interrupted = true;
                         }
@@ -1361,7 +1361,7 @@ pub(crate) fn stamp_seq_pid(msg: &mut [u8], seq: u32, pid: u32) -> Result<()> {
     const PID_OFFSET: usize = 12;
 
     if msg.len() < NLMSG_HDRLEN {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "nftables batch: inner message is {} bytes, shorter than a \
              {NLMSG_HDRLEN}-byte netlink header",
             msg.len(),
@@ -2584,7 +2584,7 @@ pub(crate) fn check_elements(set: &Set, elements: &[SetElement], write: ElementW
         && set.flags.contains(SetFlags::INTERVAL)
         && set.key_type.is_host_order()
     {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "set {}: interval sets of {:?} keys are not modelled (host byte order)",
             set.name, set.key_type
         )));
@@ -2597,7 +2597,7 @@ pub(crate) fn check_elements(set: &Set, elements: &[SetElement], write: ElementW
         && (set.flags.contains(SetFlags::MAP) || set.flags.contains(SetFlags::OBJECT))
         && set.data_type.is_none()
     {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "set {}: a map's elements need its data type (`Set::map`)",
             set.name
         )));
@@ -3782,14 +3782,14 @@ impl FromNetlink for RuleInfo {
     /// and this streaming path share one parser.
     fn from_bytes(payload: &[u8]) -> crate::Result<Self> {
         if payload.len() < NFGENMSG_HDRLEN {
-            return Err(crate::Error::InvalidMessage(
-                "nft rule body shorter than nfgenmsg".into(),
+            return Err(crate::Error::invalid_message(
+                "nft rule body shorter than nfgenmsg",
             ));
         }
         let family = Family::from_u8(payload[0]).unwrap_or(Family::Inet);
         let attrs = &payload[NFGENMSG_HDRLEN..];
         parse_rule(attrs, family).ok_or_else(|| {
-            crate::Error::InvalidMessage("nft rule parse failed".into())
+            crate::Error::invalid_message("nft rule parse failed")
         })
     }
 }

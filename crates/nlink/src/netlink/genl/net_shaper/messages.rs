@@ -510,9 +510,9 @@ impl GenlMessage for NetShaperGroupRequest {
         // The group *reply* is a node binding (ifindex + handle),
         // parsed as a NetShaperReply by `group_shapers`. The request
         // type is never received.
-        Err(Error::InvalidMessage(
+        Err(Error::invalid_message(
             "NetShaperGroupRequest is a request type; the group reply is parsed as NetShaperReply"
-                .into(),
+                ,
         ))
     }
 }
@@ -594,8 +594,8 @@ impl GenlMessage for NetShaperCapsReply {
         // The reply struct is read-only — the kernel emits it; we
         // never send one. Send-path callers should use
         // `NetShaperCapsGetRequest` instead.
-        Err(Error::InvalidMessage(
-            "NetShaperCapsReply is read-only; build a NetShaperCapsGetRequest to query caps".into(),
+        Err(Error::invalid_message(
+            "NetShaperCapsReply is read-only; build a NetShaperCapsGetRequest to query caps",
         ))
     }
 

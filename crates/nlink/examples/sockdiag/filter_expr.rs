@@ -36,7 +36,7 @@ async fn main() -> nlink::netlink::Result<()> {
     };
 
     let expr = FilterExpr::parse(&expr_str)
-        .map_err(nlink::netlink::Error::InvalidMessage)?;
+        .map_err(nlink::netlink::Error::invalid_message)?;
 
     // Introspect the kernel-side lowering.
     let compiled = compile_filter(&expr);

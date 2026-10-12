@@ -218,7 +218,7 @@ async fn a_rejected_batch_reports_the_kernel_error_not_a_timeout() -> nlink::Res
 
     let err = inner.expect_err("the kernel should have rejected a rule in a missing chain");
     assert!(
-        !matches!(err, nlink::Error::Timeout),
+        !matches!(err.detail(), nlink::ErrorDetail::Timeout),
         "expected the kernel's error, got a timeout — the error was discarded: {err}",
     );
 

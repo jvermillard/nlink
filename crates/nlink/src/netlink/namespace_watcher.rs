@@ -102,7 +102,7 @@ impl NamespaceWatcher {
 
     /// Create a namespace watcher with custom configuration.
     pub async fn with_config(config: NamespaceWatcherConfig) -> Result<Self> {
-        let inotify = Inotify::init().map_err(Error::Io)?;
+        let inotify = Inotify::init().map_err(Error::from)?;
 
         let netns_path = Path::new(NETNS_DIR);
         let mut netns_wd = None;
@@ -116,20 +116,20 @@ impl NamespaceWatcher {
                     NETNS_DIR,
                     WatchMask::CREATE | WatchMask::DELETE | WatchMask::DELETE_SELF,
                 )
-                .map_err(Error::Io)?;
+                .map_err(Error::from)?;
             netns_wd = Some(wd);
         } else if config.watch_parent {
             // Directory doesn't exist - watch parent for its creation
             let wd = inotify
                 .watches()
                 .add(PARENT_DIR, WatchMask::CREATE | WatchMask::MOVED_TO)
-                .map_err(Error::Io)?;
+                .map_err(Error::from)?;
             parent_wd = Some(wd);
         }
 
         let stream = inotify
             .into_event_stream(vec![0u8; 4096])
-            .map_err(Error::Io)?;
+            .map_err(Error::from)?;
 
         Ok(Self {
             stream,
@@ -214,7 +214,7 @@ impl NamespaceWatcher {
                 // End-of-stream: the inotify fd was closed.
                 return Ok(None);
             };
-            let event = event.map_err(Error::Io)?;
+            let event = event.map_err(Error::from)?;
 
             let name = match event.name {
                 Some(name) => match name.into_string() {

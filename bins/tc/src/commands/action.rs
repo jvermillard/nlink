@@ -187,7 +187,7 @@ async fn add_typed_action(conn: &Connection<Route>, kind: &str, params: &[String
         "pedit" => dispatch!(PeditAction),
         "mpls" => dispatch!(MplsAction),
         "skbmod" => dispatch!(SkbmodAction),
-        other => Err(Error::InvalidMessage(format!(
+        other => Err(Error::invalid_message(format!(
             "tc action: unknown kind `{other}` (recognised: gact, mirred, police, vlan, skbedit, connmark, csum, sample, tunnel_key, nat, simple, bpf, ct, ctinfo, ife, gate, pedit, mpls, skbmod)"
         ))),
     }

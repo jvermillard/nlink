@@ -157,8 +157,8 @@ impl MacsecCmd {
                     }
                 }
             } else {
-                return Err(nlink::netlink::Error::InvalidMessage(
-                    "MACsec GENL family not available".into(),
+                return Err(nlink::netlink::Error::invalid_message(
+                    "MACsec GENL family not available",
                 ));
             }
         } else {
@@ -194,7 +194,7 @@ async fn mutate(conn: &Connection<Route>, verb: Verb, args: &MacsecSaArgs) -> Re
     let ifindex = conn
         .get_link_by_name(args.device.as_str())
         .await?
-        .ok_or_else(|| Error::InvalidMessage(format!("device `{}` not found", args.device)))?
+        .ok_or_else(|| Error::invalid_message(format!("device `{}` not found", args.device)))?
         .ifindex();
 
     let macsec = Connection::<Macsec>::new_async().await?;
@@ -203,7 +203,7 @@ async fn mutate(conn: &Connection<Route>, verb: Verb, args: &MacsecSaArgs) -> Re
     if let Some(an) = args.an
         && an > 3
     {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "macsec: association number must be 0-3 (got {an})"
         )));
     }
@@ -231,9 +231,9 @@ async fn mutate(conn: &Connection<Route>, verb: Verb, args: &MacsecSaArgs) -> Re
                 (Verb::Add, None) => macsec.add_rx_sc_by_index(ifindex, sci).await?,
                 (Verb::Del, None) => macsec.del_rx_sc_by_index(ifindex, sci).await?,
                 (Verb::Set, None) => {
-                    return Err(Error::InvalidMessage(
+                    return Err(Error::invalid_message(
                         "macsec set rx requires --an (RX secure-channels have no mutable state)"
-                            .into(),
+                            ,
                     ));
                 }
                 // With AN: operate on an RX SA within that SC.
@@ -269,7 +269,7 @@ fn build_sa(args: &MacsecSaArgs) -> Result<MacsecSaBuilder> {
     if let Some(ref id) = args.key_id {
         let bytes = parse_hex(id, "--key-id")?;
         let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "macsec: --key-id must be 16 bytes (32 hex chars), got {}",
                 bytes.len()
             ))
@@ -282,7 +282,7 @@ fn build_sa(args: &MacsecSaArgs) -> Result<MacsecSaBuilder> {
 fn require_an(args: &MacsecSaArgs) -> Result<u8> {
     let an = require(&args.an, "--an")?;
     if *an > 3 {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "macsec: association number must be 0-3 (got {an})"
         )));
     }
@@ -292,7 +292,7 @@ fn require_an(args: &MacsecSaArgs) -> Result<u8> {
 /// Require an optional CLI value, erroring with the flag name if absent.
 fn require<'a, T>(opt: &'a Option<T>, what: &str) -> Result<&'a T> {
     opt.as_ref()
-        .ok_or_else(|| Error::InvalidMessage(format!("macsec: {what} is required here")))
+        .ok_or_else(|| Error::invalid_message(format!("macsec: {what} is required here")))
 }
 
 /// Parse an SCI: hex (`0x…`) or decimal `u64`.
@@ -302,7 +302,7 @@ fn parse_sci(s: &str) -> Result<u64> {
     } else {
         s.parse::<u64>()
     };
-    parsed.map_err(|_| Error::InvalidMessage(format!("macsec: invalid SCI `{s}`")))
+    parsed.map_err(|_| Error::invalid_message(format!("macsec: invalid SCI `{s}`")))
 }
 
 /// Parse an even-length hex string into bytes.
@@ -312,7 +312,7 @@ fn parse_hex(s: &str, what: &str) -> Result<Vec<u8>> {
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
     if !s.len().is_multiple_of(2) {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "macsec: {what} must have an even number of hex digits"
         )));
     }
@@ -320,7 +320,7 @@ fn parse_hex(s: &str, what: &str) -> Result<Vec<u8>> {
         .step_by(2)
         .map(|i| {
             u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|_| Error::InvalidMessage(format!("macsec: invalid hex in {what}")))
+                .map_err(|_| Error::invalid_message(format!("macsec: invalid hex in {what}")))
         })
         .collect()
 }

@@ -240,8 +240,8 @@ impl ClassCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         if dev.is_empty() {
-            return Err(nlink::netlink::Error::InvalidMessage(
-                "device name required".into(),
+            return Err(nlink::netlink::Error::invalid_message(
+                "device name required",
             ));
         }
 
@@ -251,7 +251,7 @@ impl ClassCmd {
             .get_link_by_name(dev)
             .await?
             .ok_or_else(|| {
-                nlink::netlink::Error::InvalidMessage(format!("device not found: {dev}"))
+                nlink::netlink::Error::invalid_message(format!("device not found: {dev}"))
             })?
             .ifindex();
 
@@ -305,10 +305,10 @@ impl ClassCmd {
 fn parse_handles(parent: &str, classid: &str) -> Result<(TcHandle, TcHandle)> {
     let parent = parent
         .parse::<TcHandle>()
-        .map_err(|e| Error::InvalidMessage(format!("invalid parent `{parent}`: {e}")))?;
+        .map_err(|e| Error::invalid_message(format!("invalid parent `{parent}`: {e}")))?;
     let classid = classid
         .parse::<TcHandle>()
-        .map_err(|e| Error::InvalidMessage(format!("invalid classid `{classid}`: {e}")))?;
+        .map_err(|e| Error::invalid_message(format!("invalid classid `{classid}`: {e}")))?;
     Ok((parent, classid))
 }
 
@@ -338,7 +338,7 @@ async fn dispatch_class(
         "hfsc" => dispatch!(HfscClassConfig),
         "drr" => dispatch!(DrrClassConfig),
         "qfq" => dispatch!(QfqClassConfig),
-        other => Err(Error::InvalidMessage(format!(
+        other => Err(Error::invalid_message(format!(
             "tc class: unknown kind `{other}` (recognised: htb, hfsc, drr, qfq)"
         ))),
     }
@@ -366,7 +366,7 @@ fn parse_handle_filter(s: Option<&str>, what: &str) -> Result<Option<TcHandle>> 
     match s {
         None => Ok(None),
         Some(v) => tc_handle::parse(v).map(TcHandle::from_raw).map(Some).ok_or_else(|| {
-            Error::InvalidMessage(format!(
+            Error::invalid_message(format!(
                 "tc class show: invalid {what} `{v}` (expected a tc handle like `1:10`)"
             ))
         }),

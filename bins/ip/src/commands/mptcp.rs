@@ -246,7 +246,7 @@ async fn add_endpoint(conn: &Connection<Mptcp>, args: EndpointAddArgs) -> Result
         let ifindex = route
             .get_link_by_name(dev)
             .await?
-            .ok_or_else(|| nlink::Error::InterfaceNotFound { name: dev.clone() })?
+            .ok_or_else(|| nlink::Error::from(nlink::ErrorDetail::InterfaceNotFound { name: dev.clone() }))?
             .ifindex();
         builder = builder.ifindex(ifindex);
     }
@@ -318,8 +318,8 @@ async fn set_limits(
     add_addr_accepted: Option<u32>,
 ) -> Result<()> {
     if subflows.is_none() && add_addr_accepted.is_none() {
-        return Err(Error::InvalidMessage(
-            "at least one limit must be specified".into(),
+        return Err(Error::invalid_message(
+            "at least one limit must be specified",
         ));
     }
 

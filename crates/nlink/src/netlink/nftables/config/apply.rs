@@ -137,7 +137,7 @@ impl NftablesDiff {
         // A table flag change the kernel refuses on a live table fails
         // here, before anything has changed (#479).
         if let Some((family, name, why)) = self.tables_refused.first() {
-            return Err(Error::NotSupported(format!(
+            return Err(Error::not_supported(format!(
                 "table {family:?} {name}: {why}. Delete the table and apply again to \
                  recreate it with the new flags."
             )));
@@ -145,7 +145,7 @@ impl NftablesDiff {
         // A refused chain recreate fails here, before anything has changed
         // (#478).
         if let Some(refused) = self.chains_to_recreate.iter().find(|r| r.is_refused()) {
-            return Err(Error::NotSupported(format!(
+            return Err(Error::not_supported(format!(
                 "chain {}/{}: {} cannot be changed on the live chain, and recreating it would \
                  delete rules nlink did not write: {}. Remove them, or declare the chain \
                  exclusive, and apply again.",

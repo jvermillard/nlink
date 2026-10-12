@@ -235,7 +235,7 @@ impl RouteCmd {
             (None, 0u8, is_v6)
         } else {
             let (addr, prefix) = parse_prefix(destination).map_err(|e| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                nlink::netlink::Error::invalid_message(format!("invalid destination: {}", e))
             })?;
             let is_v6 = addr.is_ipv6();
             (Some(addr), prefix, is_v6)
@@ -262,7 +262,7 @@ impl RouteCmd {
 
             if let Some(gw) = via {
                 let gw_addr: Ipv6Addr = gw.parse().map_err(|_| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
+                    nlink::netlink::Error::invalid_message(format!("invalid gateway: {}", gw))
                 })?;
                 route = route.gateway(gw_addr);
             }
@@ -273,7 +273,7 @@ impl RouteCmd {
 
             if let Some(src_str) = src {
                 let src_addr: Ipv6Addr = src_str.parse().map_err(|_| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
+                    nlink::netlink::Error::invalid_message(format!("invalid source: {}", src_str))
                 })?;
                 route = route.prefsrc(src_addr);
             }
@@ -318,7 +318,7 @@ impl RouteCmd {
 
             if let Some(gw) = via {
                 let gw_addr: Ipv4Addr = gw.parse().map_err(|_| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
+                    nlink::netlink::Error::invalid_message(format!("invalid gateway: {}", gw))
                 })?;
                 route = route.gateway(gw_addr);
             }
@@ -329,7 +329,7 @@ impl RouteCmd {
 
             if let Some(src_str) = src {
                 let src_addr: Ipv4Addr = src_str.parse().map_err(|_| {
-                    nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
+                    nlink::netlink::Error::invalid_message(format!("invalid source: {}", src_str))
                 })?;
                 route = route.prefsrc(src_addr);
             }
@@ -374,7 +374,7 @@ impl RouteCmd {
             conn.del_route(route).await
         } else {
             let (addr, prefix) = parse_prefix(destination).map_err(|e| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                nlink::netlink::Error::invalid_message(format!("invalid destination: {}", e))
             })?;
 
             match addr {
@@ -400,7 +400,7 @@ impl RouteCmd {
         use nlink::util::addr::parse_prefix;
 
         let (dst_addr, prefix_len) = parse_prefix(destination).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+            nlink::netlink::Error::invalid_message(format!("invalid destination: {}", e))
         })?;
 
         // Ask the kernel which route it would actually use for this
@@ -422,7 +422,7 @@ fn parse_mpls_encap(labels: &str) -> Result<MplsEncap> {
     let mut encap = MplsEncap::new();
     for label_str in labels.split(',') {
         let label: u32 = label_str.trim().parse().map_err(|_| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid MPLS label: {}", label_str))
+            nlink::netlink::Error::invalid_message(format!("invalid MPLS label: {}", label_str))
         })?;
         encap = encap.label(label);
     }
@@ -434,7 +434,7 @@ fn parse_srv6_encap(segments: &str) -> Result<Srv6Encap> {
     let mut encap = Srv6Encap::encap();
     for seg_str in segments.split(',') {
         let addr: Ipv6Addr = seg_str.trim().parse().map_err(|_| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid SRv6 segment: {}", seg_str))
+            nlink::netlink::Error::invalid_message(format!("invalid SRv6 segment: {}", seg_str))
         })?;
         encap = encap.segment(addr);
     }

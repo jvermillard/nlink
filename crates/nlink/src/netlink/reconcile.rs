@@ -40,7 +40,7 @@ pub struct ExecOptions {
     /// stopping at it.
     pub continue_on_error: bool,
     /// Diff again after the apply, and fail with
-    /// [`Error::NotConverged`] if anything is
+    /// [`ErrorDetail::NotConverged`](crate::ErrorDetail::NotConverged) if anything is
     /// left (#518). Ignored on a dry run.
     pub verify: bool,
 }

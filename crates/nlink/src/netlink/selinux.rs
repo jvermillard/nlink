@@ -161,11 +161,11 @@ impl Connection<SELinux> {
             match nlmsg_type {
                 SELNL_MSG_SETENFORCE => {
                     if payload.len() < std::mem::size_of::<SelnlMsgSetenforce>() {
-                        return Err(Error::InvalidMessage("setenforce payload too short".into()));
+                        return Err(Error::invalid_message("setenforce payload too short"));
                     }
 
                     let (msg, _) = SelnlMsgSetenforce::ref_from_prefix(payload)
-                        .map_err(|_| Error::InvalidMessage("failed to parse setenforce".into()))?;
+                        .map_err(|_| Error::invalid_message("failed to parse setenforce"))?;
 
                     return Ok(SELinuxEvent::SetEnforce {
                         enforcing: msg.val != 0,
@@ -173,11 +173,11 @@ impl Connection<SELinux> {
                 }
                 SELNL_MSG_POLICYLOAD => {
                     if payload.len() < std::mem::size_of::<SelnlMsgPolicyload>() {
-                        return Err(Error::InvalidMessage("policyload payload too short".into()));
+                        return Err(Error::invalid_message("policyload payload too short"));
                     }
 
                     let (msg, _) = SelnlMsgPolicyload::ref_from_prefix(payload)
-                        .map_err(|_| Error::InvalidMessage("failed to parse policyload".into()))?;
+                        .map_err(|_| Error::invalid_message("failed to parse policyload"))?;
 
                     return Ok(SELinuxEvent::PolicyLoad { seqno: msg.seqno });
                 }

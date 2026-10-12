@@ -754,7 +754,7 @@ async fn boundaries() -> nlink::Result<()> {
     // the kernel), and what it takes is created, a Unicode space included.
     for name in ["", ".", "..", "a/b", "a b", "a:b", "à0", "sixteen-bytes-xx"] {
         let err = conn.add_link(DummyLink::new(name)).await.expect_err(name);
-        assert!(matches!(err, nlink::Error::Interface(_)), "{name:?}: {err}");
+        assert!(matches!(err.detail(), nlink::ErrorDetail::Interface(_)), "{name:?}: {err}");
         let declared = NetworkConfig::new().link(name, |l| l.dummy());
         assert!(declared.validate().is_err(), "validate() took {name:?}");
     }
@@ -899,7 +899,7 @@ async fn flower_lines_install_the_same_through_tc_and_nlink() -> nlink::Result<(
     let dump = |ns: &TestNamespace| -> nlink::Result<Vec<serde_json::Value>> {
         let out = ns.exec("tc", &["-j", "filter", "show", "dev", "d0", "parent", "1:"])?;
         let all: serde_json::Value =
-            serde_json::from_str(&out).map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+            serde_json::from_str(&out).map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
         // The per-priority chain heads carry no options; compare filters.
         Ok(all
             .as_array()

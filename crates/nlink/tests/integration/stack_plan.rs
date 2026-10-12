@@ -72,7 +72,7 @@ async fn a_stack_plan_applies_what_it_planned_and_verify_sees_the_rest() -> nlin
             .apply(spec(), ExecOptions::new().with_verify(true))
             .await
             .expect_err("the stray address is left");
-        let nlink::Error::StackNotConverged { remaining } = &err else {
+        let nlink::ErrorDetail::StackNotConverged { remaining } = err.detail() else {
             panic!("not StackNotConverged: {err}");
         };
         assert!(remaining.to_string().contains("10.64.0.9"), "{remaining}");

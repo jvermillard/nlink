@@ -52,7 +52,7 @@ impl TryFrom<u32> for InterfaceType {
             10 => Ok(Self::P2pDevice),
             11 => Ok(Self::Ocb),
             12 => Ok(Self::Nan),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown nl80211 interface type: {value}"
             ))),
         }
@@ -88,7 +88,7 @@ impl TryFrom<u32> for BssStatus {
             0 => Ok(Self::Authenticated),
             1 => Ok(Self::Associated),
             2 => Ok(Self::IbssJoined),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown BSS status: {value}"
             ))),
         }
@@ -110,7 +110,7 @@ impl TryFrom<u32> for PowerSaveState {
         match value {
             0 => Ok(Self::Disabled),
             1 => Ok(Self::Enabled),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown power save state: {value}"
             ))),
         }
@@ -184,7 +184,7 @@ impl TryFrom<u32> for ChannelWidth {
             11 => Ok(Self::Width8),
             12 => Ok(Self::Width16),
             13 => Ok(Self::Width320),
-            _ => Err(Error::InvalidAttribute(format!(
+            _ => Err(Error::invalid_attribute(format!(
                 "unknown channel width: {value}"
             ))),
         }

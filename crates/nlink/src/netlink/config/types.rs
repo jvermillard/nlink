@@ -105,7 +105,7 @@ impl NetworkConfig {
     #[cfg(feature = "serde")]
     pub fn from_json_str(s: &str) -> crate::netlink::Result<Self> {
         let cfg: Self = serde_json::from_str(s).map_err(|e| {
-            crate::netlink::Error::InvalidMessage(format!("config JSON parse: {e}"))
+            crate::netlink::Error::invalid_message(format!("config JSON parse: {e}"))
         })?;
         cfg.validate()?;
         Ok(cfg)
@@ -675,7 +675,7 @@ impl NetworkConfig {
     #[cfg(feature = "serde")]
     pub fn to_json_string(&self) -> crate::netlink::Result<String> {
         serde_json::to_string(self).map_err(|e| {
-            crate::netlink::Error::InvalidMessage(format!("config JSON serialize: {e}"))
+            crate::netlink::Error::invalid_message(format!("config JSON serialize: {e}"))
         })
     }
 
@@ -684,7 +684,7 @@ impl NetworkConfig {
     #[cfg(feature = "serde")]
     pub fn to_json_string_pretty(&self) -> crate::netlink::Result<String> {
         serde_json::to_string_pretty(self).map_err(|e| {
-            crate::netlink::Error::InvalidMessage(format!("config JSON serialize: {e}"))
+            crate::netlink::Error::invalid_message(format!("config JSON serialize: {e}"))
         })
     }
 

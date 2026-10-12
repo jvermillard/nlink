@@ -88,10 +88,10 @@ impl RtMsg {
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
         Self::ref_from_prefix(data)
             .map(|(r, _)| r)
-            .map_err(|_| Error::Truncated {
+            .map_err(|_| Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: Self::SIZE,
                 actual: data.len(),
-            })
+            }))
     }
 }
 

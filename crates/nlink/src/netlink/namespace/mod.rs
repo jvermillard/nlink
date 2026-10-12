@@ -165,7 +165,7 @@ impl<'a> NamespaceSpec<'a> {
         match self {
             NamespaceSpec::Default => {
                 let mut cmd = cmd;
-                cmd.spawn().map_err(Error::Io)
+                cmd.spawn().map_err(Error::from)
             }
             NamespaceSpec::Named(name) => spawn(name, cmd),
             NamespaceSpec::Path(path) => spawn_path(path, cmd),
@@ -185,8 +185,8 @@ impl<'a> NamespaceSpec<'a> {
                 let mut cmd = cmd;
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::piped());
-                let child = cmd.spawn().map_err(Error::Io)?;
-                child.wait_with_output().map_err(Error::Io)
+                let child = cmd.spawn().map_err(Error::from)?;
+                child.wait_with_output().map_err(Error::from)
             }
             NamespaceSpec::Named(name) => spawn_output(name, cmd),
             NamespaceSpec::Path(path) => spawn_output_path(path, cmd),
@@ -250,7 +250,7 @@ impl<'a> NamespaceSpec<'a> {
         match self {
             NamespaceSpec::Default => {
                 let mut cmd = cmd;
-                cmd.spawn().map_err(Error::Io)
+                cmd.spawn().map_err(Error::from)
             }
             NamespaceSpec::Named(name) => spawn_with_etc(name, cmd),
             NamespaceSpec::Path(path) => match self.etc_overlay_name() {
@@ -277,8 +277,8 @@ impl<'a> NamespaceSpec<'a> {
                 let mut cmd = cmd;
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::piped());
-                let child = cmd.spawn().map_err(Error::Io)?;
-                child.wait_with_output().map_err(Error::Io)
+                let child = cmd.spawn().map_err(Error::from)?;
+                child.wait_with_output().map_err(Error::from)
             }
             NamespaceSpec::Named(name) => spawn_output_with_etc(name, cmd),
             NamespaceSpec::Path(path) => match self.etc_overlay_name() {
@@ -320,7 +320,7 @@ pub fn validate_name(name: &str) -> Result<()> {
         None
     };
     match reason {
-        Some(reason) => Err(Error::InvalidMessage(format!(
+        Some(reason) => Err(Error::invalid_message(format!(
             "invalid namespace name {name:?}: it {reason}"
         ))),
         None => Ok(()),
@@ -340,7 +340,7 @@ fn named_path(name: &str) -> Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -420,7 +420,7 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -465,7 +465,7 @@ pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -489,16 +489,16 @@ pub fn open(name: &str) -> Result<NamespaceFd> {
 /// Map a failed open of a namespace path to a classifiable error (#184):
 /// ENOENT becomes `Error::NamespaceNotFound` — matching `is_not_found()`
 /// and carrying the path in `name`, the same shape [`delete_path`] uses —
-/// and everything else passes through as `Error::Io`, preserving the raw
+/// and everything else passes through as `Error::from`, preserving the raw
 /// errno so `is_permission_denied()` & co. keep working. Never wrap these
 /// opens in stringly `InvalidMessage`: it defeats every recovery predicate.
 pub(crate) fn namespace_open_error(path: &Path, e: std::io::Error) -> Error {
     if e.kind() == std::io::ErrorKind::NotFound {
-        Error::NamespaceNotFound {
+        Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
             name: path.display().to_string(),
-        }
+        })
     } else {
-        Error::Io(e)
+        Error::from(e)
     }
 }
 
@@ -506,9 +506,9 @@ pub(crate) fn namespace_open_error(path: &Path, e: std::io::Error) -> Error {
 ///
 /// # Errors
 ///
-/// Returns [`Error::NamespaceNotFound`] if the path doesn't exist
+/// Returns [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) if the path doesn't exist
 /// (matchable via [`Error::is_not_found`]); other open failures surface
-/// as [`Error::Io`] with their errno intact (e.g. for
+/// as [`Error::from`] with their errno intact (e.g. for
 /// [`Error::is_permission_denied`]).
 pub fn open_path<P: AsRef<Path>>(path: P) -> Result<NamespaceFd> {
     let file =
@@ -575,7 +575,7 @@ impl AsFd for NamespaceFd {
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -601,12 +601,12 @@ pub fn enter(name: &str) -> Result<NamespaceGuard> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::NamespaceNotFound`] if the path doesn't exist; other
-/// failures (open or `setns`) surface as [`Error::Io`] with errno intact.
+/// Returns [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) if the path doesn't exist; other
+/// failures (open or `setns`) surface as [`Error::from`] with errno intact.
 pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
     // Save the current namespace
     let original = File::open("/proc/thread-self/ns/net")
-        .map_err(|e| Error::InvalidMessage(format!("cannot open current namespace: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("cannot open current namespace: {}", e)))?;
 
     // Open and enter the target namespace
     let target =
@@ -617,7 +617,7 @@ pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
     // specifies we're switching the network namespace.
     let ret = unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) };
     if ret < 0 {
-        return Err(Error::Io(std::io::Error::last_os_error()));
+        return Err(Error::from(std::io::Error::last_os_error()));
     }
 
     Ok(NamespaceGuard {
@@ -673,7 +673,7 @@ impl NamespaceGuard {
         // (opened from /proc/thread-self/ns/net when the guard was created).
         let ret = unsafe { libc::setns(original.as_raw_fd(), libc::CLONE_NEWNET) };
         if ret < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -724,7 +724,7 @@ pub fn exists(name: &str) -> bool {
 /// different path than the one on disk). Errors only on an interior NUL.
 fn path_to_cstring(path: &Path) -> Result<std::ffi::CString> {
     std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| Error::InvalidMessage(format!("invalid namespace path '{}'", path.display())))
+        .map_err(|_| Error::invalid_message(format!("invalid namespace path '{}'", path.display())))
 }
 
 /// `nsfs` superblock magic (`NSFS_MAGIC` from `<linux/magic.h>` — ASCII
@@ -863,9 +863,9 @@ fn live_path_in(run_dir: &Path, ns_name: &str) -> Result<PathBuf> {
             "stale ip-netns marker: file present but no namespace mounted over it"
         );
     }
-    Err(Error::NamespaceNotFound {
+    Err(Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
         name: ns_name.to_string(),
-    })
+    }))
 }
 
 /// Create a named network namespace.
@@ -967,7 +967,7 @@ pub fn create_with(name: &str, opts: CreateOptions) -> Result<()> {
     let path = named_path(name)?;
     if opts.reclaim_stale && path.exists() && !is_namespace_path(&path) {
         std::fs::remove_file(&path)
-            .map_err(|e| Error::InvalidMessage(format!("cannot remove stale marker {}: {e}", path.display())))?;
+            .map_err(|e| Error::invalid_message(format!("cannot remove stale marker {}: {e}", path.display())))?;
     }
     let tag = match &opts.owner {
         Some(owner) => Some(write_owner_tag(name, owner)?),
@@ -989,13 +989,13 @@ pub fn create_with(name: &str, opts: CreateOptions) -> Result<()> {
 fn write_owner_tag(name: &str, owner: &str) -> Result<PathBuf> {
     let tag = owner_tag_path(name)?;
     std::fs::create_dir_all(OWNER_TAG_DIR)
-        .map_err(|e| Error::InvalidMessage(format!("cannot create {OWNER_TAG_DIR}: {e}")))?;
+        .map_err(|e| Error::invalid_message(format!("cannot create {OWNER_TAG_DIR}: {e}")))?;
     let tmp = tag.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, owner)
         .and_then(|()| std::fs::rename(&tmp, &tag))
         .map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            Error::InvalidMessage(format!("cannot write owner tag {}: {e}", tag.display()))
+            Error::invalid_message(format!("cannot write owner tag {}: {e}", tag.display()))
         })?;
     Ok(tag)
 }
@@ -1007,7 +1007,7 @@ pub fn owner_of(name: &str) -> Result<Option<String>> {
     match std::fs::read_to_string(owner_tag_path(name)?) {
         Ok(owner) => Ok(Some(owner)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Error::Io(e)),
+        Err(e) => Err(Error::from(e)),
     }
 }
 
@@ -1019,7 +1019,7 @@ pub fn list_owned(owner: &str) -> Result<Vec<String>> {
     let entries = match std::fs::read_dir(OWNER_TAG_DIR) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::Io(e)),
+        Err(e) => return Err(Error::from(e)),
     };
     let mut names: Vec<String> = entries
         .flatten()
@@ -1038,7 +1038,7 @@ pub fn remove_owner_tag(name: &str) -> Result<()> {
     match std::fs::remove_file(owner_tag_path(name)?) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(Error::Io(e)),
+        Err(e) => Err(Error::from(e)),
     }
 }
 
@@ -1048,7 +1048,7 @@ pub fn remove_owner_tag(name: &str) -> Result<()> {
 /// [`Error::is_already_exists`] — the detect-stale-and-retry loop around
 /// [`is_namespace_path`] depends on that.
 fn already_exists_error(path: &Path) -> Error {
-    Error::Io(std::io::Error::new(
+    Error::from(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         format!("namespace '{}' already exists", path.display()),
     ))
@@ -1123,7 +1123,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
         Some(parent) if !parent.exists() => {
             let topmost = topmost_missing_ancestor(parent);
             std::fs::create_dir_all(parent).map_err(|e| {
-                Error::InvalidMessage(format!("cannot create {}: {}", parent.display(), e))
+                Error::invalid_message(format!("cannot create {}: {}", parent.display(), e))
             })?;
             Some((parent.to_path_buf(), topmost))
         }
@@ -1149,7 +1149,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 already_exists_error(&ns_path)
             } else {
-                Error::InvalidMessage(format!(
+                Error::invalid_message(format!(
                     "cannot create namespace file '{}': {}",
                     ns_path.display(),
                     e
@@ -1189,7 +1189,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
         Err(e) => {
             let _ = std::fs::remove_file(&ns_path);
             rollback_dirs(&created_dirs);
-            return Err(Error::Io(e));
+            return Err(Error::from(e));
         }
     };
 
@@ -1208,7 +1208,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
             // an empty netns marker.
             let _ = std::fs::remove_file(&ns_path);
             rollback_dirs(&created_dirs);
-            Err(Error::InvalidMessage(format!(
+            Err(Error::invalid_message(format!(
                 "namespace '{}' worker thread panicked during create",
                 ns_path.display()
             )))
@@ -1226,7 +1226,7 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
     // thread's namespace, breaking subsequent namespace operations.
     let original_ns = File::open("/proc/thread-self/ns/net").map_err(|e| {
         let _ = std::fs::remove_file(ns_path);
-        Error::InvalidMessage(format!("cannot save current namespace: {}", e))
+        Error::invalid_message(format!("cannot save current namespace: {}", e))
     })?;
 
     // Create a new network namespace
@@ -1236,7 +1236,7 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
     if ret < 0 {
         // Clean up the file we created
         let _ = std::fs::remove_file(ns_path);
-        return Err(Error::Io(std::io::Error::last_os_error()));
+        return Err(Error::from(std::io::Error::last_os_error()));
     }
 
     // Bind mount the namespace to the file
@@ -1263,7 +1263,7 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
         // Try to restore original namespace before returning
         unsafe { libc::setns(original_ns.as_raw_fd(), libc::CLONE_NEWNET) };
         let _ = std::fs::remove_file(ns_path);
-        return Err(Error::Io(err));
+        return Err(Error::from(err));
     }
 
     // Restore the calling thread to its original namespace.
@@ -1279,7 +1279,7 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
             unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
         }
         let _ = std::fs::remove_file(ns_path);
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "namespace '{}' failed to restore original namespace: {}",
             name, restore_err
         )));
@@ -1341,16 +1341,16 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
     let ns_path = path.as_ref();
 
     if !ns_path.exists() {
-        return Err(Error::NamespaceNotFound {
+        return Err(Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
             name: ns_path.display().to_string(),
-        });
+        }));
     }
     // A namespace is a file — the nsfs inode bind-mounted over a marker, or
     // a stale marker. Lazily unmounting a directory detaches everything
     // mounted under it (#463).
     let is_file = std::fs::symlink_metadata(ns_path).is_ok_and(|m| m.file_type().is_file());
     if !is_file {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "refusing to delete {}: not a namespace file",
             ns_path.display()
         )));
@@ -1366,13 +1366,13 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
         let err = std::io::Error::last_os_error();
         // EINVAL means it's not a mount point (maybe already unmounted)
         if err.raw_os_error() != Some(libc::EINVAL) {
-            return Err(Error::Io(err));
+            return Err(Error::from(err));
         }
     }
 
     // Remove the file
     std::fs::remove_file(ns_path)
-        .map_err(|e| Error::InvalidMessage(format!("cannot remove namespace file: {}", e)))?;
+        .map_err(|e| Error::invalid_message(format!("cannot remove namespace file: {}", e)))?;
 
     Ok(())
 }
@@ -1469,13 +1469,13 @@ pub fn list() -> Result<Vec<String>> {
             return Ok(Vec::new());
         }
         Err(e) => {
-            return Err(Error::Io(e));
+            return Err(Error::from(e));
         }
     };
 
     let mut names = Vec::new();
     for entry in dir {
-        let entry = entry.map_err(Error::Io)?;
+        let entry = entry.map_err(Error::from)?;
         let name = entry.file_name().to_string_lossy().to_string();
         if name != "." && name != ".." {
             names.push(name);
@@ -1527,16 +1527,16 @@ where
         // which exits right after `f` returns.
         let ret = unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) };
         if ret < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+            return Err(Error::from(std::io::Error::last_os_error()));
         }
         f()
     })
-        .map_err(Error::Io)?
+        .map_err(Error::from)?
         .join();
 
     match thread_result {
         Ok(result) => result,
-        Err(_panic) => Err(Error::InvalidMessage(
+        Err(_panic) => Err(Error::invalid_message(
             "namespace worker thread panicked".to_string(),
         )),
     }
@@ -1549,7 +1549,7 @@ where
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1576,7 +1576,7 @@ pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1602,7 +1602,7 @@ pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1677,7 +1677,7 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1723,7 +1723,7 @@ pub fn spawn_output(ns_name: &str, mut cmd: std::process::Command) -> Result<std
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn(ns_name, cmd)?;
-    child.wait_with_output().map_err(Error::Io)
+    child.wait_with_output().map_err(Error::from)
 }
 
 /// Spawn a process inside a namespace specified by path.
@@ -1855,7 +1855,7 @@ fn spawn_path_inner(
         user.install(&mut cmd);
     }
 
-    let child = cmd.spawn().map_err(Error::Io)?;
+    let child = cmd.spawn().map_err(Error::from)?;
     drop(ns_fd);
     Ok(child)
 }
@@ -1870,7 +1870,7 @@ pub fn spawn_output_path<P: AsRef<Path>>(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn_path(path, cmd)?;
-    child.wait_with_output().map_err(Error::Io)
+    child.wait_with_output().map_err(Error::from)
 }
 
 // ============================================================================
@@ -1889,12 +1889,12 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
     let entries = match std::fs::read_dir(&etc_netns) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::Io(e)),
+        Err(e) => return Err(Error::from(e)),
     };
 
     let mut binds = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(Error::Io)?;
+        let entry = entry.map_err(Error::from)?;
         let file_name = entry.file_name();
         let src = entry.path();
         let dst = Path::new("/etc").join(&file_name);
@@ -1963,7 +1963,7 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 ///
 /// # Errors
 ///
-/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -2009,7 +2009,7 @@ pub fn spawn_output_with_etc(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn_with_etc(ns_name, cmd)?;
-    child.wait_with_output().map_err(Error::Io)
+    child.wait_with_output().map_err(Error::from)
 }
 
 /// The `mount(2)` flags a replacement sysfs must carry so the kernel
@@ -2069,7 +2069,7 @@ fn spawn_path_with_etc_inner(
     // Pre-compute ALL data before fork — no allocations in pre_exec.
     let bind_mounts = prepare_etc_binds(ns_name)?;
     let ns_name_c = std::ffi::CString::new(ns_name)
-        .map_err(|_| Error::InvalidMessage("null byte in namespace name".into()))?;
+        .map_err(|_| Error::invalid_message("null byte in namespace name"))?;
 
     // Pre-computed string literals for syscalls (avoid allocation after fork).
     let c_root = std::ffi::CString::new("/").unwrap();
@@ -2187,7 +2187,7 @@ fn spawn_path_with_etc_inner(
         user.install(&mut cmd);
     }
 
-    let child = cmd.spawn().map_err(Error::Io)?;
+    let child = cmd.spawn().map_err(Error::from)?;
     drop(ns_fd);
     Ok(child)
 }
@@ -2203,7 +2203,7 @@ pub fn spawn_output_path_with_etc<P: AsRef<Path>>(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn_path_with_etc(path, ns_name, cmd)?;
-    child.wait_with_output().map_err(Error::Io)
+    child.wait_with_output().map_err(Error::from)
 }
 
 #[cfg(test)]
@@ -2403,7 +2403,7 @@ mod tests {
 
         let err = stale.expect_err("a plain file is not a namespace");
         assert!(err.is_not_found(), "got unclassifiable error: {err}");
-        assert!(matches!(&err, Error::NamespaceNotFound { name } if name == "stale"));
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::NamespaceNotFound { name } if name == "stale"));
         let err = missing.expect_err("an absent marker is not a namespace");
         assert!(err.is_not_found(), "got unclassifiable error: {err}");
     }

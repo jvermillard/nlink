@@ -24,7 +24,7 @@ const ATTRS_START: usize = 20;
 
 /// One operation of an nftables batch that the kernel refused.
 ///
-/// Carried by [`Error::NftBatch`](crate::Error::NftBatch), one per refused
+/// Carried by [`ErrorDetail::NftBatch`](crate::ErrorDetail::NftBatch), one per refused
 /// operation, in batch order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

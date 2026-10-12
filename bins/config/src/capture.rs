@@ -336,7 +336,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
             println!(
                 "{}",
                 serde_yaml::to_string(&config).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!(
+                    nlink::netlink::Error::invalid_message(format!(
                         "YAML serialization failed: {}",
                         e
                     ))
@@ -347,7 +347,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&config).map_err(|e| {
-                    nlink::netlink::Error::InvalidMessage(format!(
+                    nlink::netlink::Error::invalid_message(format!(
                         "JSON serialization failed: {}",
                         e
                     ))

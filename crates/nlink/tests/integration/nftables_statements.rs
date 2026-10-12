@@ -860,7 +860,7 @@ async fn statements_nft_installs_decode_typed() -> nlink::Result<()> {
         }
     }";
     let file = std::env::temp_dir().join(format!("nlink-decode-{}.nft", std::process::id()));
-    std::fs::write(&file, script).map_err(nlink::Error::Io)?;
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
     let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
     let _ = std::fs::remove_file(&file);
     installed?;
@@ -903,10 +903,10 @@ fn arrivals(
     let socket = crate::common::traffic::in_ns(&pair.b, move || {
         UdpSocket::bind((Ipv4Addr::UNSPECIFIED, listen_port))
     })
-    .map_err(nlink::Error::Io)?;
+    .map_err(nlink::Error::from)?;
     socket
         .set_read_timeout(Some(Duration::from_millis(500)))
-        .map_err(nlink::Error::Io)?;
+        .map_err(nlink::Error::from)?;
     send_udp(&pair.a, &[SocketAddr::from((pair.b_addr, send_port))], count);
     let mut buf = [0u8; 64];
     let mut from = Vec::new();

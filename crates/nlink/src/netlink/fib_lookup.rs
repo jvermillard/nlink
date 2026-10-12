@@ -407,7 +407,7 @@ impl Connection<FibLookup> {
             loop {
                 let data = session.recv_with_timeout(self).await?;
                 if data.len() < NLMSG_HDRLEN {
-                    return Err(Error::InvalidMessage("response too short".into()));
+                    return Err(Error::invalid_message("response too short"));
                 }
 
                 let resp_seq =
@@ -426,13 +426,13 @@ impl Connection<FibLookup> {
                 }
 
                 if data.len() < NLMSG_HDRLEN + std::mem::size_of::<FibResultNl>() {
-                    return Err(Error::InvalidMessage(
-                        "response too short for FIB result".into(),
+                    return Err(Error::invalid_message(
+                        "response too short for FIB result",
                     ));
                 }
 
                 let (result, _) = FibResultNl::ref_from_prefix(&data[NLMSG_HDRLEN..])
-                    .map_err(|_| Error::InvalidMessage("failed to parse FIB result".into()))?;
+                    .map_err(|_| Error::invalid_message("failed to parse FIB result"))?;
 
                 return Ok(FibLookupResult {
                     addr: result.addr(),

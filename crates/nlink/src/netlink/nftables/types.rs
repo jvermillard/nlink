@@ -75,7 +75,7 @@ impl std::str::FromStr for Family {
             "arp" => Self::Arp,
             "bridge" => Self::Bridge,
             "netdev" => Self::Netdev,
-            _ => return Err(crate::Error::InvalidMessage(format!("unknown nftables family `{s}`"))),
+            _ => return Err(crate::Error::invalid_message(format!("unknown nftables family `{s}`"))),
         })
     }
 }
@@ -304,22 +304,22 @@ impl ChainName {
     pub fn new(s: impl Into<String>) -> Result<Self> {
         let s = s.into();
         if s.is_empty() {
-            return Err(Error::InvalidMessage(
-                "ChainName: empty chain names are rejected by nftables".into(),
+            return Err(Error::invalid_message(
+                "ChainName: empty chain names are rejected by nftables",
             ));
         }
         if s.len() > Self::MAX_LEN {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "ChainName: {} bytes exceeds NFT_NAME_MAXLEN-1 ({} bytes)",
                 s.len(),
                 Self::MAX_LEN,
             )));
         }
         if s.contains('\0') {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "ChainName: interior NUL bytes are rejected — nftables wire format is a \
                  NUL-terminated C string"
-                    .into(),
+                    ,
             ));
         }
         Ok(Self(s))
@@ -395,22 +395,22 @@ impl TableName {
     pub fn new(s: impl Into<String>) -> Result<Self> {
         let s = s.into();
         if s.is_empty() {
-            return Err(Error::InvalidMessage(
-                "TableName: empty table names are rejected by nftables".into(),
+            return Err(Error::invalid_message(
+                "TableName: empty table names are rejected by nftables",
             ));
         }
         if s.len() > Self::MAX_LEN {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "TableName: {} bytes exceeds NFT_NAME_MAXLEN-1 ({} bytes)",
                 s.len(),
                 Self::MAX_LEN,
             )));
         }
         if s.contains('\0') {
-            return Err(Error::InvalidMessage(
+            return Err(Error::invalid_message(
                 "TableName: interior NUL bytes are rejected — nftables wire format is a \
                  NUL-terminated C string"
-                    .into(),
+                    ,
             ));
         }
         Ok(Self(s))
@@ -2061,7 +2061,7 @@ impl Rule {
     /// What a builder method could not encode, if anything.
     pub(crate) fn check(&self) -> Result<()> {
         match &self.error {
-            Some(e) => Err(Error::InvalidMessage(format!(
+            Some(e) => Err(Error::invalid_message(format!(
                 "{}/{}: {e}",
                 self.table, self.chain
             ))),
@@ -4567,7 +4567,7 @@ impl SetElement {
     pub(crate) fn check_for(&self, set: &Set, deleting: bool) -> Result<()> {
         let want = set.key_type.len() as usize;
         if self.key.len() != want {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "set {}: element key is {} bytes, but key type {:?} is {want}",
                 set.name,
                 self.key.len(),
@@ -4576,7 +4576,7 @@ impl SetElement {
         }
         if let Some(end) = &self.key_end {
             if !set.flags.contains(SetFlags::INTERVAL) {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "set {}: a range element needs an interval set (`Set::interval`)",
                     set.name
                 )));
@@ -4593,7 +4593,7 @@ impl SetElement {
                 let field = at..at + width;
                 at += width;
                 if end.len() != self.key.len() || end[field.clone()] < self.key[field] {
-                    return Err(Error::InvalidMessage(format!(
+                    return Err(Error::invalid_message(format!(
                         "set {}: range end {end:02x?} is not at or after its start {:02x?}",
                         set.name, self.key
                     )));
@@ -4606,13 +4606,13 @@ impl SetElement {
         match (&set.data_type, &self.data) {
             (None, None) => {}
             (None, Some(_)) => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "set {}: element data needs a map (`Set::map`)",
                     set.name
                 )));
             }
             (Some(_), None) => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "set {}: an element of a map needs data (`SetElement::value` or `::verdict`)",
                     set.name
                 )));
@@ -4622,14 +4622,14 @@ impl SetElement {
             (Some(SetDataType::Value(ty)), Some(SetElementData::Value(value)))
                 if value.len() == ty.len() as usize => {}
             (Some(want), Some(got)) => {
-                return Err(Error::InvalidMessage(format!(
+                return Err(Error::invalid_message(format!(
                     "set {}: element data {got:?} does not fit the map's {want:?}",
                     set.name
                 )));
             }
         }
         if self.timeout.is_some() && !set.flags.contains(SetFlags::TIMEOUT) {
-            return Err(Error::InvalidMessage(format!(
+            return Err(Error::invalid_message(format!(
                 "set {}: an element timeout needs a set with timeouts \
                  (`Set::timeout` or `Set::per_element_timeouts`)",
                 set.name
@@ -4727,7 +4727,7 @@ pub struct SetInfo {
 fn prefix_range(addr: &[u8], prefix: u8) -> Result<(Vec<u8>, Vec<u8>)> {
     let bits = addr.len() * 8;
     if usize::from(prefix) > bits {
-        return Err(Error::InvalidMessage(format!(
+        return Err(Error::invalid_message(format!(
             "prefix length {prefix} is longer than the {bits}-bit address"
         )));
     }

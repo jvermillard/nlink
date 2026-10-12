@@ -192,7 +192,7 @@ impl QdiscCmd {
                 conn.get_link_by_name(d)
                     .await?
                     .ok_or_else(|| {
-                        nlink::netlink::Error::InvalidMessage(format!("device not found: {d}"))
+                        nlink::netlink::Error::invalid_message(format!("device not found: {d}"))
                     })?
                     .ifindex(),
             ),
@@ -280,11 +280,11 @@ enum QdiscVerb {
 fn parse_qdisc_handles(parent: &str, handle: Option<&str>) -> Result<(TcHandle, Option<TcHandle>)> {
     let parent = parent
         .parse::<TcHandle>()
-        .map_err(|e| Error::InvalidMessage(format!("invalid parent `{parent}`: {e}")))?;
+        .map_err(|e| Error::invalid_message(format!("invalid parent `{parent}`: {e}")))?;
     let handle = handle
         .map(|s| {
             s.parse::<TcHandle>()
-                .map_err(|e| Error::InvalidMessage(format!("invalid handle `{s}`: {e}")))
+                .map_err(|e| Error::invalid_message(format!("invalid handle `{s}`: {e}")))
         })
         .transpose()?;
     Ok((parent, handle))
@@ -359,7 +359,7 @@ async fn dispatch_qdisc(
         "gred" => dispatch!(GredConfig),
         #[allow(deprecated)]
         "atm" => dispatch!(AtmConfig),
-        other => Err(Error::InvalidMessage(format!(
+        other => Err(Error::invalid_message(format!(
             "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast, gred, atm)"
         ))),
     }
