@@ -711,8 +711,9 @@ read as `None` on every interface, forever, with no error anywhere.
 `#[repr(uN)]` enum in `crates/nlink/src/`, every enum declared through
 the GENL derives (`#[genl_attribute/command/enum(repr = "uN")]`), and
 every `pub const` the kernel names verbatim against `/usr/include/linux`
-on every push: 1033 discriminants across 108 enums, and 1932 consts,
-today. **Every such enum must be classified:**
+on every push, private constants included: 1033 discriminants across
+108 enums, and 2060 consts, today. **Every such enum must be
+classified:**
 
 - mapped to its kernel prefix in `scripts/audit-uapi-constants.map`
   (with `Variant -> KERNEL_SUFFIX` overrides where the names don't
@@ -737,6 +738,10 @@ reason. A spec edited by hand fails its hash; update the specs only
 through `scripts/vendor-ynl-specs.sh <tag>`. The audit needs PyYAML, and
 fails rather than skip without it. A constant a spec defines does not go
 in `audit-uapi-constants.newer`; that file is for what no spec covers.
+`python3 scripts/audit_uapi_constants.py --coverage` prints, per spec and
+per attribute set, enum and op list, how much of each family nlink
+mirrors: a quick map of what is not implemented, or implemented under
+names the audit cannot resolve.
 
 ## Observability
 

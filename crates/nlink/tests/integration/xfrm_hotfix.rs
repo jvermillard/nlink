@@ -279,19 +279,19 @@ async fn del_sa_with_srcaddr_uses_correct_filter() -> Result<()> {
 /// EINVAL paths kernel-side requires either offload-capable hardware
 /// (which CI lacks) or `NETLINK_EXT_ACK` text parsing (which not all
 /// kernels emit for this code path). The post-fix value is locked by
-/// the build-time gates in `crates/nlink/src/netlink/sys_sizeof.rs`
-/// (`plan_222_1_xfrm_attr_ids_match_kernel_uapi`) and the inline
-/// assertion in `crates/nlink/src/netlink/xfrm.rs::xfrm_offload_kernel_constants`.
+/// `scripts/audit-uapi-constants.sh`, which checks it against the
+/// kernel headers, and the inline assertion in
+/// `crates/nlink/src/netlink/xfrm.rs::xfrm_offload_kernel_constants`.
 /// Both fail the build if `XFRMA_OFFLOAD_DEV` drifts from `28`.
 #[tokio::test]
-#[ignore = "Plan 221 W4 — verified at build time by sys_sizeof gates, not by kernel \
+#[ignore = "Plan 221 W4 — verified at build time by the UAPI audit, not by kernel \
             round-trip (CI runners lack xfrm_state_offload-capable NICs and the EINVAL \
             from no-offload kernels is indistinguishable from the attribute-size EINVAL \
             without ext_ack text parsing)"]
 async fn add_sa_with_offload_attr_id_locked_by_constants_gate() -> Result<()> {
     // Intentionally empty — see ignore reason. The W4 regression is
     // verified by:
-    //   - crates/nlink/src/netlink/sys_sizeof.rs `plan_222_1_xfrm_attr_ids_match_kernel_uapi`
+    //   - scripts/audit-uapi-constants.sh (xfrm.rs's constants against the headers)
     //   - crates/nlink/src/netlink/xfrm.rs `xfrm_offload_kernel_constants`
     Ok(())
 }

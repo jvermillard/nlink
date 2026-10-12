@@ -290,6 +290,16 @@ All notable changes to this project will be documented in this file.
     `with_context` back to the kernel-only rule it fails: the I/O error's
     context is empty. A second test pins the size.
 
+- **`sys_sizeof`'s attribute tables are removed (#167).** The modules
+  `xfrm_msg_type`, `xfrm_attr`, `nft_ct_keys`, `tca_htb_attr`,
+  `tca_flower_key`, `ifla_attr`, `rta_attr`, `ctnetlink_attr`, `dpll_a`,
+  `devlink_attr` and `ethtool_a` were hand-copied kernel values, tested
+  against literals or against the nlink constants they were copied
+  alongside. #265 found `TCA_HTB_OFFLOAD` wrong in both a table and the
+  constant it checked. The UAPI audit checks those constants against the
+  headers and the YNL specs now. Struct sizes, `nft_verdict`, `nf_hook`
+  and `DEVLINK_MCGRP_CONFIG_NAME` stay.
+
 ### Fixed
 
 - **`NetworkConfig::validate()` refuses what the apply would fail on
@@ -2356,6 +2366,17 @@ All notable changes to this project will be documented in this file.
   The nftables and conntrack specs are not vendored. They give no values and
   omit pad attributes, so their implicit numbering drifts from the headers,
   which every supported host has anyway.
+
+- **The UAPI audit reads private constants, and reports coverage (#167).**
+  The plain-constant pass read only `pub const`, which left 269
+  kernel-named constants unchecked. All of the XFRM message types and
+  attributes were among them, including those fixed by the 0.19.1 hotfix.
+  It now reads every visibility, and they all match. The MPTCP path-manager
+  modules name their constants by suffix, so they are mapped in
+  `audit-uapi-constants.modmap`; 44 of their constants are checked, and all
+  match. `python3 scripts/audit_uapi_constants.py --coverage` prints how
+  much of each vendored spec nlink mirrors, per attribute set, enum and op
+  list. Over the 16 specs it is 42%; netdev and the MPTCP events are at 0%.
 
 ## [0.31.0] - 2026-10-11
 

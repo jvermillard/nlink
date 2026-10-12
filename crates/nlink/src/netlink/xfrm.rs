@@ -2548,10 +2548,9 @@ mod tests {
 
     /// Plan 221: lock all 5 XFRM constants that were mis-counted from
     /// the kernel UAPI enum. Without this assertion-bundle, a future
-    /// commit could re-introduce the off-by-N error. Plan 222.1 adds
-    /// a sibling sys_sizeof module pinning the same constants against
-    /// an independently-mirrored kernel reference; both gates must
-    /// agree.
+    /// commit could re-introduce the off-by-N error.
+    /// `scripts/audit-uapi-constants.sh` also checks every constant in
+    /// this file against the kernel headers (#167).
     #[test]
     fn xfrm_msg_and_attr_constants_match_kernel_uapi() {
         // Kernel UAPI v6.13 — include/uapi/linux/xfrm.h.

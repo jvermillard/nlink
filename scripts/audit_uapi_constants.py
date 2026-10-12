@@ -205,12 +205,15 @@ def parse_rust_enums() -> dict[str, tuple[Path, dict[str, int]]]:
     return out
 
 
-# A plain `pub const NAME: uN = <literal>;`. This is how most of the crate's
+# A plain `const NAME: uN = <literal>;`. This is how most of the crate's
 # wire constants are actually declared — nl80211, devlink, `types/tc.rs`,
 # `types/link.rs` and friends — and until #266 none of them were checked at
 # all. There are ~3x as many of these as there are enum discriminants.
+# Private and `pub(crate)` ones count too: until #167 the pass read `pub`
+# only, which left 269 kernel-named constants unchecked, among them every
+# XFRM message type and attribute (the 0.19.1 hotfix's constants).
 RUST_CONST_RE = re.compile(
-    r"^[ \t]*pub const ([A-Z][A-Z0-9_]*)\s*:\s*u(?:8|16|32|64)\s*="
+    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?const ([A-Z][A-Z0-9_]*)\s*:\s*u(?:8|16|32|64)\s*="
     r"\s*(0x[0-9a-fA-F_]+|[0-9_]+)\s*;",
     re.M,
 )
@@ -259,7 +262,7 @@ def parse_modmap() -> dict[str, str]:
 
 
 def parse_rust_consts() -> list[tuple[Path, str, int, "str | None"]]:
-    """Every `pub const NAME: uN = <literal>;` in the tree.
+    """Every `const NAME: uN = <literal>;` in the tree, of any visibility.
 
     Deliberately *not* name-mangled. The check below only looks at constants
     whose name the kernel also defines, verbatim — which makes it
@@ -440,6 +443,7 @@ def main() -> int:
     ahead_of_headers: list[str] = []
     checked_enums = 0
     checked_variants = 0
+    checked_names: set[str] = set()
 
     for name, (path, variants) in sorted(rust.items()):
         if name in allowed:
@@ -482,6 +486,7 @@ def main() -> int:
                 continue
 
             checked_variants += 1
+            checked_names.add(kernel_name)
             expected = kernel[kernel_name]
             if value != expected:
                 failures.append(
@@ -516,6 +521,7 @@ def main() -> int:
                 )
             continue
         checked_consts += 1
+        checked_names.add(kernel_name)
         if value != kernel[kernel_name]:
             where = f"{enclosing}::{name}" if prefix else name
             failures.append(
@@ -561,7 +567,31 @@ def main() -> int:
         f"({len(spec_only)} constants only the specs define; "
         f"{len(allowed)} nlink-only enums, {len(const_allowed)} consts allowlisted)"
     )
+    if "--coverage" in sys.argv[1:]:
+        coverage_report(checked_names)
     return 0
+
+
+def coverage_report(checked: set[str]) -> None:
+    """`--coverage`: how much of each vendored spec nlink mirrors, per
+    definition. A constant counts once the audit has checked an nlink
+    constant or enum variant against it; what the report calls missing is
+    what nlink has no checked mirror of, by any name the audit resolves."""
+    import audit_uapi_ynl as ynl  # noqa: PLC0415  (sibling module)
+
+    print("\nYNL spec coverage: constants nlink mirrors / constants the spec defines\n")
+    total_checked = total = 0
+    for spec, groups in ynl.load_groups().items():
+        names = {name for consts in groups.values() for name in consts}
+        hit = len(names & checked)
+        total_checked += hit
+        total += len(names)
+        print(f"{spec:14} {hit:4}/{len(names):<4} {100 * hit // max(len(names), 1):3}%")
+        for group, consts in sorted(groups.items()):
+            n = len(consts.keys() & checked)
+            mark = "  (none)" if n == 0 else ""
+            print(f"    {n:4}/{len(consts):<4} {group}{mark}")
+    print(f"\n{'all':14} {total_checked:4}/{total:<4} {100 * total_checked // max(total, 1):3}%")
 
 
 if __name__ == "__main__":
