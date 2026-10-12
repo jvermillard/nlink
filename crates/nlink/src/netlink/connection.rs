@@ -2365,7 +2365,7 @@ impl Connection<Route> {
         let link = self
             .get_link_by_index(ifindex)
             .await?
-            .ok_or_else(|| Error::invalid_message("interface not found"))?;
+            .ok_or_else(|| self.interface_not_found(format!("ifindex {ifindex}")))?;
         link.bond_info()
             .ok_or_else(|| Error::invalid_message("not a bond interface"))
     }

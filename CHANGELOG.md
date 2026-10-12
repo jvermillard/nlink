@@ -667,6 +667,21 @@ All notable changes to this project will be documented in this file.
   unknown flag bits. It affects every enum field in dpll, ovpn and
   net_shaper.
 
+- **Errors that wrapped an OS error as a message keep the error (#718).**
+  Each of these was an `InvalidMessage` string, so `errno()` was `None` and
+  `kind()` said `Invalid`, whatever had happened:
+  - opening a pinned BPF program from `BpfFilter`/`BpfAction::parse_params`;
+  - a failed duplicate of a BPF program fd;
+  - `Netns` refusing a file that isn't a namespace (`ENOTTY`);
+  - `NetworkConfig::{from_json_str, to_json_string, to_json_string_pretty}`,
+    whose detail is `ErrorDetail::Json` now, with serde's line and column;
+  - `nlink-ip vrf exec` and `vrf identify`.
+
+  Each now keeps its source under a context. Mirred's `dev` lookup in
+  `parse_params` is `InterfaceNotFound` (`is_not_found()`), not a parse
+  error. `get_bond_info` reports a missing interface as not found. A
+  panicked lab helper is `ErrorDetail::Internal`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

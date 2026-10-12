@@ -32,9 +32,9 @@ struct ObjAttr {
 pub(crate) enum ProgFd {
     Raw(RawFd),
     Owned(Arc<OwnedFd>),
-    /// Duplicating the caller's fd failed; reported when the request is
-    /// built.
-    Failed(Arc<str>),
+    /// Duplicating the caller's fd failed, with this errno; reported when
+    /// the request is built.
+    Failed(i32),
 }
 
 impl ProgFd {
@@ -42,7 +42,7 @@ impl ProgFd {
     pub(crate) fn dup(fd: impl AsFd) -> Self {
         match fd.as_fd().try_clone_to_owned() {
             Ok(fd) => Self::Owned(Arc::new(fd)),
-            Err(e) => Self::Failed(format!("bpf: duplicating the program fd: {e}").into()),
+            Err(e) => Self::Failed(e.raw_os_error().unwrap_or(libc::EBADF)),
         }
     }
 
@@ -51,7 +51,9 @@ impl ProgFd {
         match self {
             Self::Raw(fd) => Ok(*fd),
             Self::Owned(fd) => Ok(fd.as_raw_fd()),
-            Self::Failed(e) => Err(crate::Error::invalid_message(e.to_string())),
+            // The errno survives, so `kind()` and `errno()` answer (#718).
+            Self::Failed(errno) => Err(crate::Error::from(std::io::Error::from_raw_os_error(*errno))
+                .with_context("bpf: duplicate the program fd")),
         }
     }
 
@@ -89,6 +91,14 @@ impl ProgFd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #718: a failed duplicate keeps its errno, and says what failed.
+    #[test]
+    fn a_failed_duplicate_keeps_its_errno() {
+        let err = ProgFd::Failed(libc::EMFILE).raw().unwrap_err();
+        assert_eq!(err.errno(), Some(libc::EMFILE), "{err:?}");
+        assert_eq!(err.context(), ["bpf: duplicate the program fd"], "{err:?}");
+    }
 
     #[test]
     fn the_obj_attr_is_the_kernels_size_with_no_hidden_padding() {

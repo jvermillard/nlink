@@ -232,7 +232,7 @@ impl LabNamespace {
                 })
                 .join()
                 .unwrap_or_else(|_| {
-                    Err(crate::Error::invalid_message(format!(
+                    Err(crate::Error::internal(format!(
                         "namespace {}: a lab helper panicked",
                         self.name
                     )))

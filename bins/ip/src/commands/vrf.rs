@@ -163,10 +163,7 @@ impl VrfCmd {
             .env("VRF", name)
             .exec();
 
-        Err(nlink::netlink::Error::invalid_message(format!(
-            "failed to execute: {}",
-            err
-        )))
+        Err(nlink::netlink::Error::from(err).with_context(format!("exec {}", command[0])))
     }
 
     fn identify(&self, pid: &str) -> Result<()> {
@@ -192,10 +189,8 @@ impl VrfCmd {
                 println!();
                 Ok(())
             }
-            Err(e) => Err(nlink::netlink::Error::invalid_message(format!(
-                "cannot read cgroup for process {}: {}",
-                pid, e
-            ))),
+            Err(e) => Err(nlink::netlink::Error::from(e)
+                .with_context(format!("read the cgroup of process {pid}"))),
         }
     }
 

@@ -418,10 +418,9 @@ impl Netns {
         // namespace's CLONE_NEW* type.
         let ty = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_NSTYPE as _, 0) };
         if ty < 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(Error::invalid_message(format!(
-                "{label}: not a namespace file ({err})"
-            )));
+            // Keep the errno: ENOTTY is "not nsfs", EBADF a closed fd (#718).
+            return Err(Error::from(std::io::Error::last_os_error())
+                .with_context(format!("{label}: not a namespace file")));
         }
         if ty != libc::CLONE_NEWNET {
             return Err(Error::invalid_message(format!(
@@ -989,6 +988,8 @@ mod tests {
     fn only_a_network_namespace_opens() {
         let err = Netns::from_path("/proc/self/status").unwrap_err();
         assert!(err.to_string().contains("not a namespace file"), "{err}");
+        // The ioctl's errno survives (#718).
+        assert_eq!(err.errno(), Some(libc::ENOTTY), "{err:?}");
         let err = Netns::from_path("/proc/self/ns/uts").unwrap_err();
         assert!(err.to_string().contains("not a network namespace"), "{err}");
         let err = Netns::from_path("/nonexistent/ns").unwrap_err();
