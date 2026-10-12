@@ -64,8 +64,8 @@ use crate::{Connection, Result};
 /// resync can re-use it. Plan 191 §2.5.
 ///
 /// It covers what [`subscribe_all`](Connection::subscribe_all) joins and
-/// the kernel can dump: links → addresses → nexthops → routes → rules →
-/// neighbours → qdiscs → classes → filters → bridge MDB. It used to stop
+/// the kernel can dump: links → netconf → addresses → nexthops → routes →
+/// rules → neighbours → qdiscs → classes → filters → bridge MDB. It used to stop
 /// at neighbours, so a mirror of qdiscs, rules or nexthops was emptied by
 /// its first overflow and stayed empty (#503). Nexthops come before the
 /// routes that use them. Network-namespace ids are subscribed to but have
@@ -80,6 +80,14 @@ pub async fn rtnetlink_snapshot(conn: &Connection<Route>) -> Result<Vec<NetworkE
         .map(|l| l.ifindex())
         .collect();
     out.extend(links.into_iter().map(NetworkEvent::NewLink));
+    // Each family's netconf (#523); a kernel without IPv6 has none of it.
+    for family in [crate::AddressFamily::v4(), crate::AddressFamily::v6()] {
+        match conn.get_netconf(family).await {
+            Ok(nc) => out.extend(nc.into_iter().map(NetworkEvent::NewNetconf)),
+            Err(e) if e.is_not_supported() || e.is_invalid_argument() => {}
+            Err(e) => return Err(e),
+        }
+    }
     out.extend(
         conn.get_addresses()
             .await?

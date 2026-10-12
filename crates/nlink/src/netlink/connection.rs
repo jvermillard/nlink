@@ -1467,6 +1467,11 @@ pub enum RtnetlinkGroup {
     Nexthop,
     /// Bridge multicast-database changes (RTM_NEWMDB, RTM_DELMDB).
     Mdb,
+    /// IPv4 netconf changes (RTM_NEWNETCONF): forwarding, rp_filter, …,
+    /// through `/proc/sys` too (#523).
+    Ipv4Netconf,
+    /// IPv6 netconf changes (RTM_NEWNETCONF) (#523).
+    Ipv6Netconf,
 }
 
 impl RtnetlinkGroup {
@@ -1486,6 +1491,8 @@ impl RtnetlinkGroup {
             Self::Ipv6Rule => RTNLGRP_IPV6_RULE,
             Self::Nexthop => RTNLGRP_NEXTHOP,
             Self::Mdb => RTNLGRP_MDB,
+            Self::Ipv4Netconf => RTNLGRP_IPV4_NETCONF,
+            Self::Ipv6Netconf => RTNLGRP_IPV6_NETCONF,
         }
     }
 }
@@ -1548,7 +1555,8 @@ impl Connection<Route> {
     /// representation.
     ///
     /// Subscribes to: Link, Ipv4Addr, Ipv6Addr, Ipv4Route, Ipv6Route,
-    /// Neigh, Tc, NsId, Ipv4Rule, Ipv6Rule, Nexthop, Mdb.
+    /// Neigh, Tc, NsId, Ipv4Rule, Ipv6Rule, Nexthop, Mdb, Ipv4Netconf,
+    /// Ipv6Netconf. The netconf groups joined in 0.32 (#523).
     ///
     /// Before 0.24 this omitted NsId/Ipv4Rule/Ipv6Rule (and the
     /// Nexthop/Mdb groups didn't exist) — rule, nexthop, namespace-ID
@@ -1583,6 +1591,8 @@ impl Connection<Route> {
             RtnetlinkGroup::Ipv6Rule,
             RtnetlinkGroup::Nexthop,
             RtnetlinkGroup::Mdb,
+            RtnetlinkGroup::Ipv4Netconf,
+            RtnetlinkGroup::Ipv6Netconf,
         ])
     }
 

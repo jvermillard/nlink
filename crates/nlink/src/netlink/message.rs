@@ -189,6 +189,11 @@ impl NlMsgType {
     pub const RTM_DELACTION: u16 = 49;
     pub const RTM_GETACTION: u16 = 50;
 
+    // Per-interface IP configuration (netconf, #523)
+    pub const RTM_NEWNETCONF: u16 = 80;
+    pub const RTM_DELNETCONF: u16 = 81;
+    pub const RTM_GETNETCONF: u16 = 82;
+
     // Bridge multicast database (MDB) messages
     pub const RTM_NEWMDB: u16 = 84;
     pub const RTM_DELMDB: u16 = 85;
