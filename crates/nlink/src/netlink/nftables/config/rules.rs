@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::diff::{MoveReason, RulePlacement};
 use super::types::DeclaredRule;
+use crate::netlink::nftables::RuleInfo;
 use crate::netlink::error::{Error, Result};
 
 /// The declared rules with every key filled in: explicit keys as given,
@@ -34,15 +35,8 @@ pub(crate) fn effective_rules(rules: &[DeclaredRule]) -> Vec<DeclaredRule> {
             if rule.handle_key.is_some() {
                 return rule.clone();
             }
-            let body = super::diff::normalize_tlv(&super::diff::lower_to_expression_bytes(
-                &rule.body,
-            ));
-            let hash = fnv1a64(&[
-                rule.chain.as_bytes(),
-                &body,
-                rule.body.comment.as_deref().unwrap_or("").as_bytes(),
-            ]);
-            let base = format!("~{hash:016x}");
+            let body = canonical_body(&super::diff::lower_to_expression_bytes(&rule.body));
+            let base = derived_key(&rule.chain, &body, rule.body.comment.as_deref());
             let n = seen.entry((rule.chain.clone(), base.clone())).or_insert(0);
             let key = if *n == 0 {
                 base
@@ -52,6 +46,54 @@ pub(crate) fn effective_rules(rules: &[DeclaredRule]) -> Vec<DeclaredRule> {
             *n += 1;
             let mut rule = rule.clone();
             rule.handle_key = Some(key);
+            rule
+        })
+        .collect()
+}
+
+/// A rule body as the diff compares it: the expression list normalized by
+/// its schema, with the live state the kernel echoes (counter values, quota
+/// consumption, a dynset timeout's jiffies) zeroed.
+pub(crate) fn canonical_body(bytes: &[u8]) -> Vec<u8> {
+    canonicalize_for_compare(super::diff::normalize_expressions(bytes))
+}
+
+/// The key of a rule declared without one: `~` + the FNV-1a-64 of its
+/// chain, canonical body and comment.
+fn derived_key(chain: &str, body: &[u8], comment: Option<&str>) -> String {
+    let hash = fnv1a64(&[chain.as_bytes(), body, comment.unwrap_or("").as_bytes()]);
+    format!("~{hash:016x}")
+}
+
+/// The kernel's rules, with each derived (`~`) key computed again from the
+/// rule's own canonical body, as [`effective_rules`] computes the declared
+/// ones, rather than read from its userdata (#721).
+///
+/// So a rule matches its declaration whatever the key stored with it says.
+/// It was derived by the nlink that installed the rule, from a
+/// normalization that may since have changed. Upgrading nlink then
+/// replaces no rule. The `.N` ordinal follows kernel order, as the
+/// declared one follows declared order.
+pub(crate) fn rekey_derived(rules: Vec<RuleInfo>) -> Vec<RuleInfo> {
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    rules
+        .into_iter()
+        .map(|mut rule| {
+            if !rule.key.as_deref().is_some_and(|k| k.starts_with('~')) {
+                return rule;
+            }
+            let comment = rule
+                .userdata_raw
+                .as_deref()
+                .and_then(crate::netlink::nftables::userdata::human_comment_of);
+            let base = derived_key(
+                &rule.chain,
+                &canonical_body(&rule.expression_bytes),
+                comment.as_deref(),
+            );
+            let n = seen.entry((rule.chain.clone(), base.clone())).or_insert(0);
+            rule.key = Some(if *n == 0 { base.clone() } else { format!("{base}.{n}") });
+            *n += 1;
             rule
         })
         .collect()

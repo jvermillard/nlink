@@ -30,56 +30,147 @@ fn hex_dump(bytes: &[u8]) -> HexDump<'_> {
     HexDump(bytes)
 }
 
-/// Normalize a netlink TLV byte stream for byte-equality
-/// comparison. Plan 178 fix — closes the false-positive class
-/// where the lib's writer-side expression bytes diverged from
-/// the kernel-echoed bytes purely on:
+/// Normalize a rule's expression list (`NFTA_RULE_EXPRESSIONS`' payload)
+/// for byte-equality comparison. Both the declared body and the kernel's go
+/// through it before the compare in `diff`, and the derived `~` keys hash
+/// its output.
 ///
-/// 1. `NLA_F_NESTED` (`0x8000`) bit: the lib's `nest_start`
-///    sets it on nested attribute types; the kernel's outgoing
-///    serialization of `NFTA_RULE_EXPRESSIONS` does NOT set it.
-/// 2. Attribute ordering within a nest: the kernel emits inner
-///    attributes in canonical (numeric) order; the lib's writer
-///    emits them in source order (e.g. `NFTA_META_DREG` then
-///    `NFTA_META_KEY` vs the kernel's `KEY` then `DREG`).
+/// What may differ between nlink's writer and the kernel's echo without the
+/// rule differing (Plan 178):
 ///
-/// Strategy: walk the byte stream as TLVs, recursively. For each
-/// attribute, strip the `NLA_F_NESTED` bit, treat the payload as
-/// nested if and only if it parses cleanly as another TLV stream
-/// (consistent lengths, no overrun, 4-byte alignment), and at
-/// each level sort sibling attributes by type. Re-emit the
-/// canonical form. Both declared-side and kernel-side bytes go
-/// through this normalizer before the byte compare in `diff`.
+/// 1. the `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER` bits, which the kernel does
+///    not set when it echoes a rule: stripped;
+/// 2. the order of attributes within a nest: sorted by type, at every
+///    level;
+/// 3. an empty attribute: a `*_PAD` before a 64-bit value on a kernel
+///    without efficient unaligned access, or an empty nest (`masq`'s
+///    `NFTA_EXPR_DATA`, #362; #484): dropped.
 ///
-/// Safe on garbage input: invalid TLV streams return the original
-/// bytes unchanged so the comparison still produces a definitive
-/// answer (different) without panicking.
-pub(crate) fn normalize_tlv(bytes: &[u8]) -> Vec<u8> {
-    match try_walk_tlvs(bytes) {
-        Some(mut attrs) => {
-            attrs.sort_by_key(|(ty, _)| *ty);
-            let mut out = Vec::with_capacity(bytes.len());
-            for (ty, payload) in &attrs {
-                emit_tlv(&mut out, *ty, payload);
-            }
-            out
+/// **Which attributes are nests is a schema, not a guess (#721).** The
+/// expression list is a list of `NFTA_LIST_ELEM`, each an expression's name
+/// and data. Within the data, only the attributes the kernel declares as
+/// `NLA_NESTED` are walked: `cmp`'s and `immediate`'s data, `range`'s
+/// bounds, `bitwise`'s mask, xor and data, `dynset`'s expressions. Each of
+/// those holds a value (`NFTA_DATA_VALUE`, a leaf) or a verdict (a nest of
+/// leaves). Everything else is a leaf. This used to recurse into any payload
+/// that happened to parse as attributes. A 4-byte value such as `04 00 05
+/// 00` (`ip daddr 4.0.5.0`) parses as one empty attribute, which was then
+/// dropped, so `4.0.5.0` and `4.0.6.0` compared equal and a declared change
+/// between them was never applied.
+///
+/// Expression order is kept: it is the rule's meaning. Malformed input at
+/// any level is kept as it is, so the comparison still gives a definite
+/// answer.
+pub(crate) fn normalize_expressions(bytes: &[u8]) -> Vec<u8> {
+    use crate::netlink::nftables::NFTA_LIST_ELEM;
+    let Some(attrs) = walk(bytes) else {
+        return bytes.to_vec();
+    };
+    let mut out = Vec::with_capacity(bytes.len());
+    for (ty, payload) in attrs {
+        match ty {
+            NFTA_LIST_ELEM => emit_tlv(&mut out, ty, &normalize_expression(payload)),
+            _ => emit_tlv(&mut out, ty, payload),
         }
-        None => bytes.to_vec(),
     }
+    out
 }
 
-/// Walk `bytes` as a netlink TLV stream. Returns `Some(attrs)` if
-/// the entire input parses cleanly (lengths consistent, no overrun
-/// past EOF, 4-byte aligned, every payload ≥ 0). For each attribute
-/// whose payload itself parses as TLVs, recursively normalize the
-/// payload first (so siblings-at-every-depth get sorted).
-///
-/// Returns `None` if the input doesn't look like a TLV stream —
-/// `normalize_tlv` then leaves it alone.
-fn try_walk_tlvs(bytes: &[u8]) -> Option<Vec<(u16, Vec<u8>)>> {
-    if bytes.is_empty() {
-        return Some(Vec::new());
+/// One expression: its name, and its data normalized by the name's schema.
+fn normalize_expression(bytes: &[u8]) -> Vec<u8> {
+    use crate::netlink::nftables::{NFTA_EXPR_DATA, NFTA_EXPR_NAME};
+    let Some(mut attrs) = walk(bytes) else {
+        return bytes.to_vec();
+    };
+    attrs.sort_by_key(|(ty, _)| *ty);
+    let name = attrs
+        .iter()
+        .find(|(ty, _)| *ty == NFTA_EXPR_NAME)
+        .map(|(_, p)| p.strip_suffix(b"\0").unwrap_or(p))
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(bytes.len());
+    for (ty, payload) in &attrs {
+        match *ty {
+            NFTA_EXPR_DATA => emit_tlv(&mut out, *ty, &normalize_expression_data(name, payload)),
+            _ => emit_tlv(&mut out, *ty, payload),
+        }
     }
+    out
+}
+
+/// An expression's `NFTA_EXPR_DATA`: its attributes sorted, and those the
+/// kernel declares nested walked by kind.
+fn normalize_expression_data(name: &[u8], bytes: &[u8]) -> Vec<u8> {
+    use crate::netlink::nftables::{
+        NFTA_BITWISE_MASK, NFTA_BITWISE_XOR, NFTA_CMP_DATA, NFTA_DYNSET_EXPR,
+        NFTA_DYNSET_EXPRESSIONS, NFTA_IMMEDIATE_DATA, NFTA_RANGE_FROM_DATA, NFTA_RANGE_TO_DATA,
+    };
+    /// `NFTA_BITWISE_DATA`: a shift's argument, `nft_data_attributes`.
+    const NFTA_BITWISE_DATA: u16 = 7;
+    enum Nest {
+        Data,
+        Expression,
+        Expressions,
+    }
+    let nest = |ty: u16| match (name, ty) {
+        (b"cmp", NFTA_CMP_DATA)
+        | (b"immediate", NFTA_IMMEDIATE_DATA)
+        | (b"range", NFTA_RANGE_FROM_DATA | NFTA_RANGE_TO_DATA)
+        | (b"bitwise", NFTA_BITWISE_MASK | NFTA_BITWISE_XOR | NFTA_BITWISE_DATA) => Some(Nest::Data),
+        (b"dynset", NFTA_DYNSET_EXPR) => Some(Nest::Expression),
+        (b"dynset", NFTA_DYNSET_EXPRESSIONS) => Some(Nest::Expressions),
+        _ => None,
+    };
+    let Some(mut attrs) = walk(bytes) else {
+        return bytes.to_vec();
+    };
+    attrs.sort_by_key(|(ty, _)| *ty);
+    let mut out = Vec::with_capacity(bytes.len());
+    for (ty, payload) in &attrs {
+        let normalized = match nest(*ty) {
+            Some(Nest::Data) => normalize_data(payload),
+            Some(Nest::Expression) => normalize_expression(payload),
+            Some(Nest::Expressions) => normalize_expressions(payload),
+            None => payload.to_vec(),
+        };
+        emit_tlv(&mut out, *ty, &normalized);
+    }
+    out
+}
+
+/// `nft_data_attributes`: a value, which is a leaf, or a verdict, a nest of
+/// leaves.
+fn normalize_data(bytes: &[u8]) -> Vec<u8> {
+    use crate::netlink::nftables::NFTA_DATA_VERDICT;
+    let Some(mut attrs) = walk(bytes) else {
+        return bytes.to_vec();
+    };
+    attrs.sort_by_key(|(ty, _)| *ty);
+    let mut out = Vec::with_capacity(bytes.len());
+    for (ty, payload) in &attrs {
+        if *ty == NFTA_DATA_VERDICT {
+            let verdict = match walk(payload) {
+                Some(mut leaves) => {
+                    leaves.sort_by_key(|(ty, _)| *ty);
+                    let mut buf = Vec::with_capacity(payload.len());
+                    for (t, p) in &leaves {
+                        emit_tlv(&mut buf, *t, p);
+                    }
+                    buf
+                }
+                None => payload.to_vec(),
+            };
+            emit_tlv(&mut out, *ty, &verdict);
+        } else {
+            emit_tlv(&mut out, *ty, payload);
+        }
+    }
+    out
+}
+
+/// One level of attributes: `(type without its flag bits, payload)`, empty
+/// ones dropped. `None` if `bytes` is not a well-formed attribute stream.
+fn walk(bytes: &[u8]) -> Option<Vec<(u16, &[u8])>> {
     let mut out = Vec::new();
     let mut pos = 0;
     while pos < bytes.len() {
@@ -95,43 +186,14 @@ fn try_walk_tlvs(bytes: &[u8]) -> Option<Vec<(u16, Vec<u8>)>> {
         if len < 4 || pos + len > bytes.len() {
             return None;
         }
-        let raw_type = u16::from_ne_bytes([bytes[pos + 2], bytes[pos + 3]]);
-        // Strip NLA_F_NESTED (0x8000) and NLA_F_NET_BYTEORDER (0x4000)
-        // hint bits — these are parser hints, not stored state, so
-        // the kernel and the lib can legitimately differ on whether
-        // they're set without the underlying attribute differing.
-        let ty = raw_type & !0xc000;
+        // NLA_F_NESTED (0x8000) and NLA_F_NET_BYTEORDER (0x4000) are parser
+        // hints, not stored state.
+        let ty = u16::from_ne_bytes([bytes[pos + 2], bytes[pos + 3]]) & !0xc000;
         let payload = &bytes[pos + 4..pos + len];
-        // 4-byte alignment.
-        let aligned = (len + 3) & !3;
-        // An empty attribute carries nothing in a rule's expressions: it is
-        // a `*_PAD` that `nla_put_64bit` adds ahead of a 64-bit value on a
-        // kernel without efficient unaligned access (riscv64, sparc), or an
-        // empty nest (`masq`'s `NFTA_EXPR_DATA`, #362). Kept, a PAD made
-        // every counter, limit, quota and dynset rule differ from its
-        // declaration there, and be replaced, counters reset, on every
-        // apply (#484).
-        if payload.is_empty() {
-            pos += aligned;
-            continue;
+        if !payload.is_empty() {
+            out.push((ty, payload));
         }
-        // Recursively normalize if the payload parses as TLVs.
-        let normalized_payload = match try_walk_tlvs(payload) {
-            Some(mut inner) => {
-                inner.sort_by_key(|(t, _)| *t);
-                let mut buf = Vec::with_capacity(payload.len());
-                for (t, p) in &inner {
-                    emit_tlv(&mut buf, *t, p);
-                }
-                buf
-            }
-            None => payload.to_vec(),
-        };
-        out.push((ty, normalized_payload));
-        pos += aligned;
-        if pos > bytes.len() {
-            return None;
-        }
+        pos += (len + 3) & !3;
     }
     Some(out)
 }
@@ -1161,7 +1223,7 @@ fn object_change(declared: &ObjectConfig, current: Option<ObjectConfig>) -> Obje
 /// (counter values, quota consumption) zeroed; the human comment — what
 /// follows `nlink:<key> ` — must match too.
 fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
-    let canon = |bytes: &[u8]| super::rules::canonicalize_for_compare(normalize_tlv(bytes));
+    let canon = super::rules::canonical_body;
     let declared_body = canon(&lower_to_expression_bytes(&declared.body));
     let kernel_body = canon(&kernel.expression_bytes);
     if declared_body != kernel_body {
@@ -1968,7 +2030,8 @@ impl NftablesConfig {
             // moving as few rules as possible (`plan_chain`). After the
             // sets, because a rule bound to a set this diff recreates has
             // to move out of its way: DELSET on a bound set is EBUSY.
-            let current_rules = snapshot.rules_in(declared.name(), declared.family());
+            let current_rules =
+                super::rules::rekey_derived(snapshot.rules_in(declared.name(), declared.family()));
             let effective = super::rules::effective_rules(declared.rules());
             let mut chain_names: Vec<&str> =
                 declared.chains().iter().map(|c| c.name()).collect();
@@ -2534,7 +2597,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_tlv_collapses_writer_vs_kernel_to_equal() {
+    fn normalize_expressions_collapses_writer_vs_kernel_to_equal() {
         // Build the same rule the kernel fixture above represents.
         use super::super::super::types::Rule;
         let r = Rule::new("filter_rec", "input")
@@ -2550,11 +2613,11 @@ mod tests {
             declared, kernel,
             "raw writer-side and kernel-side bytes should differ pre-normalize"
         );
-        let n_declared = normalize_tlv(&declared);
-        let n_kernel = normalize_tlv(&kernel);
+        let n_declared = normalize_expressions(&declared);
+        let n_kernel = normalize_expressions(&kernel);
         assert_eq!(
             n_declared, n_kernel,
-            "normalize_tlv must canonicalize writer-side and kernel-side bytes \
+            "normalize_expressions must canonicalize writer-side and kernel-side bytes \
              for the same logical rule to equal bytes"
         );
     }
@@ -2562,7 +2625,7 @@ mod tests {
     /// A zero-length attribute — the `*_PAD` some architectures put ahead
     /// of a 64-bit value — does not make two rule bodies differ (#484).
     #[test]
-    fn normalize_tlv_drops_zero_length_attributes() {
+    fn normalize_expressions_drops_zero_length_attributes() {
         let attr = |ty: u16, payload: &[u8]| {
             let mut out = Vec::new();
             emit_tlv(&mut out, ty, payload);
@@ -2573,45 +2636,105 @@ mod tests {
         let padded = [attr(3, &[]), counter.clone()].concat();
         let elem = |data: &[u8]| attr(1, &[attr(1, b"counter\0"), attr(2, data)].concat());
         assert_eq!(
-            normalize_tlv(&elem(&padded)),
-            normalize_tlv(&elem(&counter))
+            normalize_expressions(&elem(&padded)),
+            normalize_expressions(&elem(&counter))
         );
     }
 
     #[test]
-    fn normalize_tlv_idempotent() {
+    fn normalize_expressions_idempotent() {
         let kernel = hex_decode(PLAN178_KERNEL_HEX_FOR_PORT_1000);
-        let once = normalize_tlv(&kernel);
-        let twice = normalize_tlv(&once);
-        assert_eq!(once, twice, "normalize_tlv must be idempotent");
+        let once = normalize_expressions(&kernel);
+        let twice = normalize_expressions(&once);
+        assert_eq!(once, twice, "normalize_expressions must be idempotent");
     }
 
     #[test]
-    fn normalize_tlv_differs_when_values_actually_differ() {
+    fn normalize_expressions_differs_when_values_actually_differ() {
         // Two rules with different ports — must still diverge after
         // normalize, otherwise the diff would silently miss real
         // expression changes.
         use super::super::super::types::Rule;
         let r_a = Rule::new("filter_rec", "input").match_tcp_dport(1000).accept();
         let r_b = Rule::new("filter_rec", "input").match_tcp_dport(9000).accept();
-        let a = normalize_tlv(&lower_to_expression_bytes(&r_a));
-        let b = normalize_tlv(&lower_to_expression_bytes(&r_b));
+        let a = normalize_expressions(&lower_to_expression_bytes(&r_a));
+        let b = normalize_expressions(&lower_to_expression_bytes(&r_b));
         assert_ne!(a, b);
     }
 
+    /// #721: a value that happens to parse as an empty attribute is still a
+    /// value. `04 00 05 00` (`ip daddr 4.0.5.0`, or the mark `0x00050004` on
+    /// a little-endian host) used to be read as a nest and dropped, so these
+    /// compared equal and a change between them was never applied.
     #[test]
-    fn normalize_tlv_empty_input() {
-        assert!(normalize_tlv(&[]).is_empty());
+    fn values_that_look_like_attributes_still_differ() {
+        use super::super::super::types::Rule;
+        use std::net::Ipv4Addr;
+        let addr = |a| {
+            normalize_expressions(&lower_to_expression_bytes(
+                &Rule::new("t", "c").match_daddr_v4(a, 32).accept(),
+            ))
+        };
+        assert_ne!(addr(Ipv4Addr::new(4, 0, 5, 0)), addr(Ipv4Addr::new(4, 0, 6, 0)));
+        let mark = |m| normalize_expressions(&lower_to_expression_bytes(&Rule::new("t", "c").match_mark(m).accept()));
+        assert_ne!(mark(0x0005_0004), mark(0x0006_0004));
+
+        // And so do the keys derived for them.
+        let rule = |a| DeclaredRule {
+            table: "t".into(),
+            chain: "c".into(),
+            family: Family::Inet,
+            handle_key: None,
+            body: Rule::new("t", "c").match_daddr_v4(a, 32).accept(),
+        };
+        let keys = super::super::rules::effective_rules(&[
+            rule(Ipv4Addr::new(4, 0, 5, 0)),
+            rule(Ipv4Addr::new(4, 0, 6, 0)),
+        ]);
+        assert_ne!(keys[0].handle_key(), keys[1].handle_key());
+        assert!(!keys[1].handle_key().unwrap().ends_with(".1"), "{:?}", keys[1].handle_key());
+    }
+
+    /// #721: a kernel rule's derived key is recomputed from its body, so a
+    /// rule installed under another normalization still matches.
+    #[test]
+    fn derived_keys_are_recomputed_from_the_kernel_body() {
+        use super::super::super::types::Rule;
+        let body = Rule::new("t", "c").match_tcp_dport(1000).accept();
+        let declared = super::super::rules::effective_rules(&[DeclaredRule {
+            table: "t".into(),
+            chain: "c".into(),
+            family: Family::Inet,
+            handle_key: None,
+            body: body.clone(),
+        }]);
+        let mut kernel = rule_info(lower_to_expression_bytes(&body));
+        kernel.chain = "c".into();
+        kernel.key = Some("~0123456789abcdef".to_string());
+        let rekeyed = super::super::rules::rekey_derived(vec![kernel.clone(), kernel.clone()]);
+        assert_eq!(rekeyed[0].key.as_deref(), declared[0].handle_key());
+        assert_eq!(
+            rekeyed[1].key.as_deref(),
+            Some(format!("{}.1", declared[0].handle_key().unwrap()).as_str())
+        );
+        // An explicit key is the user's, and stays.
+        kernel.key = Some("ssh".to_string());
+        assert_eq!(super::super::rules::rekey_derived(vec![kernel])[0].key.as_deref(), Some("ssh"));
     }
 
     #[test]
-    fn normalize_tlv_garbage_input_passes_through() {
+    fn normalize_expressions_empty_input() {
+        assert!(normalize_expressions(&[]).is_empty());
+    }
+
+    #[test]
+    fn normalize_expressions_garbage_input_passes_through() {
         // Truncated TLV (claims len=100 in a 4-byte buffer) — bail
         // out and return the bytes verbatim. The diff path then
         // sees them as unequal to anything else, which is the
         // correct conservative behavior.
         let garbage = vec![0x64, 0x00, 0x01, 0x00];
-        assert_eq!(normalize_tlv(&garbage), garbage);
+        assert_eq!(normalize_expressions(&garbage), garbage);
     }
 
     // ---- Plan 183 — Display for NftablesDiff ----
