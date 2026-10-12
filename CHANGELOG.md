@@ -2536,6 +2536,20 @@ All notable changes to this project will be documented in this file.
   `Step::AddAddress` was a tuple variant; `Plan` and `Step` are new in this
   release.
 
+- **A plan reads back from its serialized form (#649).** `Plan` and `Step`
+  implement `Deserialize`, so a plan can be reviewed as JSON or YAML and
+  applied later, or by another process. A plan read back applies as the plan
+  would. What an apply and an undo need is in the serialized form:
+  - a link change's kind attributes, by their `IFLA_INFO_DATA` ids;
+  - its bridge-port options and VLANs;
+  - what the link had before;
+  - the reasons;
+  - the plan's owner tag and route protocol.
+
+  `TcHandle`, `BridgePortConfig` and the devconf names deserialize too. A
+  `Step::TcTree` is refused on read for now, because a TC tree has no
+  serialized form yet (#645). It is not read back empty.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

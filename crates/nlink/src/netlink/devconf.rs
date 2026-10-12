@@ -501,6 +501,24 @@ impl serde::Serialize for Ipv6Devconf {
     }
 }
 
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Ipv4Devconf {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+        Self::from_name(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("not an IPv4 devconf setting: {name}")))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Ipv6Devconf {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+        Self::from_name(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("not an IPv6 devconf setting: {name}")))
+    }
+}
+
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for Ipv6Devconf {
     fn schema_name() -> std::borrow::Cow<'static, str> {

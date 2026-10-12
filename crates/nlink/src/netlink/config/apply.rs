@@ -1927,7 +1927,7 @@ async fn change_kind_params(
             ifindexes.push((*t, link.ifindex()));
         }
     }
-    conn.change_link_info_data(ifindex, update.kind, |b| {
+    conn.change_link_info_data(ifindex, &update.kind, |b| {
         for attr in &update.attrs {
             match attr {
                 KindAttr::U8(t, v) => b.append_attr_u8(*t, *v),

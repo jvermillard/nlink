@@ -2363,6 +2363,44 @@ async fn routes_a_link_change_flushes_are_put_back() -> nlink::Result<()> {
     assert_converges("nce-route-flush", cases).await
 }
 
+/// A plan written to JSON and read back applies as the plan does (#649):
+/// one that creates everything, then one that changes a Geneve tunnel's TTL
+/// in place, whose kind attributes travel in the JSON. The config diffs
+/// empty after each, and the owner tag the plan carries is on the links.
+#[cfg(feature = "serde")]
+#[tokio::test]
+async fn a_plan_read_back_from_json_applies() -> nlink::Result<()> {
+    use nlink::netlink::config::Plan;
+    require_root!();
+    nlink::require_modules!("dummy", "geneve");
+
+    let ns = TestNamespace::new("plan-json")?;
+    let conn = ns.connection()?;
+    let cfg = |ttl: u8| -> nlink::Result<NetworkConfig> {
+        NetworkConfig::new()
+            .owner("lab")
+            .link("d0", |l| l.dummy().mtu(1400).up())
+            .link("gn0", move |l| {
+                l.geneve(5).geneve_remote("10.8.0.2".parse().unwrap()).geneve_ttl(ttl).up()
+            })
+            .address("d0", "10.8.0.1/24")?
+            .route("10.8.8.0/24", |r| r.via("10.8.0.2"))
+            .map_err(nlink::Error::from)
+    };
+    for ttl in [10, 20] {
+        let plan = cfg(ttl)?.diff(&conn).await?.plan();
+        assert!(!plan.is_empty());
+        let json = serde_json::to_string(&plan).map_err(nlink::Error::from)?;
+        let back: Plan = serde_json::from_str(&json).map_err(nlink::Error::from)?;
+        let _ = back.apply(&conn, nlink::netlink::config::ApplyOptions::default()).await?;
+        let left = cfg(ttl)?.diff(&conn).await?;
+        assert!(left.is_empty(), "ttl {ttl}: the read-back plan left {left}");
+    }
+    let d0 = &crate::common::converge::ip_json(&ns, &["link", "show", "d0"]).map_err(nlink::Error::invalid_message)?[0];
+    assert_eq!(d0["ifalias"], "lab", "{d0}");
+    Ok(())
+}
+
 /// A plan says why it adds what is there now (#649): d0 moving into a VRF
 /// flushes its IPv6 address and its routes, so the plan re-adds them, and
 /// each step names the link change that flushes it.

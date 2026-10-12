@@ -157,6 +157,7 @@ const NLM_F_EXCL: u16 = 0x200;
 /// # Ok(())
 /// # }
 /// ```
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default)]
 pub struct BridgePortConfig {
     /// STP port state (0 disabled .. 4 blocking).

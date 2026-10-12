@@ -39,7 +39,7 @@ use super::types::tc::tc_handle as raw;
 /// kernel's encoding. Round-trips with `tc(8)` notation via
 /// [`FromStr`] and [`fmt::Display`].
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TcHandle(u32);
 

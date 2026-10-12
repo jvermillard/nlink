@@ -204,7 +204,7 @@ impl PlanOptions {
 
 /// A veth peer's declared settings, changed in the namespace it lives in
 /// (#680): no declaration in this config can name it there.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -754,7 +754,7 @@ pub(crate) fn nexthop_line(n: &DeclaredNexthop, replaced: &[(DeclaredNexthop, De
 }
 
 /// A declared nexthop the apply will not install (#516).
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -805,7 +805,7 @@ impl std::fmt::Display for ConfigDiff {
 /// connected route of `10.0.0.1/24` gone, every gateway on that segment is
 /// unreachable. Give the declared route another metric, or remove the
 /// other route.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -837,7 +837,7 @@ impl std::fmt::Display for RouteConflict {
 }
 
 /// Changes to make to an existing link.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
@@ -896,8 +896,9 @@ pub struct LinkChanges {
     pub set_ipv6_token: Option<std::net::Ipv6Addr>,
     /// Bridge port options to change, one `name value` each (#516).
     pub set_port_options: Vec<String>,
-    /// The config behind `set_port_options`.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// The config behind `set_port_options`. Serialized, so a plan read
+    /// back applies it (#649).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) port_update: Option<crate::netlink::link::BridgePortConfig>,
     /// Port VLANs to add (`+vlan 10 pvid untagged`) or remove (`-vlan 1`)
@@ -905,21 +906,24 @@ pub struct LinkChanges {
     pub set_port_vlans: Vec<String>,
     /// The declared VLAN set behind `set_port_vlans`: the apply reads the
     /// port's and makes them these.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) port_vlans: Option<Vec<super::types::PortVlan>>,
-    /// The attributes behind `set_kind_params`.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// The attributes behind `set_kind_params`: the `IFLA_INFO_DATA`
+    /// attributes the change sends, by id (#649).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) kind_update: Option<KindUpdate>,
     /// What the link had, for the change's inverse (#518). `None` for a
     /// link this apply creates.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) was: Option<LinkWas>,
 }
 
 /// What a link had before a [`LinkChanges`] (#518).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", default))]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LinkWas {
     pub(crate) up: bool,
