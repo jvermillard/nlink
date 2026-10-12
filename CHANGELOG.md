@@ -448,6 +448,20 @@ All notable changes to this project will be documented in this file.
     `ip nexthop` does. `NexthopBuilder::ipv6()` makes an IPv6 one.
   - **Test.** A root test creates both, and fails without the fix.
 
+- **MPLS routes can be added and deleted (#678).** Every MPLS request
+  nlink made failed.
+  - **Label entries carried a TTL.** `MplsEncap` put one in the bottom
+    label entry (255, or what `.ttl()` set), and so did a swap route's
+    `RTA_NEWDST` stack. The kernel takes label entries only with TTL 0:
+    "TTL in label must be 0". The encapsulation's TTL is
+    `MPLS_IPTUNNEL_TTL`'s, which nlink already sends separately.
+  - **Table and type were unset.** `MplsRouteBuilder` and
+    `del_mpls_route` left `rtm_table` at 0, where the kernel takes only
+    main ("MPLS only supports the main route table"). The delete also
+    left `rtm_type` at 0, where only unicast is accepted.
+  - **Tests.** Root tests add an encapsulated route, checking its TTL,
+    and add and delete a swap route. They fail without the fix.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

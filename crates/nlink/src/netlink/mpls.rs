@@ -219,9 +219,9 @@ impl MplsEncap {
         self
     }
 
-    /// Set the TTL for the bottom label.
-    ///
-    /// If not set, defaults to 255.
+    /// Set the TTL the encapsulation gives the packet
+    /// (`MPLS_IPTUNNEL_TTL`). Unset, the kernel's: copied from the IP
+    /// header, or `net.mpls.default_ttl`.
     pub fn ttl(mut self, ttl: u8) -> Self {
         self.ttl = Some(ttl);
         self
@@ -242,15 +242,16 @@ impl MplsEncap {
         self.ttl
     }
 
-    /// Encode the label stack for netlink.
+    /// Encode the label stack for netlink: the bottom of stack marked, and
+    /// no TTL in any entry — the kernel refuses one ("TTL in label must be
+    /// 0"); the TTL is `MPLS_IPTUNNEL_TTL`'s (#678).
     pub(crate) fn encode_labels(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.labels.len() * 4);
-        let ttl = self.ttl.unwrap_or(255);
 
         for (i, label) in self.labels.iter().enumerate() {
             let is_bottom = i == self.labels.len() - 1;
             let entry = if is_bottom {
-                MplsLabelEntry::bottom(label.0, ttl)
+                MplsLabelEntry::bottom(label.0, 0)
             } else {
                 MplsLabelEntry::new(label.0)
             };
@@ -542,10 +543,13 @@ impl MplsRouteBuilder {
 
     /// Write the netlink message with resolved interface index.
     pub(crate) fn write_to(&self, builder: &mut MessageBuilder, ifindex: Option<u32>) {
-        // MPLS routes use dst_len = 20 (label bit width)
+        // MPLS routes use dst_len = 20 (label bit width), and the kernel
+        // takes only the main table and unicast (`rtm_to_route_config`,
+        // #678).
         let rtmsg = RtMsg::new()
             .with_family(AF_MPLS)
             .with_dst_len(20)
+            .with_table(254)
             .with_type(1); // RTN_UNICAST
 
         builder.append(&rtmsg);
@@ -559,8 +563,9 @@ impl MplsRouteBuilder {
             let mut label_data = Vec::with_capacity(self.out_labels.len() * 4);
             for (i, &label) in self.out_labels.iter().enumerate() {
                 let is_bottom = i == self.out_labels.len() - 1;
+                // No TTL in the entry: the kernel refuses one (#678).
                 let entry = if is_bottom {
-                    MplsLabelEntry::bottom(label, 255)
+                    MplsLabelEntry::bottom(label, 0)
                 } else {
                     MplsLabelEntry::new(label)
                 };
@@ -705,7 +710,12 @@ impl Connection<Route> {
     pub async fn del_mpls_route(&self, label: u32) -> Result<()> {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
 
-        let rtmsg = RtMsg::new().with_family(AF_MPLS).with_dst_len(20);
+        // The main table and unicast, as the add sends them (#678).
+        let rtmsg = RtMsg::new()
+            .with_family(AF_MPLS)
+            .with_dst_len(20)
+            .with_table(254)
+            .with_type(1);
         builder.append(&rtmsg);
 
         // RTA_DST with label
@@ -758,6 +768,8 @@ mod tests {
         assert_eq!(encap.get_labels()[2].0, 300);
     }
 
+    /// The TTL goes in `MPLS_IPTUNNEL_TTL`, not in the label entry, which
+    /// the kernel refuses with one (#678).
     #[test]
     fn test_mpls_encap_encode() {
         let encap = MplsEncap::new().label(100).ttl(64);
@@ -768,7 +780,8 @@ mod tests {
         let entry = MplsLabelEntry::from_bytes(&data).unwrap();
         assert_eq!(entry.label(), 100);
         assert!(entry.is_bos());
-        assert_eq!(entry.ttl(), 64);
+        assert_eq!(entry.ttl(), 0);
+        assert_eq!(encap.get_ttl(), Some(64));
     }
 
     #[test]
