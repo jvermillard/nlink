@@ -30,6 +30,19 @@ pub enum Family {
 }
 
 impl Family {
+    /// The name `nft` gives it: `ip`, `ip6`, `inet`, `arp`, `bridge`,
+    /// `netdev` (#523).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ip => "ip",
+            Self::Ip6 => "ip6",
+            Self::Inet => "inet",
+            Self::Arp => "arp",
+            Self::Bridge => "bridge",
+            Self::Netdev => "netdev",
+        }
+    }
+
     pub fn from_u8(val: u8) -> Option<Self> {
         match val {
             2 => Some(Self::Ip),
@@ -40,6 +53,30 @@ impl Family {
             5 => Some(Self::Netdev),
             _ => None,
         }
+    }
+}
+
+/// `nft`'s name for it (#523).
+impl std::fmt::Display for Family {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The family `nft` names so (#523).
+impl std::str::FromStr for Family {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "ip" => Self::Ip,
+            "ip6" => Self::Ip6,
+            "inet" => Self::Inet,
+            "arp" => Self::Arp,
+            "bridge" => Self::Bridge,
+            "netdev" => Self::Netdev,
+            _ => return Err(crate::Error::InvalidMessage(format!("unknown nftables family `{s}`"))),
+        })
     }
 }
 
@@ -3668,6 +3705,17 @@ fn prefix_to_mask(width: usize, prefix: u8) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `nft`'s names, both ways (#523).
+    #[test]
+    fn a_family_shows_and_parses_as_nft_names_it() {
+        for f in [Family::Ip, Family::Ip6, Family::Inet, Family::Arp, Family::Bridge, Family::Netdev] {
+            assert_eq!(f.to_string().parse::<Family>().unwrap(), f);
+        }
+        assert_eq!(Family::Inet.to_string(), "inet");
+        assert!("ipx".parse::<Family>().is_err());
+    }
+
     use super::*;
 
     // -------- TableName newtype --------

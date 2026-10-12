@@ -123,6 +123,14 @@ pub enum NetworkEvent {
     NewMdb(MdbEntry),
     /// A bridge MDB entry was removed.
     DelMdb(MdbEntry),
+
+    // Netconf events (RTM_NEWNETCONF / RTM_DELNETCONF): an interface's
+    // forwarding, rp_filter and the rest — `/proc/sys` changes included.
+    // Subscribe via `RtnetlinkGroup::{Ipv4Netconf, Ipv6Netconf}` (#523).
+    /// An interface's IP configuration changed, or a new one has its own.
+    NewNetconf(super::netconf::NetconfMessage),
+    /// An interface's IP configuration went with it.
+    DelNetconf(super::netconf::NetconfMessage),
 }
 
 impl NetworkEvent {
@@ -143,6 +151,7 @@ impl NetworkEvent {
                 | NetworkEvent::NewNexthop(_)
                 | NetworkEvent::NewNsId(_)
                 | NetworkEvent::NewMdb(_)
+                | NetworkEvent::NewNetconf(_)
         )
     }
 
@@ -168,6 +177,7 @@ impl NetworkEvent {
             | NetworkEvent::DelAction(m) => Some(m.ifindex()),
             NetworkEvent::NewNexthop(m) | NetworkEvent::DelNexthop(m) => m.ifindex(),
             NetworkEvent::NewMdb(m) | NetworkEvent::DelMdb(m) => Some(m.port_ifindex),
+            NetworkEvent::NewNetconf(m) | NetworkEvent::DelNetconf(m) => m.ifindex(),
             NetworkEvent::NewRoute(_)
             | NetworkEvent::DelRoute(_)
             | NetworkEvent::NewRule(_)
@@ -182,6 +192,14 @@ impl NetworkEvent {
     /// Useful for display/logging purposes.
     pub fn action(&self) -> &'static str {
         if self.is_new() { "new" } else { "del" }
+    }
+
+    /// Returns the inner NetconfMessage if this is a netconf event (#523).
+    pub fn as_netconf(&self) -> Option<&super::netconf::NetconfMessage> {
+        match self {
+            NetworkEvent::NewNetconf(m) | NetworkEvent::DelNetconf(m) => Some(m),
+            _ => None,
+        }
     }
 
     /// Returns the inner LinkMessage if this is a link event.

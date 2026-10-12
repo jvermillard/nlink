@@ -483,3 +483,44 @@ async fn an_event_stream_ends_when_its_namespace_is_deleted() -> Result<()> {
     }
     Ok(())
 }
+
+/// A forwarding change made through `/proc/sys` arrives as a netconf event
+/// for its interface, and `get_netconf` dumps `all`, `default` and every
+/// interface (#523). Sysctl drift was invisible to a watcher.
+#[tokio::test]
+async fn a_sysctl_change_arrives_as_a_netconf_event() -> Result<()> {
+    use nlink::netlink::RtnetlinkGroup;
+    use nlink::netlink::netconf::NetconfDevice;
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+
+    let ns = TestNamespace::new("netconf")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    let ifindex = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+    let dump = conn.get_netconf(nlink::AddressFamily::v4()).await?;
+    // A new namespace takes its forwarding from the host's, so whatever
+    // it is, it is there for all three.
+    let forwarding = |device| dump.iter().find(|n| n.device() == Some(device)).and_then(|n| n.forwarding());
+    for device in [NetconfDevice::All, NetconfDevice::Default, NetconfDevice::Index(ifindex)] {
+        assert!(forwarding(device).is_some(), "{device:?}: {dump:?}");
+    }
+    let flipped = 1 - forwarding(NetconfDevice::Index(ifindex)).expect("d0's");
+
+    let watch = ns.connection()?;
+    watch.subscribe(&[RtnetlinkGroup::Ipv4Netconf])?;
+    let mut events = watch.events().await;
+    ns.exec("sysctl", &["-w", &format!("net.ipv4.conf.d0.forwarding={flipped}")])?;
+    crate::common::events::expect_event(
+        &mut events,
+        std::time::Duration::from_secs(5),
+        "d0's forwarding flipped",
+        |e: &NetworkEvent| {
+            e.as_netconf()
+                .is_some_and(|m| m.ifindex() == Some(ifindex) && m.forwarding() == Some(flipped))
+        },
+    )
+    .await?;
+    Ok(())
+}

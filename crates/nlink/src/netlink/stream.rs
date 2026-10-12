@@ -715,6 +715,14 @@ fn parse_route_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
             super::messages::NsIdMessage::parse(payload).map(NetworkEvent::DelNsId)
         }
 
+        // Netconf events (#523)
+        t if t == NlMsgType::RTM_NEWNETCONF => {
+            super::netconf::NetconfMessage::parse(payload).map(NetworkEvent::NewNetconf)
+        }
+        t if t == NlMsgType::RTM_DELNETCONF => {
+            super::netconf::NetconfMessage::parse(payload).map(NetworkEvent::DelNetconf)
+        }
+
         // Bridge multicast-database events
         t if t == NlMsgType::RTM_NEWMDB => {
             super::mdb::parse_mdb_event_payload(payload).map(NetworkEvent::NewMdb)

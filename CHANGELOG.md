@@ -1457,6 +1457,28 @@ All notable changes to this project will be documented in this file.
     child's output and status. They pass as root and in the rootless
     lane.
 
+- **Netconf: sysctl drift as events, and `Family` names (#523, first
+  part).**
+  - **Events.** `NetworkEvent::NewNetconf` and `DelNetconf` carry a
+    `netconf::NetconfMessage`: one interface's IP configuration, or
+    `all`'s, or `default`'s (`NetconfDevice`). It holds `forwarding`,
+    `rp_filter`, `mc_forwarding`, `proxy_neigh`,
+    `ignore_routes_with_linkdown`, `input` and `bc_forwarding`. The
+    kernel sends one when these change, through `/proc/sys` too.
+  - **Groups.** `RtnetlinkGroup::Ipv4Netconf` and `Ipv6Netconf` subscribe
+    to them, and `subscribe_all` now joins both.
+  - **Dump.** `Connection::get_netconf(family)` dumps the current
+    values. `rtnetlink_snapshot`, and so a resync stream's snapshot,
+    includes them.
+  - **`Family` names.** `nftables::Family` gains `Display`, `FromStr` and
+    `name()`, with `nft`'s names: `ip`, `ip6`, `inet`, `arp`, `bridge`,
+    `netdev`.
+  - **Tests.**
+    - A root test flips an interface's forwarding through `sysctl` and
+      expects the event. It also checks that the dump has `all`,
+      `default` and the interface.
+    - Unit tests cover the parser and `Family`'s names.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

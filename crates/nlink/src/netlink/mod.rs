@@ -116,6 +116,7 @@ pub mod namespace_events;
 #[cfg(feature = "namespace_watcher")]
 pub mod namespace_watcher;
 pub mod neigh;
+pub mod netconf;
 pub mod netfilter;
 pub mod nexthop;
 pub mod nftables;
