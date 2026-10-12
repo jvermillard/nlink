@@ -415,6 +415,16 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) routes_replaced: Vec<(DeclaredRoute, DeclaredRoute)>,
+    /// The addresses in `addresses_to_add` that are there now, and that a
+    /// link change in this apply flushes, with why (#649):
+    /// `(declared, reason)`. Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) addresses_readded: Vec<(DeclaredAddress, String)>,
+    /// The same for the routes in `routes_to_add` (#649).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) routes_readded: Vec<(DeclaredRoute, String)>,
     /// The protocol the apply installs declared routes with: the config's
     /// [`routes_protocol`](super::NetworkConfig::routes_protocol) (#512).
     /// Not shown or serialized.
@@ -1568,6 +1578,45 @@ pub(crate) fn diff_snapshot(
         .iter()
         .filter_map(|ifindex| ifindex_to_name.get(ifindex).copied())
         .collect();
+    // Why each flushed link is flushed, for the steps that put back what it
+    // loses (#649).
+    let mut flush_cause: HashMap<u32, String> = HashMap::new();
+    for name in &flushing {
+        let Some(link) = link_by_name.get(name) else {
+            continue;
+        };
+        let goes_down = diff
+            .links_to_modify
+            .iter()
+            .any(|(n, c)| n == name && c.set_down);
+        let why = if goes_down {
+            format!("flushed when {name} goes down")
+        } else {
+            format!("flushed when {name} changes master")
+        };
+        flush_cause.insert(link.ifindex(), why);
+    }
+    for ifindex in &plan.cycled {
+        if let Some(name) = ifindex_to_name.get(ifindex) {
+            flush_cause
+                .entry(*ifindex)
+                .or_insert_with(|| format!("flushed when {name} leaves its recreated master"));
+        }
+    }
+    for ifindex in &flushed {
+        if flush_cause.contains_key(ifindex) {
+            continue;
+        }
+        // A VLAN the kernel takes down with its lower device.
+        let lower = current_links
+            .iter()
+            .find(|l| l.ifindex() == *ifindex)
+            .and_then(|l| l.link())
+            .and_then(|lower| ifindex_to_name.get(&lower));
+        if let Some(lower) = lower {
+            flush_cause.insert(*ifindex, format!("flushed when {lower}, under it, goes down"));
+        }
+    }
     let current_routes: Vec<RouteMessage> = current_routes
         .into_iter()
         .filter(|r| r.oif().is_none_or(|oif| !flushed.contains(&oif)))
@@ -1606,6 +1655,36 @@ pub(crate) fn diff_snapshot(
 
     // Diff routes
     diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
+
+    // What is there now and goes with a flushed link is a re-add (#649).
+    let cause_of = |dev: &str| {
+        let link = link_by_name.get(dev)?;
+        Some((link.ifindex(), flush_cause.get(&link.ifindex())?))
+    };
+    for a in &diff.addresses_to_add {
+        if let Some((ifindex, why)) = cause_of(&a.dev)
+            && current_addresses.iter().any(|c| {
+                c.ifindex() == ifindex && c.address() == Some(&a.address) && c.prefix_len() == a.prefix_len
+            })
+        {
+            diff.addresses_readded.push((a.clone(), format!("re-add: {why}")));
+        }
+    }
+    for r in &diff.routes_to_add {
+        let was_there = |oif: u32| {
+            snapshot.routes.iter().any(|live| {
+                live.oif() == Some(oif)
+                    && live.destination() == Some(&r.destination)
+                    && live.dst_len() == r.prefix_len
+                    && live.table_id() == r.table.unwrap_or(254)
+            })
+        };
+        if let Some((ifindex, why)) = r.dev.as_deref().and_then(cause_of)
+            && was_there(ifindex)
+        {
+            diff.routes_readded.push((r.clone(), format!("re-add: {why}")));
+        }
+    }
 
     // Diff qdiscs
     diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, opts, &mut diff);

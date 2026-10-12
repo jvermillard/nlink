@@ -2363,6 +2363,44 @@ async fn routes_a_link_change_flushes_are_put_back() -> nlink::Result<()> {
     assert_converges("nce-route-flush", cases).await
 }
 
+/// A plan says why it adds what is there now (#649): d0 moving into a VRF
+/// flushes its IPv6 address and its routes, so the plan re-adds them, and
+/// each step names the link change that flushes it.
+#[tokio::test]
+async fn a_plan_says_why_it_readds() -> nlink::Result<()> {
+    use nlink::netlink::config::Step;
+    require_root!();
+    nlink::require_modules!("dummy", "vrf");
+
+    let ns = TestNamespace::new("plan-readd")?;
+    let conn = ns.connection()?;
+    let cfg = |master: bool| -> nlink::Result<NetworkConfig> {
+        NetworkConfig::new()
+            .link("vrf0", |l| l.vrf(10).up())
+            .link("d0", move |l| if master { l.dummy().master("vrf0").up() } else { l.dummy().nomaster().up() })
+            .address("d0", "10.7.1.1/24")?
+            .address("d0", "fd00:7::1/64")?
+            .route("10.7.0.0/16", |r| r.dev("d0"))
+            .map_err(nlink::Error::from)
+    };
+    let _ = cfg(false)?.apply(&conn).await?;
+    let plan = cfg(true)?.diff(&conn).await?.plan();
+    let why = "re-add: flushed when d0 changes master";
+    let readd_v6 = plan.steps.iter().find_map(|s| match s {
+        Step::AddAddress { address, reason } if address.address().is_ipv6() => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(readd_v6, Some(Some(why.to_string())), "{plan}");
+    let readd_route = plan.steps.iter().find_map(|s| match s {
+        Step::ReplaceRoute { after, reason, .. } if after.prefix_len() == 16 => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(readd_route, Some(Some(why.to_string())), "{plan}");
+    // Each one's reason is the step's.
+    assert!(plan.steps.iter().any(|s| s.reason().as_deref() == Some(why)), "{plan}");
+    Ok(())
+}
+
 /// A route through a link declared down cannot exist — the kernel refuses
 /// one (`fib_check_nh_nongw`: "Device for nexthop is not up", ENETDOWN;
 /// IPv6 the same) and flushes the ones there when the link goes down. The
