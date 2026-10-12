@@ -424,7 +424,10 @@ async fn nat_ranges_and_flags_reconcile_and_list_as_nft_writes_them() -> nlink::
             "fully-random",
             "persistent",
             "snat ip6 to 2001:db8::1-2001:db8::9",
-            "netmap",
+            // nft writes NF_NAT_RANGE_NETMAP as `prefix`. (This said
+            // "netmap", which matched the rule's old `nlink:netmap` comment
+            // whatever the flags were.)
+            "snat ip prefix to 10.9.0.0/24",
             "masquerade to :1024-2048 random",
             "dnat ip to :8080",
             "dnat ip to 10.0.1.10:8000-8999",

@@ -180,7 +180,7 @@ impl RulesetSnapshot {
                     family,
                     handle: next(),
                     position: None,
-                    comment_text: super::super::userdata::rule_comment_text(key.as_deref(), comment.as_deref()),
+                    comment_text: comment.clone(),
                     userdata_raw: super::super::userdata::encode_rule_userdata(key.as_deref(), comment.as_deref())
                         .ok()
                         .flatten(),

@@ -38,16 +38,11 @@ pub(crate) const NFTNL_UDATA_COMMENT_MAXLEN: usize = 128;
 /// externally (`iptables-nft`, hand-edited via `nft -f`, etc.).
 const NLINK_PREFIX: &str = "nlink:";
 
-/// The comment text a rule carries: `nlink:<key>`, `nlink:<key> <comment>`,
-/// or — for a rule nlink does not manage — the comment verbatim.
-pub(crate) fn rule_comment_text(key: Option<&str>, comment: Option<&str>) -> Option<String> {
-    match (key, comment) {
-        (Some(key), Some(comment)) => Some(format!("{NLINK_PREFIX}{key} {comment}")),
-        (Some(key), None) => Some(format!("{NLINK_PREFIX}{key}")),
-        (None, Some(comment)) => Some(comment.to_string()),
-        (None, None) => None,
-    }
-}
+/// The TLV type nlink keeps a rule's key in (#527), apart from its comment.
+/// libnftnl defines 0 (comment) and 1 (eBPF) for rules, and `nft` skips
+/// the types it does not know, so the key stays out of `nft list`.
+pub(crate) const NLINK_UDATA_RULE_KEY: u8 = 0xF0;
+
 
 /// Encode a rule's key and comment as a libnftnl-compatible TLV `userdata`
 /// payload, suitable for `NFTA_RULE_USERDATA`. `Ok(None)` when the rule has
@@ -61,29 +56,38 @@ pub(crate) fn encode_rule_userdata(
     key: Option<&str>,
     comment: Option<&str>,
 ) -> crate::netlink::error::Result<Option<Vec<u8>>> {
-    let Some(text) = rule_comment_text(key, comment) else {
-        return Ok(None);
-    };
-    if text.contains('\0') {
-        return Err(crate::netlink::error::Error::InvalidMessage(
-            "rule comment contains a NUL byte".into(),
-        ));
+    // The comment as `nft list` shows it, then the key in its own TLV
+    // (#527): the comment used to be `nlink:<key> <comment>`, and the two
+    // shared its 127 bytes.
+    let mut out = Vec::new();
+    if let Some(comment) = comment {
+        out.extend(rule_tlv(NFTNL_UDATA_RULE_COMMENT, "rule comment", comment)?);
     }
-    let body = format!("{text}\0");
-    let body_bytes = body.as_bytes();
-    if body_bytes.len() > NFTNL_UDATA_COMMENT_MAXLEN {
+    if let Some(key) = key {
+        out.extend(rule_tlv(NLINK_UDATA_RULE_KEY, "rule key", key)?);
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+/// One NUL-terminated rule TLV, refused past libnftnl's 127 bytes.
+fn rule_tlv(kind: u8, what: &str, text: &str) -> crate::netlink::error::Result<Vec<u8>> {
+    if text.contains('\0') {
         return Err(crate::netlink::error::Error::InvalidMessage(format!(
-            "rule comment `{text}` is {} bytes; the kernel keeps at most {} \
-             (`nlink:<key>` and a following comment share that space)",
+            "{what} contains a NUL byte"
+        )));
+    }
+    let len = text.len() + 1;
+    if len > NFTNL_UDATA_COMMENT_MAXLEN {
+        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+            "{what} `{text}` is {} bytes; the kernel keeps at most {}",
             text.len(),
             NFTNL_UDATA_COMMENT_MAXLEN - 1,
         )));
     }
-    let mut tlv = Vec::with_capacity(2 + body_bytes.len());
-    tlv.push(NFTNL_UDATA_RULE_COMMENT);
-    tlv.push(body_bytes.len() as u8);
-    tlv.extend_from_slice(body_bytes);
-    Ok(Some(tlv))
+    let mut tlv = vec![kind, len as u8];
+    tlv.extend_from_slice(text.as_bytes());
+    tlv.push(0);
+    Ok(tlv)
 }
 
 /// Encode a bare key, as `nlink:<key>`. Test convenience.
@@ -108,18 +112,28 @@ pub(crate) fn encode_nlink_comment(key: &str) -> Option<Vec<u8>> {
 ///
 /// [`RuleInfo::userdata_raw`]: super::types::RuleInfo
 pub(crate) fn parse_nlink_comment(userdata: &[u8]) -> Option<String> {
+    if let Some(key) = comment_of(userdata, NLINK_UDATA_RULE_KEY) {
+        return Some(key);
+    }
+    // A rule written before #527: `nlink:<key>[ <comment>]` in the comment.
     let text = parse_comment(userdata)?;
     let rest = text.strip_prefix(NLINK_PREFIX)?;
     // The key runs to the first space; what follows is a human comment.
     Some(rest.split_once(' ').map_or(rest, |(key, _)| key).to_string())
 }
 
-/// The human part of an nlink comment — what follows `nlink:<key> ` — or
-/// the whole text for a comment nlink did not write.
-pub(crate) fn human_comment(comment_text: &str) -> Option<&str> {
-    match comment_text.strip_prefix(NLINK_PREFIX) {
-        Some(rest) => rest.split_once(' ').map(|(_, human)| human),
-        None => Some(comment_text),
+/// A rule's comment without nlink's key: the comment TLV as it is when the
+/// key has its own TLV, else what follows `nlink:<key> ` in a comment
+/// written before #527, else the whole comment of a rule nlink did not
+/// write.
+pub(crate) fn human_comment_of(userdata: &[u8]) -> Option<String> {
+    let text = parse_comment(userdata)?;
+    if comment_of(userdata, NLINK_UDATA_RULE_KEY).is_some() {
+        return Some(text);
+    }
+    match text.strip_prefix(NLINK_PREFIX) {
+        Some(rest) => rest.split_once(' ').map(|(_, human)| human.to_string()),
+        None => Some(text),
     }
 }
 
@@ -217,26 +231,48 @@ mod tests {
     fn encode_then_parse_round_trips() {
         let key = "input/ssh-accept";
         let encoded = encode_nlink_comment(key).expect("encode");
-        // TLV: type=0, length=22 (6 prefix + 16 key + 1 nul),
-        //      payload=b"nlink:input/ssh-accept\0"
-        assert_eq!(encoded[0], NFTNL_UDATA_RULE_COMMENT);
-        assert_eq!(encoded[1] as usize, NLINK_PREFIX.len() + key.len() + 1);
-        let decoded = parse_nlink_comment(&encoded).expect("decode");
-        assert_eq!(decoded, key);
+        // The key alone: its own TLV, no comment for nft to show.
+        assert_eq!(encoded[0], NLINK_UDATA_RULE_KEY);
+        assert_eq!(encoded[1] as usize, key.len() + 1);
+        assert_eq!(parse_nlink_comment(&encoded).as_deref(), Some(key));
+        assert_eq!(parse_comment(&encoded), None);
+        assert_eq!(human_comment_of(&encoded), None);
     }
 
+    /// #527: the key and the comment each have libnftnl's 127 bytes.
     #[test]
-    fn encode_rejects_overlong_key() {
-        // Total payload (prefix + key + nul) must fit in 128 bytes.
-        let too_long = "x".repeat(NFTNL_UDATA_COMMENT_MAXLEN);
-        assert!(encode_nlink_comment(&too_long).is_none());
+    fn the_key_and_the_comment_each_have_127_bytes() {
+        let key = "k".repeat(127);
+        let comment = "c".repeat(127);
+        let encoded = encode_rule_userdata(Some(&key), Some(&comment)).unwrap().unwrap();
+        assert_eq!(parse_nlink_comment(&encoded).as_deref(), Some(key.as_str()));
+        assert_eq!(parse_comment(&encoded).as_deref(), Some(comment.as_str()));
+        assert_eq!(human_comment_of(&encoded).as_deref(), Some(comment.as_str()));
+        assert!(encode_rule_userdata(Some(&"k".repeat(128)), None).is_err());
+        assert!(encode_rule_userdata(None, Some(&"c".repeat(128))).is_err());
     }
 
+    /// A rule written before #527 still has its key, and its comment.
     #[test]
-    fn encode_accepts_max_size_key() {
-        let max_key_len = NFTNL_UDATA_COMMENT_MAXLEN - NLINK_PREFIX.len() - 1;
-        let max_key = "x".repeat(max_key_len);
-        assert!(encode_nlink_comment(&max_key).is_some());
+    fn a_key_in_the_comment_still_reads() {
+        let body = b"nlink:ssh allow admins\0";
+        let mut tlv = vec![NFTNL_UDATA_RULE_COMMENT, body.len() as u8];
+        tlv.extend_from_slice(body);
+        assert_eq!(parse_nlink_comment(&tlv).as_deref(), Some("ssh"));
+        assert_eq!(human_comment_of(&tlv).as_deref(), Some("allow admins"));
+        let bare = b"nlink:ssh\0";
+        let mut tlv = vec![NFTNL_UDATA_RULE_COMMENT, bare.len() as u8];
+        tlv.extend_from_slice(bare);
+        assert_eq!(human_comment_of(&tlv), None);
+    }
+
+    /// With the key in its own TLV, a comment that starts `nlink:` is the
+    /// user's, whole.
+    #[test]
+    fn a_comment_beside_a_key_is_taken_whole() {
+        let encoded = encode_rule_userdata(Some("k"), Some("nlink:looks like a key")).unwrap().unwrap();
+        assert_eq!(parse_nlink_comment(&encoded).as_deref(), Some("k"));
+        assert_eq!(human_comment_of(&encoded).as_deref(), Some("nlink:looks like a key"));
     }
 
     #[test]
@@ -305,9 +341,9 @@ mod comment_tests {
     }
 
     #[test]
-    fn an_nlink_comment_has_both() {
-        let ours = encode_nlink_comment("k").unwrap();
+    fn an_nlink_rule_has_its_key_and_its_comment_apart() {
+        let ours = encode_rule_userdata(Some("k"), Some("hello")).unwrap().unwrap();
         assert_eq!(parse_nlink_comment(&ours).as_deref(), Some("k"));
-        assert_eq!(parse_comment(&ours).as_deref(), Some("nlink:k"));
+        assert_eq!(parse_comment(&ours).as_deref(), Some("hello"));
     }
 }
