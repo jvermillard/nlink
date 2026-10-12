@@ -174,6 +174,7 @@ impl std::fmt::Display for Error {
                 message,
                 ext_ack,
                 ext_ack_offset,
+                ..
             } if !self.0.context.is_empty() => f.write_str(&format_kernel_tail(
                 message,
                 *errno,
@@ -283,6 +284,10 @@ pub enum ErrorDetail {
         /// Byte offset into the original request where the kernel
         /// detected the problem, from `NLMSGERR_ATTR_OFFS`.
         ext_ack_offset: Option<u32>,
+        /// The `nlmsg_type` of the request the kernel refused, from the
+        /// header it echoes (#526): what [`Error::kind`] reads an errno
+        /// against. `None` for an error not built from a kernel reply.
+        request_type: Option<u16>,
     },
 
     /// The kernel refused an nftables batch.
@@ -892,6 +897,17 @@ impl Error {
         ext_ack: Option<String>,
         ext_ack_offset: Option<u32>,
     ) -> Self {
+        Self::from_kernel_reply(errno, None, ext_ack, ext_ack_offset)
+    }
+
+    /// The kernel's refusal of a request of type `request_type` (#526),
+    /// which [`kind`](Self::kind) reads the errno against.
+    pub(crate) fn from_kernel_reply(
+        errno: i32,
+        request_type: Option<u16>,
+        ext_ack: Option<String>,
+        ext_ack_offset: Option<u32>,
+    ) -> Self {
         let errno = errno.abs();
         let message = strerror(errno);
         ErrorDetail::Kernel {
@@ -899,8 +915,18 @@ impl Error {
             message,
             ext_ack,
             ext_ack_offset,
+            request_type,
         }
         .into()
+    }
+
+    /// The `nlmsg_type` of the request the kernel refused, if this is its
+    /// refusal (#526).
+    pub fn request_type(&self) -> Option<u16> {
+        match self.detail() {
+            ErrorDetail::Kernel { request_type, .. } => *request_type,
+            _ => None,
+        }
     }
 
     /// Create a kernel error with operation context (no ext-ack info).
@@ -1111,6 +1137,19 @@ impl Error {
             | ErrorDetail::AddressParse(_)
             | ErrorDetail::RouteParse(_) => ErrorKind::Invalid,
             ErrorDetail::Internal(_) => ErrorKind::Other,
+            // An errno means "not there" only for some requests (#526): the
+            // kernel answers a route delete that matches nothing with ESRCH,
+            // and an address delete with EADDRNOTAVAIL.
+            ErrorDetail::Kernel {
+                errno: libc::ESRCH,
+                request_type: Some(crate::netlink::message::NlMsgType::RTM_DELROUTE),
+                ..
+            }
+            | ErrorDetail::Kernel {
+                errno: libc::EADDRNOTAVAIL,
+                request_type: Some(crate::netlink::message::NlMsgType::RTM_DELADDR),
+                ..
+            } => ErrorKind::NotFound,
             _ => self.errno().map_or(ErrorKind::Other, ErrorKind::from_errno),
         }
     }
@@ -1130,7 +1169,9 @@ impl Error {
     /// (`is_busy`, `is_permission_denied`, `is_already_exists`)
     /// already handled. Plan 212 closes the asymmetry.
     pub fn is_not_found(&self) -> bool {
-        if matches!(self.errno(), Some(libc::ENOENT) | Some(libc::ENODEV)) {
+        if matches!(self.errno(), Some(libc::ENOENT) | Some(libc::ENODEV))
+            || self.kind() == ErrorKind::NotFound
+        {
             return true;
         }
         matches!(
@@ -1902,6 +1943,7 @@ mod tests {
             message: "Invalid argument".into(),
             ext_ack: Some("attribute IFLA_MTU rejected: value 0 out of range".into()),
             ext_ack_offset: Some(24),
+            request_type: None,
         });
         assert_eq!(
             err.ext_ack(),
@@ -1929,6 +1971,7 @@ mod tests {
             message: "EINVAL".into(),
             ext_ack: None,
             ext_ack_offset: None,
+            request_type: None,
         });
         assert_eq!(err.ext_ack(), None);
         assert_eq!(err.ext_ack_offset(), None);
@@ -1961,6 +2004,7 @@ mod tests {
             message: "ENOBUFS".into(),
             ext_ack: None,
             ext_ack_offset: None,
+            request_type: None,
         });
         assert!(err.is_no_buffer_space());
     }

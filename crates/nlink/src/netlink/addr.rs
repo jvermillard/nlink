@@ -769,8 +769,8 @@ impl Connection<Route> {
         match self.del_address(ifname, address, prefix_len).await {
             Ok(()) => Ok(true),
             // RTM_DELADDR answers "address not present" with
-            // EADDRNOTAVAIL.
-            Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => Ok(false),
+            // EADDRNOTAVAIL, which `is_not_found()` reads as such (#526).
+            Err(e) if e.is_not_found() => Ok(false),
             Err(e) => Err(e),
         }
     }
