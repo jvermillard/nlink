@@ -462,6 +462,23 @@ All notable changes to this project will be documented in this file.
   - **Tests.** Root tests add an encapsulated route, checking its TTL,
     and add and delete a swap route. They fail without the fix.
 
+- **`BpfFilter::from_pinned` and `BpfAction::from_pinned` failed on every
+  real pin (#710).** They opened the pin with `open(2)`, which bpffs
+  refuses (`EIO`): a pinned program's inode has no usable `open`.
+  - Both now open it with `bpf(BPF_OBJ_GET)`.
+  - The fd is held so that clones share it, and it is closed with the
+    last clone. Both used to leak it.
+  - `BpfAction`'s open failure is an io error now, not `InvalidMessage`,
+    so a missing pin answers `is_not_found()`.
+  - `BpfFilter::parse_params` had a third copy of the `open(2)` path, for
+    `pinned`/`object-pinned`. It goes through the same opener now. So do
+    `nlink-tc filter … bpf pinned <path>`, `nlink-tc action … bpf pinned
+    <path>` and `examples/route/tc/bpf.rs`.
+  - **Test.** A root test loads and pins a program of each type, then
+    attaches them as a filter and as an action. It needs `CAP_BPF` in the
+    initial user namespace, so it skips in the rootless CI lane.
+    `cls_bpf` and `act_bpf` join the CI module lists.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

@@ -4523,7 +4523,7 @@ impl ActionList {
 #[must_use = "builders do nothing unless used"]
 pub struct BpfAction {
     /// BPF program file descriptor.
-    fd: i32,
+    fd: super::bpf_fd::ProgFd,
     /// Optional human-readable program name.
     name: Option<String>,
     /// Verdict for this action (TC_ACT_*).
@@ -4537,6 +4537,10 @@ impl BpfAction {
     /// Loading is the caller's responsibility — use `aya` or `libbpf-rs`.
     /// Default verdict is `TC_ACT_PIPE` (continue to next action).
     pub fn from_fd(fd: i32) -> Self {
+        Self::with_fd(super::bpf_fd::ProgFd::Raw(fd))
+    }
+
+    fn with_fd(fd: super::bpf_fd::ProgFd) -> Self {
         Self {
             fd,
             name: None,
@@ -4547,12 +4551,11 @@ impl BpfAction {
     /// Open a pinned BPF program at `path` and use its file descriptor.
     ///
     /// The program must be pinned via `bpf_obj_pin()` or
-    /// `bpftool prog pin id <id> /sys/fs/bpf/<name>`.
+    /// `bpftool prog pin id <id> /sys/fs/bpf/<name>`. It is opened with
+    /// `bpf(BPF_OBJ_GET)` — bpffs refuses `open(2)` on a pin (#710) — and
+    /// the fd is closed with the last clone of the action.
     pub fn from_pinned(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        use std::os::unix::io::IntoRawFd;
-        let file = std::fs::File::open(path.as_ref())
-            .map_err(|e| Error::InvalidMessage(format!("open BPF pin: {e}")))?;
-        Ok(Self::from_fd(file.into_raw_fd()))
+        Ok(Self::with_fd(super::bpf_fd::ProgFd::open_pinned(path.as_ref())?))
     }
 
     /// Set the program's human-readable name.
@@ -4615,7 +4618,11 @@ impl BpfAction {
                             "bpf: only one of `pinned` / `fd` may be specified".to_string(),
                         ));
                     }
-                    source = Some(Self::from_pinned(s)?);
+                    source = Some(Self::from_pinned(s).map_err(|e| {
+                        Error::InvalidMessage(format!(
+                            "bpf: failed to open pinned program `{s}`: {e}"
+                        ))
+                    })?);
                     i += 2;
                 }
                 "fd" => {
@@ -4680,7 +4687,7 @@ impl ActionConfig for BpfAction {
 
         let parms = bpf_act::TcActBpf::new(self.action);
         builder.append_attr(bpf_act::TCA_ACT_BPF_PARMS, parms.as_bytes());
-        builder.append_attr_u32(bpf_act::TCA_ACT_BPF_FD, self.fd as u32);
+        builder.append_attr_u32(bpf_act::TCA_ACT_BPF_FD, self.fd.raw() as u32);
         if let Some(ref name) = self.name {
             builder.append_attr_str(bpf_act::TCA_ACT_BPF_NAME, name);
         }
@@ -5687,7 +5694,7 @@ mod tests {
     fn test_bpf_action_default_pipe() {
         let bpf = BpfAction::from_fd(42);
         assert_eq!(bpf.action, action::TC_ACT_PIPE);
-        assert_eq!(bpf.fd, 42);
+        assert_eq!(bpf.fd.raw(), 42);
         assert!(bpf.name.is_none());
         assert_eq!(ActionConfig::kind(&bpf), "bpf");
     }
@@ -6629,8 +6636,7 @@ mod tests {
     #[test]
     fn bpf_parse_params_pinned_missing_path_errors() {
         let err = BpfAction::parse_params(&["pinned", "/nonexistent/xyzzy"]).unwrap_err();
-        // Open errors are reported via the from_pinned helper.
-        assert!(err.to_string().contains("open BPF pin"));
+        assert!(err.to_string().contains("bpf: failed to open pinned program"), "{err}");
     }
 
     #[test]

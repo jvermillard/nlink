@@ -86,6 +86,7 @@ pub mod attr;
 pub mod audit;
 pub mod batch;
 pub mod bridge_vlan;
+pub(crate) mod bpf_fd;
 mod builder;
 pub mod config;
 pub mod connection;

@@ -2984,3 +2984,127 @@ async fn the_tc_verbs_do_what_their_table_says() -> Result<()> {
     assert!(hook.get().await?.is_none());
     Ok(())
 }
+
+/// #710: a program pinned in bpffs, attached through `from_pinned` as a
+/// filter and as an action. bpffs refuses `open(2)` on a pin (`EIO`); only
+/// `bpf(BPF_OBJ_GET)` opens it.
+#[tokio::test]
+async fn a_pinned_bpf_program_attaches_as_filter_and_action() -> Result<()> {
+    use nlink::netlink::{
+        action::{ActionList, BpfAction},
+        filter::BpfFilter,
+        tc::ClsactConfig,
+    };
+    require_root!();
+    // Loading a program needs CAP_BPF in the initial user namespace.
+    nlink::require_host_root!();
+    nlink::require_modules!("cls_bpf", "act_bpf", "cls_matchall");
+
+    let (ns, conn) = setup_tc_ns("bpf-pin").await?;
+    conn.add_qdisc("dummy0", ClsactConfig::new()).await?;
+    let classifier = BpfPin::load("cls", BPF_PROG_TYPE_SCHED_CLS)?;
+    let act = BpfPin::load("act", BPF_PROG_TYPE_SCHED_ACT)?;
+
+    // The tc(8)-syntax parsers open pins the same way.
+    let cls_path = classifier.path.to_str().unwrap();
+    let _ = BpfFilter::parse_params(&["pinned", cls_path, "da"])?;
+    let _ = BpfAction::parse_params(&["pinned", act.path.to_str().unwrap()])?;
+
+    let filter = BpfFilter::from_pinned(&classifier.path)?.direct_action().build();
+    conn.add_filter("dummy0", TcHandle::CLSACT_INGRESS, filter).await?;
+    let action = BpfAction::from_pinned(&act.path)?.name("pinned_act").build();
+    let matchall = MatchallFilter::new()
+        .actions(ActionList::new().with(action))
+        .build();
+    conn.add_filter("dummy0", TcHandle::CLSACT_EGRESS, matchall).await?;
+
+    let ingress = ns.exec("tc", &["filter", "show", "dev", "dummy0", "ingress"])?;
+    assert!(ingress.contains(" bpf ") && ingress.contains("direct-action"), "{ingress}");
+    let egress = ns.exec("tc", &["filter", "show", "dev", "dummy0", "egress"])?;
+    assert!(egress.contains("bpf pinned_act"), "{egress}");
+    Ok(())
+}
+
+const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
+const BPF_PROG_TYPE_SCHED_ACT: u32 = 4;
+
+/// A program that returns 0, of a given type, pinned in bpffs and unpinned
+/// on drop.
+struct BpfPin {
+    path: std::path::PathBuf,
+}
+
+impl BpfPin {
+    fn load(tag: &str, prog_type: u32) -> Result<Self> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // `union bpf_attr`'s BPF_PROG_LOAD and BPF_OBJ_* members, as far
+        // as they are used.
+        #[repr(C)]
+        struct ProgLoad {
+            prog_type: u32,
+            insn_cnt: u32,
+            insns: u64,
+            license: u64,
+            log_level: u32,
+            log_size: u32,
+            log_buf: u64,
+            kern_version: u32,
+            prog_flags: u32,
+        }
+        #[repr(C)]
+        struct ObjPin {
+            pathname: u64,
+            bpf_fd: u32,
+            file_flags: u32,
+            path_fd: i32,
+            pad: u32,
+        }
+        fn bpf<T>(cmd: libc::c_long, attr: &T) -> std::io::Result<i64> {
+            // SAFETY: `attr` is a fully initialized `bpf_attr` prefix of
+            // the size passed, and every pointer in it outlives the call.
+            let ret = unsafe {
+                libc::syscall(libc::SYS_bpf, cmd, attr as *const T, std::mem::size_of::<T>())
+            };
+            if ret < 0 { Err(std::io::Error::last_os_error()) } else { Ok(ret) }
+        }
+        // r0 = 0; exit. Byte 0 is the opcode on either byte order.
+        let insns: [[u8; 8]; 2] = [[0xb7, 0, 0, 0, 0, 0, 0, 0], [0x95, 0, 0, 0, 0, 0, 0, 0]];
+        let license = c"GPL";
+        let load = ProgLoad {
+            prog_type,
+            insn_cnt: 2,
+            insns: insns.as_ptr() as u64,
+            license: license.as_ptr() as u64,
+            log_level: 0,
+            log_size: 0,
+            log_buf: 0,
+            kern_version: 0,
+            prog_flags: 0,
+        };
+        let fd = bpf(5, &load)?;
+        // SAFETY: the kernel just returned this fd; the pin keeps the
+        // program once it closes.
+        let prog = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        let path = std::path::PathBuf::from(format!(
+            "/sys/fs/bpf/nlink-test-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let pin = ObjPin {
+            pathname: cpath.as_ptr() as u64,
+            bpf_fd: std::os::fd::AsRawFd::as_raw_fd(&prog) as u32,
+            file_flags: 0,
+            path_fd: 0,
+            pad: 0,
+        };
+        bpf(6, &pin)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for BpfPin {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
