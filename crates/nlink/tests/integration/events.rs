@@ -524,3 +524,42 @@ async fn a_sysctl_change_arrives_as_a_netconf_event() -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// Each event carries who caused it (#523): an address this connection
+/// added comes with its port id and the request's sequence number; the
+/// carrier loss the kernel reports on a veth whose peer went down comes
+/// with port id 0. (Not every notification names its requester: the
+/// kernel reports a new link with port id 0 even when a request made it.)
+#[tokio::test]
+async fn an_event_says_who_caused_it() -> Result<()> {
+    use nlink::netlink::EventMeta;
+    use nlink::netlink::link::VethLink;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "veth");
+
+    let ns = TestNamespace::new("event-meta")?;
+    let conn = ns.connection()?;
+    let watch = ns.connection()?;
+    watch.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
+    let mut events = watch.events().await.with_meta();
+
+    conn.add_link(DummyLink::new("m0")).await?;
+    conn.add_address(Ipv4Address::new("m0", Ipv4Addr::new(10, 93, 0, 1), 24)).await?;
+    let (meta, _) = expect_event(&mut events, Duration::from_secs(5), "m0's address", |(_, e): &(EventMeta, NetworkEvent)| {
+        matches!(e, NetworkEvent::NewAddress(a) if a.address() == Some(&IpAddr::V4(Ipv4Addr::new(10, 93, 0, 1))))
+    })
+    .await?;
+    assert_eq!(meta.portid, conn.socket().pid());
+    assert!(!meta.is_kernel() && meta.seq != 0, "{meta:?}");
+
+    conn.add_link(VethLink::new("v0", "v1")).await?;
+    conn.set_link_up("v0").await?;
+    conn.set_link_up("v1").await?;
+    conn.set_link_down("v1").await?;
+    let (meta, _) = expect_event(&mut events, Duration::from_secs(5), "v0 losing carrier, from the kernel", |(m, e): &(EventMeta, NetworkEvent)| {
+        m.is_kernel() && matches!(e, NetworkEvent::NewLink(l) if l.name() == Some("v0"))
+    })
+    .await?;
+    assert_eq!((meta.portid, meta.seq), (0, 0));
+    Ok(())
+}

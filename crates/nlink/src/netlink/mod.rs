@@ -213,5 +213,5 @@ pub(crate) use socket::NL_BATCH_SIZE;
 // caller sizing `set_rcvbuf` needs, and exporting it would put a
 // feature-gated constant in the public API for no one's benefit.
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
-pub use stream::{EventSource, EventSubscription, OwnedEventStream};
+pub use stream::{EventMeta, EventSource, EventSubscription, OwnedEventStream, WithMeta};
 pub use tc_options::NetemParameter;
