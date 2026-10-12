@@ -1796,6 +1796,36 @@ All notable changes to this project will be documented in this file.
     - **Red run.** Both tests fail if the limit's type is always sent as
       packets: the diff keeps three changes, and all 50 datagrams pass.
 
+- **Ranges, and the `!=` and `IpAddr` matchers (#528, fourth part).**
+  - **`Rule::match_range(field, first, last)` and `match_range_not`.**
+    - They write nft's `range` expression: `tcp dport 1000-2000`, `ip
+      saddr 10.0.0.1-10.0.0.9`, `meta mark != 0x10-0x20`. nlink-lab used
+      to hand-roll these as `Cmp Gte` + `Cmp Lte`.
+    - The match goes behind the field's protocol guard, as
+      `match_in_set` is.
+    - A host-order field (a mark, an interface index) goes through a
+      `byteorder` to network order first, as nft does. Without that, a
+      mark range compared the wrong bytes.
+    - `RangeValue` takes a port, an address, a `u32` or a `u8`. A value
+      of the wrong kind, or a range that runs backwards, makes adding the
+      rule fail.
+    - The new `Expr::Range` and `RuleExpr::Range`, with `RangeOp`, encode
+      and decode it. `RangeOp` is mapped in the UAPI audit.
+  - **New matchers.**
+    - `match_saddr`, `match_daddr`, `match_saddr_not` and
+      `match_daddr_not` take an `IpAddr`, v4 or v6.
+    - `match_tcp_sport_not`, `match_udp_sport_not`, `match_mark_not` and
+      `match_l4proto_not` fill in the `!=` forms that were missing.
+  - **Tests.**
+    - **Convergence and parity.** Every form reconciles, and `nft list`
+      shows it as nft writes it. Ranges that `nft` itself installs decode
+      as `RuleExpr::Range`.
+    - **Traffic.** A port range and a negated one drop what they should.
+      A mark range in an output chain drops a datagram an earlier rule
+      marked inside it, and passes one marked outside.
+    - **Red run.** Without the byteorder step both fail: nft lists the
+      mark range differently, and the in-range mark gets through.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

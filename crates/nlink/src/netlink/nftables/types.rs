@@ -579,6 +579,80 @@ impl std::ops::BitOrAssign for CtState {
     }
 }
 
+/// In or out of a range — `enum nft_range_ops`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum RangeOp {
+    /// Within the range.
+    Eq = 0,
+    /// Outside it.
+    Neq = 1,
+}
+
+impl RangeOp {
+    /// The op of an `NFTA_RANGE_OP` value.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Eq),
+            1 => Some(Self::Neq),
+            _ => None,
+        }
+    }
+}
+
+/// One end of a range for [`Rule::match_range`] (#528), of the field's
+/// kind: a port, an address, a 32-bit mark or interface index, or an
+/// 8-bit protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RangeValue {
+    /// A port.
+    Port(u16),
+    /// An IPv4 or IPv6 address.
+    Addr(std::net::IpAddr),
+    /// A mark or an interface index.
+    U32(u32),
+    /// A protocol number.
+    U8(u8),
+}
+
+impl From<u16> for RangeValue {
+    fn from(port: u16) -> Self {
+        Self::Port(port)
+    }
+}
+
+impl From<u32> for RangeValue {
+    fn from(value: u32) -> Self {
+        Self::U32(value)
+    }
+}
+
+impl From<u8> for RangeValue {
+    fn from(value: u8) -> Self {
+        Self::U8(value)
+    }
+}
+
+impl From<std::net::IpAddr> for RangeValue {
+    fn from(addr: std::net::IpAddr) -> Self {
+        Self::Addr(addr)
+    }
+}
+
+impl From<Ipv4Addr> for RangeValue {
+    fn from(addr: Ipv4Addr) -> Self {
+        Self::Addr(addr.into())
+    }
+}
+
+impl From<Ipv6Addr> for RangeValue {
+    fn from(addr: Ipv6Addr) -> Self {
+        Self::Addr(addr.into())
+    }
+}
+
 /// What a [`LimitExpr`](super::expr::LimitExpr) counts (`NFTA_LIMIT_TYPE`).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -2524,6 +2598,135 @@ impl Rule {
         self
     }
 
+    /// Match `field` within `first..=last`, both included, as `nft`'s
+    /// `tcp dport 1000-2000` or `meta mark 0x10-0x20` (#528). Behind the
+    /// field's protocol guard, as [`match_in_set`](Self::match_in_set) is;
+    /// a host-order field (a mark, an interface index) is turned to network
+    /// order first, as `nft` does, so the range compares numbers. Values of
+    /// the wrong kind, or a range that runs backwards, make adding the rule
+    /// fail.
+    pub fn match_range(
+        self,
+        field: PacketField,
+        first: impl Into<RangeValue>,
+        last: impl Into<RangeValue>,
+    ) -> Self {
+        self.push_range(field, first.into(), last.into(), RangeOp::Eq)
+    }
+
+    /// Match `field` outside `first..=last`: `tcp dport != 1000-2000`.
+    pub fn match_range_not(
+        self,
+        field: PacketField,
+        first: impl Into<RangeValue>,
+        last: impl Into<RangeValue>,
+    ) -> Self {
+        self.push_range(field, first.into(), last.into(), RangeOp::Neq)
+    }
+
+    fn push_range(mut self, field: PacketField, first: RangeValue, last: RangeValue, op: RangeOp) -> Self {
+        use super::expr::Expr;
+        let (Some(from), Some(to)) = (field.range_bytes(first), field.range_bytes(last)) else {
+            self.error.get_or_insert(format!(
+                "range: {field:?} cannot hold {first:?}..{last:?}"
+            ));
+            return self;
+        };
+        if from > to {
+            self.error.get_or_insert(format!(
+                "range: {field:?} {first:?}..{last:?} runs backwards"
+            ));
+            return self;
+        }
+        if let Some((key, value)) = field.guard() {
+            self.push_meta_eq(key, value);
+        }
+        self.exprs.push(field.load(Register::R0));
+        if field.key_type().is_host_order() {
+            self.exprs.push(Expr::Byteorder {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                op: ByteorderOp::Hton,
+                len: field.len(),
+                size: field.len(),
+            });
+        }
+        self.exprs.push(Expr::Range {
+            sreg: Register::R0,
+            op,
+            from,
+            to,
+        });
+        self
+    }
+
+    /// Match the source address in `addr/prefix`, IPv4 or IPv6 (#528).
+    pub fn match_saddr(self, addr: std::net::IpAddr, prefix: u8) -> Self {
+        match addr {
+            std::net::IpAddr::V4(a) => self.match_saddr_v4(a, prefix),
+            std::net::IpAddr::V6(a) => self.match_saddr_v6(a, prefix),
+        }
+    }
+
+    /// Match the source address outside `addr/prefix`, IPv4 or IPv6.
+    pub fn match_saddr_not(self, addr: std::net::IpAddr, prefix: u8) -> Self {
+        match addr {
+            std::net::IpAddr::V4(a) => self.match_saddr_v4_not(a, prefix),
+            std::net::IpAddr::V6(a) => self.match_saddr_v6_not(a, prefix),
+        }
+    }
+
+    /// Match the destination address in `addr/prefix`, IPv4 or IPv6.
+    pub fn match_daddr(self, addr: std::net::IpAddr, prefix: u8) -> Self {
+        match addr {
+            std::net::IpAddr::V4(a) => self.match_daddr_v4(a, prefix),
+            std::net::IpAddr::V6(a) => self.match_daddr_v6(a, prefix),
+        }
+    }
+
+    /// Match the destination address outside `addr/prefix`, IPv4 or IPv6.
+    pub fn match_daddr_not(self, addr: std::net::IpAddr, prefix: u8) -> Self {
+        match addr {
+            std::net::IpAddr::V4(a) => self.match_daddr_v4_not(a, prefix),
+            std::net::IpAddr::V6(a) => self.match_daddr_v6_not(a, prefix),
+        }
+    }
+
+    /// Match a TCP source port other than `port`: `tcp sport != <port>`.
+    pub fn match_tcp_sport_not(self, port: u16) -> Self {
+        self.push_field_neq(PacketField::TcpSport, port.to_be_bytes().to_vec())
+    }
+
+    /// Match a UDP source port other than `port`: `udp sport != <port>`.
+    pub fn match_udp_sport_not(self, port: u16) -> Self {
+        self.push_field_neq(PacketField::UdpSport, port.to_be_bytes().to_vec())
+    }
+
+    /// Match a mark other than `mark`: `meta mark != <mark>`.
+    pub fn match_mark_not(self, mark: u32) -> Self {
+        self.push_field_neq(PacketField::Mark, mark.to_ne_bytes().to_vec())
+    }
+
+    /// Match a layer-4 protocol other than `proto`: `meta l4proto != <proto>`.
+    pub fn match_l4proto_not(self, proto: u8) -> Self {
+        self.push_field_neq(PacketField::L4Proto, vec![proto])
+    }
+
+    /// `field != data`, behind the field's guard.
+    fn push_field_neq(mut self, field: PacketField, data: Vec<u8>) -> Self {
+        use super::expr::Expr;
+        if let Some((key, value)) = field.guard() {
+            self.push_meta_eq(key, value);
+        }
+        self.exprs.push(field.load(Register::R0));
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Neq,
+            data,
+        });
+        self
+    }
+
     /// Match TCP source port.
     pub fn match_tcp_sport(mut self, port: u16) -> Self {
         use super::expr::Expr;
@@ -3323,6 +3526,27 @@ impl PacketField {
             Self::Iif => meta(MetaKey::Iif),
             Self::Oif => meta(MetaKey::Oif),
             Self::L4Proto => meta(MetaKey::L4Proto),
+        }
+    }
+
+    /// `value` as this field holds it in a register, in network byte
+    /// order; `None` when it is not of the field's kind.
+    fn range_bytes(self, value: RangeValue) -> Option<Vec<u8>> {
+        use std::net::IpAddr;
+        match (self, value) {
+            (Self::Ip4Saddr | Self::Ip4Daddr, RangeValue::Addr(IpAddr::V4(a))) => {
+                Some(a.octets().to_vec())
+            }
+            (Self::Ip6Saddr | Self::Ip6Daddr, RangeValue::Addr(IpAddr::V6(a))) => {
+                Some(a.octets().to_vec())
+            }
+            (
+                Self::TcpSport | Self::TcpDport | Self::UdpSport | Self::UdpDport,
+                RangeValue::Port(p),
+            ) => Some(p.to_be_bytes().to_vec()),
+            (Self::Mark | Self::Iif | Self::Oif, RangeValue::U32(v)) => Some(v.to_be_bytes().to_vec()),
+            (Self::L4Proto, RangeValue::U8(v)) => Some(vec![v]),
+            _ => None,
         }
     }
 

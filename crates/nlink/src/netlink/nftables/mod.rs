@@ -409,6 +409,16 @@ pub const NFTA_LOG_QTHRESHOLD: u16 = 4;
 /// `NFTA_LOG_FLAGS` — what a syslog `log` adds: TCP sequence, options, ….
 pub const NFTA_LOG_FLAGS: u16 = 6;
 
+// Range — `enum nft_range_attributes`.
+/// `NFTA_RANGE_SREG` — the register compared.
+pub const NFTA_RANGE_SREG: u16 = 1;
+/// `NFTA_RANGE_OP` — `NFT_RANGE_EQ` or `NFT_RANGE_NEQ`.
+pub const NFTA_RANGE_OP: u16 = 2;
+/// `NFTA_RANGE_FROM_DATA` — the first value, an `NFTA_DATA_VALUE` nest.
+pub const NFTA_RANGE_FROM_DATA: u16 = 3;
+/// `NFTA_RANGE_TO_DATA` — the last value.
+pub const NFTA_RANGE_TO_DATA: u16 = 4;
+
 // Masquerade — `enum nft_masq_attributes`.
 /// `NFTA_MASQ_FLAGS` — the `NF_NAT_RANGE_*` flags of a `masquerade`.
 pub const NFTA_MASQ_FLAGS: u16 = 1;

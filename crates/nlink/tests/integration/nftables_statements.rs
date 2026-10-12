@@ -1015,3 +1015,52 @@ async fn a_byte_limit_drops_by_bytes() -> nlink::Result<()> {
     );
     Ok(())
 }
+
+/// #528: ranges decide what passes. In `b`'s input, a port range and a
+/// negated one drop; in `a`'s output, a mark range drops what an earlier
+/// rule marked inside it — a range that only works if the host-order mark
+/// is turned to network order first, as `nft` does.
+#[tokio::test]
+async fn ranges_match_traffic() -> nlink::Result<()> {
+    use nlink::netlink::nftables::PacketField;
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nft-range", 95).await?;
+    let chain = |hook| move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+        c.hook(hook).priority(Priority::Filter).chain_type(ChainType::Filter)
+    };
+    let b = NftablesConfig::new().table("f", Family::Inet, |t| {
+        t.chain("in", chain(Hook::Input))
+            .rule_keyed("in", "range", |r| r.match_range(PacketField::UdpDport, 7200u16, 7210u16).drop())
+            .rule_keyed("in", "not-range", |r| {
+                r.match_udp_sport_not(0)
+                    .match_range_not(PacketField::UdpDport, 7200u16, 7400u16)
+                    .drop()
+            })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    let to = |port| SocketAddr::from((pair.b_addr, port));
+    let deliver = |port| crate::common::traffic::deliver_udp(&pair.a, &pair.b, to(port), 3);
+    assert_eq!(deliver(7205), 0, "inside 7200-7210: dropped");
+    assert_eq!(deliver(7300), 3, "outside 7200-7210, inside 7200-7400: passes");
+    assert_eq!(deliver(7500), 0, "outside 7200-7400: the != range drops it");
+
+    // Marks, in a's output: 0x15 is inside 0x10-0x20, 0x25 is not.
+    let a = |mark: u32| {
+        NftablesConfig::new().table("m", Family::Inet, move |t| {
+            t.chain("out", chain(Hook::Output))
+                .rule_keyed("out", "mark", move |r| r.match_udp_dport(7300).set_mark(mark))
+                .rule_keyed("out", "range", |r| r.match_range(PacketField::Mark, 0x10u32, 0x20u32).drop())
+        })
+    };
+    let nft = pair.a.connection_for::<Nftables>()?;
+    a(0x15).diff(&nft).await?.apply(&nft).await?;
+    // 7300 is a port b lets through (above).
+    assert_eq!(deliver(7300), 0, "mark 0x15 is in 0x10-0x20");
+    a(0x25).diff(&nft).await?.apply(&nft).await?;
+    assert_eq!(deliver(7300), 3, "mark 0x25 is not");
+    Ok(())
+}

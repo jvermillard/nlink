@@ -133,6 +133,7 @@ PayloadBase = NFT_PAYLOAD
     Network -> NETWORK_HEADER
     Transport -> TRANSPORT_HEADER
 NatType = NFT_NAT
+RangeOp = NFT_RANGE
 LimitKind = NFT_LIMIT
     Packets -> PKTS
     Bytes -> PKT_BYTES
