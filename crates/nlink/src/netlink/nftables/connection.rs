@@ -11,7 +11,7 @@ use crate::netlink::{
     error::{Error, Result},
     message::{
         MessageIter, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE,
-        NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError,
+        NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
     },
     protocol::Nftables,
 };
@@ -1038,7 +1038,7 @@ impl Connection<Nftables> {
             .collect();
         let mut session = self.recv_session_multi(&all_seqs).await?;
         self.socket().send(&batch).await?;
-        let mut failures: Vec<super::NftBatchFailure> = Vec::new();
+        let mut replies = BatchReplies::new(begin_seq, &inner_seqs, end_seq, &messages);
 
         // (4) Wrap in the Connection-level operation timeout
         // (Plan 171 default: 30s). Surfaces a missing end-seq
@@ -1050,19 +1050,19 @@ impl Connection<Nftables> {
                 // is in, everything else the kernel has to say is already in
                 // the socket: drain it without waiting for an END ACK a
                 // refused batch may not get.
-                let data: Vec<u8> = if failures.is_empty() {
+                let data: Vec<u8> = if !replies.refused() {
                     session.recv_with_timeout(self).await?
                 } else {
                     match session.try_recv(self)? {
                         Some(data) => data,
-                        None => return Err(Error::from(crate::netlink::ErrorDetail::NftBatch { failures })),
+                        None => return Err(replies.take_error()),
                     }
                 };
 
                 for msg_result in MessageIter::new(&data) {
                     // (0) A malformed frame that is not ours is not our
                     //     problem. This used to be `msg_result?`, which
-                    //     runs *before* the seq filter below — so on a
+                    //     runs *before* the seq filter — so on a
                     //     connection also subscribed to nftables
                     //     multicast, one malformed broadcast frame
                     //     surfaced as an error out of `commit()`, even
@@ -1076,64 +1076,10 @@ impl Connection<Nftables> {
                         );
                         continue;
                     };
-
-                    // (1) Seq filter — an exact window, per CLAUDE.md's
-                    //     recv-loop rule 1. The old one-sided `> end_seq`
-                    //     bound silently swallowed mid-batch kernel errors
-                    //     (#199).
-                    if !all_seqs.contains(&header.nlmsg_seq) {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        err.warn_if_ack_warns(header.nlmsg_flags, payload);
-                        if err.is_ack() {
-                            // (2) Only the BATCH_END ACK means the batch
-                            //     committed. Per-op ACKs can fire mid-batch
-                            //     and must not be mistaken for it — and after
-                            //     a failure it means nothing was committed.
-                            if header.nlmsg_seq == end_seq {
-                                if failures.is_empty() {
-                                    return Ok(());
-                                }
-                                return Err(Error::from(crate::netlink::ErrorDetail::NftBatch { failures }));
-                            }
-                            continue;
-                        }
-                        // (3) The kernel refused a message. Record which one
-                        //     and keep reading: it reports every refused
-                        //     operation, then rolls the batch back (#481).
-                        let ext = err.ext_ack(header.nlmsg_flags, payload);
-                        let seq = header.nlmsg_seq;
-                        let failure = if seq == begin_seq {
-                            super::NftBatchFailure::of_batch("batch begin", err.error, ext)
-                        } else if seq == end_seq {
-                            super::NftBatchFailure::of_batch("commit", err.error, ext)
-                        } else {
-                            let index = inner_seqs.iter().position(|s| *s == seq).unwrap_or(0);
-                            let message = messages.get(index).map_or(&[][..], Vec::as_slice);
-                            super::NftBatchFailure::of_message(index, message, err.error, ext)
-                        };
-                        failures.push(failure);
-                        if seq == end_seq {
-                            return Err(Error::from(crate::netlink::ErrorDetail::NftBatch { failures }));
-                        }
-                        continue;
-                    }
-
-                    // NLMSG_DONE is a *dump* terminator; nfnetlink never emits
-                    // one for a batch. Treating it as success meant a stale
-                    // DONE — left in the socket buffer by a cancelled dump,
-                    // since dumps and batches share the fd — could report an
-                    // uncommitted batch as committed (#209). The only success
-                    // signal is the BATCH_END ACK above.
-                    if header.is_done() {
-                        return Err(Error::invalid_message(format!(
-                            "nftables batch: unexpected NLMSG_DONE at seq {} \
-                             (nfnetlink does not terminate batches with DONE)",
-                            header.nlmsg_seq,
-                        )));
+                    match replies.on_frame(header, payload)? {
+                        BatchStep::Pending => {}
+                        BatchStep::Committed => return Ok(()),
+                        BatchStep::Refused => return Err(replies.take_error()),
                     }
                 }
             }
@@ -1344,6 +1290,126 @@ impl Connection<Nftables> {
             Ok(results)
         })
         .await
+    }
+}
+
+/// What the replies to a batch say so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchStep {
+    /// Keep reading.
+    Pending,
+    /// The batch is committed.
+    Committed,
+    /// The kernel refused the batch: nothing was committed.
+    Refused,
+}
+
+/// The replies to one batch, read frame by frame by `send_batch`.
+///
+/// Kept apart from the socket so the unit tests can replay what a given
+/// kernel answers, frame by frame.
+pub(crate) struct BatchReplies<'a> {
+    begin_seq: u32,
+    inner_seqs: &'a [u32],
+    end_seq: u32,
+    messages: &'a [Vec<u8>],
+    failures: Vec<super::NftBatchFailure>,
+}
+
+impl<'a> BatchReplies<'a> {
+    pub(crate) fn new(
+        begin_seq: u32,
+        inner_seqs: &'a [u32],
+        end_seq: u32,
+        messages: &'a [Vec<u8>],
+    ) -> Self {
+        Self {
+            begin_seq,
+            inner_seqs,
+            end_seq,
+            messages,
+            failures: Vec::new(),
+        }
+    }
+
+    /// Whether the kernel refused an operation of the batch.
+    pub(crate) fn refused(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
+    /// The refused operations, as the error `commit()` returns.
+    pub(crate) fn take_error(&mut self) -> Error {
+        Error::from(crate::netlink::ErrorDetail::NftBatch {
+            failures: std::mem::take(&mut self.failures),
+        })
+    }
+
+    fn outcome(&self) -> BatchStep {
+        if self.refused() {
+            BatchStep::Refused
+        } else {
+            BatchStep::Committed
+        }
+    }
+
+    /// Read one reply frame.
+    pub(crate) fn on_frame(&mut self, header: &NlMsgHdr, payload: &[u8]) -> Result<BatchStep> {
+        let seq = header.nlmsg_seq;
+
+        // (1) Seq filter — an exact window, per CLAUDE.md's
+        //     recv-loop rule 1. The old one-sided `> end_seq`
+        //     bound silently swallowed mid-batch kernel errors
+        //     (#199).
+        if seq != self.begin_seq && seq != self.end_seq && !self.inner_seqs.contains(&seq) {
+            return Ok(BatchStep::Pending);
+        }
+
+        if header.is_error() {
+            let err = NlMsgError::from_bytes(payload)?;
+            err.warn_if_ack_warns(header.nlmsg_flags, payload);
+            if err.is_ack() {
+                // (2) Only the BATCH_END ACK means the batch
+                //     committed. Per-op ACKs can fire mid-batch
+                //     and must not be mistaken for it — and after
+                //     a failure it means nothing was committed.
+                if seq == self.end_seq {
+                    return Ok(self.outcome());
+                }
+                return Ok(BatchStep::Pending);
+            }
+            // (3) The kernel refused a message. Record which one
+            //     and keep reading: it reports every refused
+            //     operation, then rolls the batch back (#481).
+            let ext = err.ext_ack(header.nlmsg_flags, payload);
+            let failure = if seq == self.begin_seq {
+                super::NftBatchFailure::of_batch("batch begin", err.error, ext)
+            } else if seq == self.end_seq {
+                super::NftBatchFailure::of_batch("commit", err.error, ext)
+            } else {
+                let index = self.inner_seqs.iter().position(|s| *s == seq).unwrap_or(0);
+                let message = self.messages.get(index).map_or(&[][..], Vec::as_slice);
+                super::NftBatchFailure::of_message(index, message, err.error, ext)
+            };
+            self.failures.push(failure);
+            if seq == self.end_seq {
+                return Ok(BatchStep::Refused);
+            }
+            return Ok(BatchStep::Pending);
+        }
+
+        // NLMSG_DONE is a *dump* terminator; nfnetlink never emits
+        // one for a batch. Treating it as success meant a stale
+        // DONE — left in the socket buffer by a cancelled dump,
+        // since dumps and batches share the fd — could report an
+        // uncommitted batch as committed (#209). The only success
+        // signal is the BATCH_END ACK above.
+        if header.is_done() {
+            return Err(Error::invalid_message(format!(
+                "nftables batch: unexpected NLMSG_DONE at seq {seq} \
+                 (nfnetlink does not terminate batches with DONE)",
+            )));
+        }
+        Ok(BatchStep::Pending)
     }
 }
 
