@@ -66,7 +66,7 @@ the workflow. For local validation as a non-root user, the
 ```bash
 # The CI lane's features; the runner puts sudo in front of the test binary only.
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' \
-  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher,process \
+  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher,process,serde \
   -- --test-threads=1
 ```
 

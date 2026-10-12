@@ -36,6 +36,10 @@ jobs:
         with:
           cache-targets: false
       - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      # Features that pull in serde_json without `output`: every other build
+      # here has `output` (default, --all-features), which hid #741.
+      - run: cargo check -p nlink --features serde
+      - run: cargo check -p nlink --features schemars
 
   test:
     runs-on: ubuntu-24.04

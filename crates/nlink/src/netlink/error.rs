@@ -392,7 +392,8 @@ from_detail!(
     crate::netlink::config::AddressParseError,
     crate::netlink::config::RouteParseError,
 );
-#[cfg(feature = "output")]
+// `serde` pulls in serde_json as `output` does (#741).
+#[cfg(any(feature = "output", feature = "serde"))]
 from_detail!(serde_json::Error);
 
 /// Where an [`Error`] came from: the kernel's answer, an I/O error, a
@@ -406,7 +407,7 @@ pub enum ErrorDetail {
     Io(#[from] io::Error),
 
     /// JSON serialization error.
-    #[cfg(feature = "output")]
+    #[cfg(any(feature = "output", feature = "serde"))]
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
