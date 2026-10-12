@@ -1145,3 +1145,66 @@ async fn fib_and_notrack_act_on_traffic() -> nlink::Result<()> {
     assert_eq!(untracked().await?, 3, "7701 was tracked");
     Ok(())
 }
+
+/// #528: the conntrack keys act on traffic. In `b`: a zone set in raw is
+/// the zone input sees; a dnat'ed flow has `ct status dnat`; a label set
+/// on a connection is read back by the next rule; the original tuple's
+/// destination is `b`'s address; and `ct count over 1` drops the second
+/// flow while the first passes.
+#[tokio::test]
+async fn ct_keys_act_on_traffic() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{CtDirection, CtStatus, NatStatement};
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_ct", "nft_nat", "nft_connlimit", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nft-ct", 97).await?;
+    let filter = |hook, priority| {
+        move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+            c.hook(hook).priority(priority).chain_type(ChainType::Filter)
+        }
+    };
+    let b_addr = std::net::IpAddr::V4(pair.b_addr);
+    let b = NftablesConfig::new().table("c", Family::Ip, |t| {
+        t.chain("raw", filter(Hook::Prerouting, Priority::Raw))
+            .chain("nat", |c| {
+                c.hook(Hook::Prerouting).priority(Priority::DstNat).chain_type(ChainType::Nat)
+            })
+            .chain("in", filter(Hook::Input, Priority::Filter))
+            .rule_keyed("raw", "zone", |r| r.match_udp_dport(7900).set_ct_zone(9))
+            .rule_keyed("nat", "dnat", |r| {
+                r.match_udp_dport(7901).nat(NatStatement::dnat_to_port(Family::Ip, 7911))
+            })
+            .rule_keyed("in", "zone-seen", |r| r.match_ct_zone(9).counter())
+            .rule_keyed("in", "dnat-seen", |r| r.match_ct_status(CtStatus::DST_NAT).counter())
+            .rule_keyed("in", "label-set", |r| r.match_udp_dport(7902).set_ct_label(42))
+            .rule_keyed("in", "label-seen", |r| r.match_ct_label(42).counter())
+            .rule_keyed("in", "orig-daddr", |r| {
+                r.match_udp_dport(7903).match_ct_addr(CtDirection::Original, false, b_addr).counter()
+            })
+            .rule_keyed("in", "count", |r| r.match_udp_dport(7904).match_ct_count_over(1).drop())
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    let to = |port| SocketAddr::from((pair.b_addr, port));
+    let deliver = |port, listen| {
+        if port == listen {
+            crate::common::traffic::deliver_udp(&pair.a, &pair.b, to(port), 3)
+        } else {
+            arrivals(&pair, port, listen, 3).map(|v| v.len()).unwrap_or(0)
+        }
+    };
+    let counted = |nth| crate::common::counters::rule_packets(&nft, "c", Family::Ip, "in", nth);
+
+    assert_eq!(deliver(7900, 7900), 3);
+    assert_eq!(counted(0).await?, 3, "the zone raw set is the zone input sees");
+    assert_eq!(deliver(7901, 7911), 3, "dnat'ed to 7911");
+    assert_eq!(counted(1).await?, 3, "ct status dnat counts the dnat'ed flow only");
+    assert_eq!(deliver(7902, 7902), 3);
+    assert_eq!(counted(3).await?, 3, "the label one rule set, the next reads");
+    assert_eq!(deliver(7903, 7903), 3);
+    assert_eq!(counted(4).await?, 3, "the original tuple's destination is b");
+    assert_eq!(deliver(7904, 7904), 3, "the first flow is the one allowed");
+    assert_eq!(deliver(7904, 7904), 0, "a second flow is over the count");
+    Ok(())
+}

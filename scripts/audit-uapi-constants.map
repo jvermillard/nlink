@@ -147,6 +147,11 @@ MetaKey = NFT_META
     BriBroute -> BRI_BROUTE
 CtKey = NFT_CT
     L3Protocol -> L3PROTOCOL
+    AvgPkt -> AVGPKT
+    EventMask -> EVENTMASK
+    SrcIp6 -> SRC_IP6
+    DstIp6 -> DST_IP6
+CtDirection = IP_CT_DIR
 CmpOp = NFT_CMP
 PayloadBase = NFT_PAYLOAD
     LinkLayer -> LL_HEADER
