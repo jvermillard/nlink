@@ -1825,6 +1825,9 @@ async fn add_route(
             if let Some(id) = route.attrs.nhid {
                 config = config.nexthop_group(id);
             }
+            if !route.attrs.multipath.is_empty() {
+                config = config.multipath(multipath_hops(&route.attrs.multipath));
+            }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -1869,6 +1872,9 @@ async fn add_route(
             if let Some(id) = route.attrs.nhid {
                 config = config.nexthop_group(id);
             }
+            if !route.attrs.multipath.is_empty() {
+                config = config.multipath(multipath_hops(&route.attrs.multipath));
+            }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -1879,6 +1885,29 @@ async fn add_route(
             conn.replace_route(config).await
         }
     }
+}
+
+/// A multipath route's declared next hops, as the imperative API takes
+/// them (#516).
+fn multipath_hops(hops: &[super::types::RouteNexthop]) -> Vec<crate::netlink::route::NextHop> {
+    use crate::netlink::route::NextHop;
+    hops.iter()
+        .map(|h| {
+            let mut n = NextHop::new().weight(h.weight);
+            match h.gateway {
+                Some(IpAddr::V4(g)) => n = n.gateway_v4(g),
+                Some(IpAddr::V6(g)) => n = n.gateway_v6(g),
+                None => {}
+            }
+            if let Some(dev) = &h.dev {
+                n = n.dev(dev.as_str());
+            }
+            if h.onlink {
+                n = n.onlink();
+            }
+            n
+        })
+        .collect()
 }
 
 async fn del_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {

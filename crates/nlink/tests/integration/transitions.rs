@@ -2117,6 +2117,91 @@ async fn nexthops_change_and_come_back_after_a_recreate() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Declared multipath routes A→B→C→D (#516), IPv4 and IPv6, each step with
+/// the one before as the previous config. Step 2 changes the weights in
+/// place. Step 3 recreates the link one hop is on (a new VLAN id): the
+/// kernel deletes the IPv4 route with it and the IPv6 route's hop, and the
+/// apply puts both back whole — not refused over them. Step 4 makes them
+/// single-gateway routes. `ip -j route` shows the hops each step.
+#[tokio::test]
+async fn multipath_routes_change_and_come_back_after_a_recreate() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let step = |vlan: u16, weights: (u8, u8), multipath: bool| {
+        let c = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("b1", |l| l.dummy().up())
+            .link("d1", move |l| l.vlan("b1", vlan).up())
+            .address_with("d0", "10.92.0.1/24", |a| a)
+            .unwrap()
+            .address_with("d1", "10.92.1.1/24", |a| a)
+            .unwrap()
+            .address_with("d0", "fd00:92::1/64", |a| a.nodad())
+            .unwrap()
+            .address_with("d1", "fd00:92:1::1/64", |a| a.nodad())
+            .unwrap();
+        if !multipath {
+            return c
+                .route("10.91.0.0/16", |r| r.via("10.92.0.2").dev("d0"))
+                .unwrap()
+                .route("fd00:91::/48", |r| r.via("fd00:92::2").dev("d0"))
+                .unwrap();
+        }
+        // The IPv4 route's second hop names no device: the kernel picks
+        // d1, and only the link's recreate says the route went with it.
+        c.route("10.91.0.0/16", move |r| {
+            r.nexthop(|h| h.via("10.92.0.2").dev("d0").weight(weights.0))
+                .nexthop(|h| h.via("10.92.1.2").weight(weights.1))
+        })
+        .unwrap()
+        .route("fd00:91::/48", move |r| {
+            r.nexthop(|h| h.via("fd00:92::2").dev("d0").weight(weights.0))
+                .nexthop(|h| h.via("fd00:92:1::2").dev("d1").weight(weights.1))
+        })
+        .unwrap()
+    };
+    let steps = [step(20, (1, 3), true), step(20, (2, 1), true), step(21, (2, 1), true), step(21, (2, 1), false)];
+    let ns = TestNamespace::new("tr-multipath")?;
+    let mut d1 = Vec::new();
+    crate::common::converge::assert_transition_with_previous(&ns, &steps, async |i, _conn| {
+        let hops = |family: &str, dst: &str| -> Result<serde_json::Value, String> {
+            let routes = ip_json(&ns, &[family, "route", "show", dst])?;
+            Ok(routes[0].clone())
+        };
+        let (w0, w1) = if i == 0 { (1, 3) } else { (2, 1) };
+        for (family, dst, gw0, gw1) in [
+            ("-4", "10.91.0.0/16", "10.92.0.2", "10.92.1.2"),
+            ("-6", "fd00:91::/48", "fd00:92::2", "fd00:92:1::2"),
+        ] {
+            let r = hops(family, dst)?;
+            let want = if i < 3 {
+                serde_json::json!([[gw0, "d0", w0], [gw1, "d1", w1]])
+            } else {
+                serde_json::json!([])
+            };
+            let have: Vec<serde_json::Value> = r["nexthops"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|h| serde_json::json!([h["gateway"], h["dev"], h["weight"].as_u64().unwrap_or(1)]))
+                .collect();
+            if serde_json::json!(have) != want {
+                return Err(format!("step {}: {dst}: {r}", i + 1));
+            }
+            if i == 3 && (r["gateway"] != gw0 || r["dev"] != "d0") {
+                return Err(format!("step 4: {dst} is not via {gw0}: {r}"));
+            }
+        }
+        d1.push(link_json(&ns, "d1")?["ifindex"].as_u64());
+        Ok(())
+    })
+    .await?;
+    assert_eq!(d1[0], d1[1], "step 2 changes the routes in place");
+    assert_ne!(d1[1], d1[2], "a new VLAN id recreates the link");
+    Ok(())
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.
