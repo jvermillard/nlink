@@ -3921,7 +3921,8 @@ mod userdata_roundtrip_tests {
             Some("ssh-accept"),
             "the key should round-trip from emit through parse",
         );
-        assert_eq!(parsed.comment_text.as_deref(), Some("nlink:ssh-accept allow ssh"));
+        // The comment as nft shows it: the key is in its own TLV (#527).
+        assert_eq!(parsed.comment_text.as_deref(), Some("allow ssh"));
         assert!(
             parsed.userdata_raw.is_some(),
             "raw userdata should also be preserved",

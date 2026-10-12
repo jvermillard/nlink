@@ -1176,10 +1176,10 @@ fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
         return false;
     }
     let kernel_comment = kernel
-        .comment_text
+        .userdata_raw
         .as_deref()
-        .and_then(super::super::userdata::human_comment);
-    declared.body.comment.as_deref() == kernel_comment
+        .and_then(super::super::userdata::human_comment_of);
+    declared.body.comment == kernel_comment
 }
 
 /// The elements to add to and remove from an existing set. In

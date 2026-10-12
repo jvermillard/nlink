@@ -1992,6 +1992,32 @@ All notable changes to this project will be documented in this file.
     - **Red run.** With the rule keys left out of the simulation, all of
       them fail.
 
+- **A rule's key has its own userdata TLV (#527, second part).**
+  - **The change.** A declared rule's key used to be stored as `comment
+    "nlink:<key> <comment>"`, which `nft list` showed and which shared
+    libnftnl's 127 comment bytes with the user's text.
+    - It now has a TLV of its own, type `0xF0`. libnftnl uses 0 and 1, and
+      nft skips types it does not know.
+    - The comment TLV holds the user's comment alone, and each of the two
+      gets 127 bytes.
+  - **Compatibility.** Rules an older nlink wrote are still read by their
+    `nlink:` comment, so an upgrade neither re-adds nor replaces them. The
+    reader reads the key TLV first. A comment that sits beside a key TLV is
+    taken whole, even if it starts with `nlink:`.
+  - **A test it fixed.** #697's NAT test listed `"netmap"` as something
+    `nft list` shows. That only passed because the rule's key, `netmap`,
+    sat in its comment. nft writes the flag as `snat ip prefix to …`, and
+    the test now says so. Every other `nft list` check in these tests
+    passed once keys were out of comments.
+  - **Tests.**
+    - A keyed rule's `nft list` line shows the user's comment and no
+      `nlink:`.
+    - A rule written the old way (`nlink:k allow the thing`) diffs empty
+      against its declaration.
+    - Unit tests cover the 127 bytes each, the old form, and a
+      `nlink:`-looking comment beside a key.
+    - With the old encoding restored, the first test fails.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

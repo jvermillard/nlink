@@ -191,7 +191,12 @@ async fn a_keyed_rule_with_a_comment_keeps_its_identity() -> nlink::Result<()> {
 
         let rule = conn.list_rules("t", Family::Ip).await?.remove(0);
         assert_eq!(rule.key.as_deref(), Some("k"));
-        assert_eq!(rule.comment_text.as_deref(), Some("nlink:k allow the thing"));
+        // The key has its own TLV (#527): the comment is the user's alone,
+        // and `nft list` shows nothing of nlink's.
+        assert_eq!(rule.comment_text.as_deref(), Some("allow the thing"));
+        let listed = ns.exec("nft", &["list", "table", "ip", "t"])?;
+        assert!(listed.contains("comment \"allow the thing\""), "{listed}");
+        assert!(!listed.contains("nlink:"), "{listed}");
         let again = config.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
 
@@ -330,6 +335,40 @@ async fn an_exclusive_chain_removes_foreign_rules() -> nlink::Result<()> {
         assert_eq!(diff.rules_to_delete.len(), 1, "the foreign rule goes: {diff}");
         diff.apply(&conn).await?;
         assert_eq!(keys(&conn).await?, ["k"]);
+        Ok(())
+    })
+    .await
+}
+
+
+/// #527: a rule an older nlink wrote — its key inside the comment, as
+/// `nlink:<key> <comment>` — keeps its identity and its comment, so the
+/// diff neither re-adds nor replaces it.
+#[tokio::test]
+async fn a_rule_keyed_the_old_way_keeps_its_identity() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-rule-oldkey")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let keyed: Vec<KeyedRule> =
+            vec![("k", |r| r.match_udp_dport(1).comment("allow the thing"))];
+        let config = cfg(keyed);
+        // Create the table and chain, then swap the rule for the old form.
+        config.diff(&conn).await?.apply(&conn).await?;
+        let handle = conn.list_rules("t", Family::Ip).await?.remove(0).handle;
+        conn.del_rule("t", "out", Family::Ip, handle).await?;
+        conn.add_rule(
+            Rule::new("t", "out")
+                .family(Family::Ip)
+                .match_udp_dport(1)
+                .comment("nlink:k allow the thing"),
+        )
+        .await?;
+        assert_eq!(keys(&conn).await?, ["k"]);
+        let diff = config.diff(&conn).await?;
+        assert!(diff.is_empty(), "the old form is the same rule: {diff}");
         Ok(())
     })
     .await
