@@ -859,18 +859,25 @@ impl Connection<Nftables> {
         // future caller cannot reintroduce a second counter.
         //
         let pid = self.socket().pid();
-        for msg_data in &mut messages {
+        let last = messages.len() - 1;
+        let mut last_seq = 0;
+        for (index, msg_data) in messages.iter_mut().enumerate() {
             let seq = self.socket().next_seq();
             stamp_seq_pid(msg_data, seq, pid)?;
+            // The last operation's ACK is the commit signal: the kernel sends
+            // it after the commit, once every error is out. BATCH_END's ACK
+            // cannot be: before Linux 6.10 the kernel never answers BATCH_END.
+            if index == last {
+                request_ack(msg_data);
+                last_seq = seq;
+            }
             batch.extend_from_slice(msg_data);
         }
 
-        // NFNL_MSG_BATCH_END — request an ACK so the kernel
-        // gives us a deterministic commit-completion signal at
-        // a known seq. Without NLM_F_ACK here, some kernels
-        // skip the response and the loop relies on the
-        // per-op ACK absence to terminate — fragile.
-        let mut end = MessageBuilder::new(NFNL_MSG_BATCH_END, NLM_F_REQUEST | NLM_F_ACK);
+        // NFNL_MSG_BATCH_END — no ACK requested: before Linux 6.10 the
+        // kernel ignores the flag, from 6.10 its ACK would only follow the
+        // last operation's, unread.
+        let mut end = MessageBuilder::new(NFNL_MSG_BATCH_END, NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg {
             nfgen_family: 0,
             version: 0,
@@ -924,10 +931,14 @@ impl Connection<Nftables> {
                     if header.is_error() {
                         let err = NlMsgError::from_bytes(payload)?;
                         if err.is_ack() {
-                            // (2) Only the BATCH_END ACK means the batch
-                            //     committed. Per-op ACKs can fire mid-batch
-                            //     and must not be mistaken for it.
-                            if header.nlmsg_seq == end_seq {
+                            // (2) The ACK of the last operation (requested
+                            //     above) or of BATCH_END means the batch
+                            //     committed: the kernel queues a failed
+                            //     commit (at BATCH_BEGIN's seq) and the
+                            //     operations' errors before it. Earlier
+                            //     per-op ACKs can fire mid-batch and must not
+                            //     be mistaken for it.
+                            if header.nlmsg_seq == end_seq || header.nlmsg_seq == last_seq {
                                 return Ok(());
                             }
                             continue;
@@ -1100,6 +1111,14 @@ impl Connection<Nftables> {
 /// open socket, matching the Plan 181 convention below.
 ///
 /// `struct nlmsghdr` is `len@0 type@4 flags@6 seq@8 pid@12`.
+/// Set `NLM_F_ACK` on an already-`finish()`ed message, checked by
+/// [`stamp_seq_pid`] to hold a netlink header.
+fn request_ack(msg: &mut [u8]) {
+    const FLAGS_OFFSET: usize = 6;
+    let flags = u16::from_ne_bytes([msg[FLAGS_OFFSET], msg[FLAGS_OFFSET + 1]]) | NLM_F_ACK;
+    msg[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&flags.to_ne_bytes());
+}
+
 pub(crate) fn stamp_seq_pid(msg: &mut [u8], seq: u32, pid: u32) -> Result<()> {
     const SEQ_OFFSET: usize = 8;
     const PID_OFFSET: usize = 12;
@@ -2508,6 +2527,16 @@ mod transaction_tests {
             4242,
             "pid must be stamped too; Transaction's builders never set one",
         );
+    }
+
+    #[test]
+    fn request_ack_adds_the_ack_flag_only() {
+        let mut message = Transaction::new().add_table("t", Family::Inet).messages.remove(0);
+        let flags = |m: &[u8]| u16::from_ne_bytes([m[6], m[7]]);
+        let before = flags(&message);
+        assert_eq!(before & NLM_F_ACK, 0, "Transaction does not ask ACKs itself");
+        request_ack(&mut message);
+        assert_eq!(flags(&message), before | NLM_F_ACK);
     }
 
     #[test]
