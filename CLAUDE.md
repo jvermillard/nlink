@@ -593,9 +593,10 @@ to localize):
    mandatory.
 2. **Terminate on the right marker.** Dumps terminate on
    `NLMSG_DONE`. Batch commits (`NFNL_MSG_BATCH_*`) terminate
-   on the **BATCH_END's ACK specifically** — not the first
-   per-op ACK, which can fire mid-batch and leave the loop
-   thinking the batch is done.
+   on the **last operation's ACK specifically**, which the batch
+   requests — not the first per-op ACK, which can fire mid-batch
+   and leave the loop thinking the batch is done. Not BATCH_END's
+   ACK either: the kernel only answers BATCH_END from Linux 6.10.
 
 Canonical template:
 
@@ -644,9 +645,10 @@ streams stamp whatever leaves them. A new loop that runs outside all of
 those stamps its errors itself, or `Error::netns()` goes quiet on that path:
 `netns::errors_name_the_namespace_they_came_from` checks one of each.
 
-**Batch commits are not dumps.** They terminate on the BATCH_END seq's
+**Batch commits are not dumps.** They terminate on the last operation's
 ACK, not on the first per-op ACK, and `NLMSG_DONE` there is an error
-(#209).
+(#209). The kernel queues every error before that ACK: a failed commit
+at BATCH_BEGIN's seq, then the operations' replies in batch order.
 
 *(The template used to name a `recv_with_timeout` that did not exist —
 zero occurrences crate-wide — so code written by following it did not
