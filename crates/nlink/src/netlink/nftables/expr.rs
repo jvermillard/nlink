@@ -1286,9 +1286,62 @@ pub enum RuleExpr {
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
     },
+    /// `limit` — a packet-rate limit. A byte-rate limit decodes as
+    /// [`Unknown`](Self::Unknown).
+    Limit(LimitExpr),
+    /// `log` — to syslog at the default level, or to an `nflog` group. One
+    /// with a level, flags, snaplen or queue threshold decodes as
+    /// [`Unknown`](Self::Unknown).
+    Log(LogExpr),
+    /// `reject`.
+    #[non_exhaustive]
+    Reject {
+        /// [`NFT_REJECT_ICMP_UNREACH`], [`NFT_REJECT_TCP_RST`] or
+        /// [`NFT_REJECT_ICMPX_UNREACH`].
+        reject_type: u32,
+        /// The ICMP code; `None` for a TCP reset.
+        icmp_code: Option<u8>,
+    },
+    /// `masquerade`, to the port range in `proto`'s registers if any.
+    #[non_exhaustive]
+    Masq {
+        /// The registers holding the first and last port.
+        proto: Option<(Register, Register)>,
+        /// `random`, `fully-random`, `persistent`, ….
+        flags: NatFlags,
+    },
+    /// `snat`/`dnat`. The address and port values are in the
+    /// [`Immediate`](Self::Immediate) loads ahead of it; this says which
+    /// registers hold them.
+    #[non_exhaustive]
+    Nat {
+        /// Source or destination NAT.
+        nat_type: NatType,
+        /// The address family it rewrites: `ip` or `ip6`.
+        family: Family,
+        /// The registers holding the first and last address.
+        addr: Option<(Register, Register)>,
+        /// The registers holding the first and last port.
+        proto: Option<(Register, Register)>,
+        /// The range flags.
+        flags: NatFlags,
+    },
+    /// `redirect`, to the port range in `proto`'s registers if any.
+    #[non_exhaustive]
+    Redir {
+        /// The registers holding the first and last port.
+        proto: Option<(Register, Register)>,
+        /// The range flags.
+        flags: NatFlags,
+    },
+    /// `flow add @<flowtable>`.
+    #[non_exhaustive]
+    FlowOffload {
+        /// The flowtable's name, in the rule's table.
+        flowtable: String,
+    },
     /// Expression not (or not fully) decodable: kind name plus the raw
-    /// `NFTA_EXPR_DATA` payload, preserved verbatim (empty for
-    /// data-less expressions like `masq`).
+    /// `NFTA_EXPR_DATA` payload, preserved verbatim.
     #[non_exhaustive]
     Unknown {
         /// `NFTA_EXPR_NAME` (e.g. `"quota"`, `"limit"`, `"nat"`).
@@ -1344,11 +1397,157 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "dynset" => parse_dynset(data),
         "quota" => parse_quota(data),
         "objref" => parse_objref(data),
+        "limit" => parse_limit_attrs(data).map(RuleExpr::Limit),
+        "log" => parse_log(data),
+        "reject" => parse_reject(data),
+        "masq" => parse_masq(data),
+        "nat" => parse_nat(data),
+        "redir" => parse_redir(data),
+        "flow_offload" => parse_flow_offload(data),
         _ => None,
     };
     decoded.unwrap_or_else(|| RuleExpr::Unknown {
         name: name.to_string(),
         data: data.to_vec(),
+    })
+}
+
+bitflags::bitflags! {
+    /// The `NF_NAT_RANGE_*` flags of a `snat`, `dnat`, `masquerade` or
+    /// `redirect` (`linux/netfilter/nf_nat.h`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct NatFlags: u32 {
+        /// The address is rewritten.
+        const MAP_IPS = 1 << 0;
+        /// The port is rewritten.
+        const PROTO_SPECIFIED = 1 << 1;
+        /// `random`: the port is picked at random.
+        const PROTO_RANDOM = 1 << 2;
+        /// `persistent`: a client keeps its address.
+        const PERSISTENT = 1 << 3;
+        /// `fully-random`: the port is picked fully at random.
+        const PROTO_RANDOM_FULLY = 1 << 4;
+        /// The port range is an offset.
+        const PROTO_OFFSET = 1 << 5;
+        /// `netmap`: the address is mapped prefix to prefix.
+        const NETMAP = 1 << 6;
+        // A newer kernel's flags read back as they are.
+        const _ = !0;
+    }
+}
+
+/// The value of attribute `id` among `data`'s, as a big-endian u32.
+fn u32_attr(data: &[u8], id: u16) -> Option<u32> {
+    AttrIter::new(data)
+        .find(|(attr, _)| attr & 0x7FFF == id)
+        .and_then(|(_, payload)| get::u32_be(payload).ok())
+}
+
+/// A register pair: the attributes `min` and `max` among `data`'s. Just
+/// `min` is a range of one value.
+fn register_range(data: &[u8], min: u16, max: u16) -> Option<Option<(Register, Register)>> {
+    let Some(lo) = u32_attr(data, min) else {
+        return Some(None);
+    };
+    let lo = Register::from_u32(lo)?;
+    let hi = match u32_attr(data, max) {
+        Some(hi) => Register::from_u32(hi)?,
+        None => lo,
+    };
+    Some(Some((lo, hi)))
+}
+
+/// A `limit`'s attributes — an expression's or a limit object's. `None`
+/// for a byte-rate limit or a unit [`LimitUnit`] has no name for.
+pub(crate) fn parse_limit_attrs(data: &[u8]) -> Option<LimitExpr> {
+    let u64_of = |id| {
+        AttrIter::new(data)
+            .find(|(attr, _)| attr & 0x7FFF == id)
+            .and_then(|(_, payload)| get::u64_be(payload).ok())
+    };
+    // NFT_LIMIT_PKT_BYTES is not a LimitExpr.
+    if u32_attr(data, NFTA_LIMIT_TYPE).unwrap_or(0) != 0 {
+        return None;
+    }
+    let unit = match u64_of(NFTA_LIMIT_UNIT)? {
+        1 => LimitUnit::Second,
+        60 => LimitUnit::Minute,
+        3600 => LimitUnit::Hour,
+        86400 => LimitUnit::Day,
+        _ => return None,
+    };
+    let mut limit = LimitExpr::packets(u64_of(NFTA_LIMIT_RATE)?, unit)
+        .burst(u32_attr(data, NFTA_LIMIT_BURST).unwrap_or(0));
+    if u32_attr(data, NFTA_LIMIT_FLAGS).unwrap_or(0) & NFT_LIMIT_F_INV != 0 {
+        limit = limit.over();
+    }
+    Some(limit)
+}
+
+fn parse_log(data: &[u8]) -> Option<RuleExpr> {
+    let mut log = LogExpr::new();
+    for (attr, payload) in AttrIter::new(data) {
+        match attr & 0x7FFF {
+            NFTA_LOG_PREFIX => log.prefix = Some(get::string(payload).ok()?.to_string()),
+            NFTA_LOG_GROUP => log.group = Some(get::u16_be(payload).ok()?),
+            NFTA_LOG_LEVEL if get::u32_be(payload).ok()? == NFT_LOGLEVEL_WARNING => {}
+            // A level, flags, snaplen or threshold LogExpr cannot carry.
+            _ => return None,
+        }
+    }
+    Some(RuleExpr::Log(log))
+}
+
+fn parse_reject(data: &[u8]) -> Option<RuleExpr> {
+    let mut reject_type = None;
+    let mut icmp_code = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr & 0x7FFF {
+            NFTA_REJECT_TYPE => reject_type = Some(get::u32_be(payload).ok()?),
+            NFTA_REJECT_ICMP_CODE => icmp_code = Some(*payload.first()?),
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Reject {
+        reject_type: reject_type?,
+        icmp_code,
+    })
+}
+
+fn parse_masq(data: &[u8]) -> Option<RuleExpr> {
+    Some(RuleExpr::Masq {
+        proto: register_range(data, NFTA_MASQ_REG_PROTO_MIN, NFTA_MASQ_REG_PROTO_MAX)?,
+        flags: NatFlags::from_bits_retain(u32_attr(data, NFTA_MASQ_FLAGS).unwrap_or(0)),
+    })
+}
+
+fn parse_nat(data: &[u8]) -> Option<RuleExpr> {
+    let nat_type = match u32_attr(data, NFTA_NAT_TYPE)? {
+        0 => NatType::Snat,
+        1 => NatType::Dnat,
+        _ => return None,
+    };
+    let family = Family::from_u8(u8::try_from(u32_attr(data, NFTA_NAT_FAMILY)?).ok()?)?;
+    Some(RuleExpr::Nat {
+        nat_type,
+        family,
+        addr: register_range(data, NFTA_NAT_REG_ADDR_MIN, NFTA_NAT_REG_ADDR_MAX)?,
+        proto: register_range(data, NFTA_NAT_REG_PROTO_MIN, NFTA_NAT_REG_PROTO_MAX)?,
+        flags: NatFlags::from_bits_retain(u32_attr(data, NFTA_NAT_FLAGS).unwrap_or(0)),
+    })
+}
+
+fn parse_redir(data: &[u8]) -> Option<RuleExpr> {
+    Some(RuleExpr::Redir {
+        proto: register_range(data, NFTA_REDIR_REG_PROTO_MIN, NFTA_REDIR_REG_PROTO_MAX)?,
+        flags: NatFlags::from_bits_retain(u32_attr(data, NFTA_REDIR_FLAGS).unwrap_or(0)),
+    })
+}
+
+fn parse_flow_offload(data: &[u8]) -> Option<RuleExpr> {
+    let (_, name) = AttrIter::new(data).find(|(attr, _)| attr & 0x7FFF == NFTA_FLOW_TABLE_NAME)?;
+    Some(RuleExpr::FlowOffload {
+        flowtable: get::string(name).ok()?.to_string(),
     })
 }
 
@@ -1876,13 +2075,21 @@ mod decode_tests {
         out
     }
 
-    /// The `NFTA_EXPR_DATA` payload of the expression named `name`.
+    /// The `NFTA_EXPR_DATA` payload of the expression named `name`, as
+    /// encoded: the raw attributes, whatever the decoder makes of them.
     fn expr_data(exprs: &[Expr], name: &str) -> Vec<u8> {
-        for e in parse_expressions(&encode(exprs)) {
-            if let RuleExpr::Unknown { name: n, data } = e
-                && n == name
-            {
-                return data;
+        let bytes = encode(exprs);
+        for (_, elem) in AttrIter::new(&bytes) {
+            let attrs: Vec<_> = AttrIter::new(elem).collect();
+            let named = attrs
+                .iter()
+                .any(|(a, v)| *a == NFTA_EXPR_NAME && get::string(v).ok() == Some(name));
+            if named {
+                return attrs
+                    .iter()
+                    .find(|(a, _)| a & 0x7FFF == NFTA_EXPR_DATA)
+                    .map(|(_, v)| v.to_vec())
+                    .unwrap_or_default();
             }
         }
         panic!("no `{name}` expression emitted");
@@ -2108,16 +2315,88 @@ mod decode_tests {
     }
 
     #[test]
-    fn dataless_expr_yields_unknown_with_empty_data() {
+    fn a_dataless_masq_decodes_as_a_plain_masquerade() {
         // `masq` writes an NFTA_EXPR_DATA nest with nothing in it.
         let bytes = encode(&[Expr::Masquerade(MasqExpr::new())]);
         assert_eq!(
             parse_expressions(&bytes),
-            vec![RuleExpr::Unknown {
-                name: "masq".to_string(),
-                data: vec![],
+            vec![RuleExpr::Masq {
+                proto: None,
+                flags: NatFlags::empty(),
             }]
         );
+    }
+
+    /// #528: what nlink writes for each statement decodes as its typed
+    /// variant, not `Unknown`.
+    #[test]
+    fn statements_decode_typed() {
+        use std::net::Ipv4Addr;
+
+        let rule = super::super::types::Rule::new("t", "c")
+            .limit(10, LimitUnit::Minute)
+            .log(Some("dropped: "))
+            .expr(LogExpr::new().group(3))
+            .reject_with(NFT_REJECT_ICMPX_UNREACH, NFT_REJECT_ICMPX_PORT_UNREACH)
+            .dnat(Ipv4Addr::new(10, 0, 0, 1), Some(8080))
+            .redirect(Some(3128))
+            .masquerade()
+            .flow_offload("ft");
+        let decoded: Vec<_> = parse_expressions(&encode(&rule.exprs))
+            .into_iter()
+            .filter(|e| !matches!(e, RuleExpr::Immediate { .. }))
+            .collect();
+        let both = Some((Register::R0, Register::R0));
+        assert_eq!(
+            decoded,
+            vec![
+                RuleExpr::Limit(LimitExpr::packets(10, LimitUnit::Minute)),
+                RuleExpr::Log(LogExpr::new().prefix("dropped: ")),
+                RuleExpr::Log(LogExpr::new().group(3)),
+                RuleExpr::Reject {
+                    reject_type: NFT_REJECT_ICMPX_UNREACH,
+                    icmp_code: Some(NFT_REJECT_ICMPX_PORT_UNREACH),
+                },
+                RuleExpr::Nat {
+                    nat_type: NatType::Dnat,
+                    family: Family::Ip,
+                    addr: both,
+                    proto: Some((Register::R1, Register::R1)),
+                    flags: NatFlags::MAP_IPS | NatFlags::PROTO_SPECIFIED,
+                },
+                RuleExpr::Redir {
+                    proto: both,
+                    flags: NatFlags::PROTO_SPECIFIED,
+                },
+                RuleExpr::Masq {
+                    proto: None,
+                    flags: NatFlags::empty(),
+                },
+                RuleExpr::FlowOffload {
+                    flowtable: "ft".into(),
+                },
+            ]
+        );
+    }
+
+    /// What these decoders cannot carry demotes to `Unknown`, never to a
+    /// guess: a byte-rate limit, a log level, a reject with no type.
+    #[test]
+    fn statements_beyond_the_types_stay_unknown() {
+        let mut limit = MessageBuilder::new(0, 0);
+        limit.append_attr_u64_be(NFTA_LIMIT_RATE, 1000);
+        limit.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
+        limit.append_attr_u32_be(NFTA_LIMIT_TYPE, 1); // NFT_LIMIT_PKT_BYTES
+        let mut log = MessageBuilder::new(0, 0);
+        log.append_attr_u32_be(NFTA_LOG_LEVEL, 7);
+        let reject = MessageBuilder::new(0, 0);
+        for (name, b) in [("limit", limit), ("log", log), ("reject", reject)] {
+            let data = b.finish()[16..].to_vec();
+            assert!(
+                matches!(&parse_expressions(&build_elem(name, &data))[..], [RuleExpr::Unknown { name: n, .. }] if n == name),
+                "{name}"
+            );
+        }
     }
 
     /// The empty nest is not cosmetic. `nft_expr_dump` opens

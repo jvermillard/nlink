@@ -1704,6 +1704,36 @@ All notable changes to this project will be documented in this file.
     `TestNamespace`, and the 68 helper calls in it go through the new
     paths.
 
+- **Typed decoders for rule statements (#528, first part).**
+  `RuleInfo::expressions()` decodes these statements, which used to come
+  back as `RuleExpr::Unknown`:
+  - **`Limit(LimitExpr)`**, a packet-rate limit;
+  - **`Log(LogExpr)`**, to syslog at the default level or to an `nflog`
+    group;
+  - **`Reject { reject_type, icmp_code }`**;
+  - **`Masq`, `Nat` and `Redir`**, which give the registers of the
+    address and port ranges, and the range flags as a new `NatFlags`
+    (`random`, `fully-random`, `persistent`, `netmap`, …). For `Nat`
+    they also give the type and family.
+  - **`FlowOffload { flowtable }`**.
+
+  Other details:
+  - **Still `Unknown`.** A shape these types cannot carry stays
+    `Unknown`, as before: a byte-rate limit, a log level or flags, an
+    nflog snaplen. #528's later parts add those.
+  - **Shared parsing.** One limit parser serves rules and limit objects.
+  - **Flowtable references.** The flowtable-in-use check that keeps a
+    referenced flowtable from being purged reads `FlowOffload`.
+  - **Test.** A root test writes every one of these in `nft`'s own
+    syntax: limit with burst, log with prefix and group, a bare log, the
+    ICMPX reject and the TCP reset, `flow add`, `masquerade random`,
+    masquerade to a port range, snat to an address range `fully-random`,
+    dnat to an address and port, and redirect to a port. It installs them
+    with `nft -f`, reads them back through nlink and asserts that none
+    is `Unknown` and that each has its expected shape. It fails without
+    the decoders. Unit tests cover what nlink writes and what must stay
+    `Unknown`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

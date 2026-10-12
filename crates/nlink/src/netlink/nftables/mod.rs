@@ -402,6 +402,20 @@ pub const NFTA_LOG_LEVEL: u16 = 5;
 /// `NFT_LOGLEVEL_WARNING` — the level `nft_log_init` picks when the
 /// request names none.
 pub const NFT_LOGLEVEL_WARNING: u32 = 4;
+/// `NFTA_LOG_SNAPLEN` — bytes of the packet an `nflog` group copies.
+pub const NFTA_LOG_SNAPLEN: u16 = 3;
+/// `NFTA_LOG_QTHRESHOLD` — packets an `nflog` group queues before sending.
+pub const NFTA_LOG_QTHRESHOLD: u16 = 4;
+/// `NFTA_LOG_FLAGS` — what a syslog `log` adds: TCP sequence, options, ….
+pub const NFTA_LOG_FLAGS: u16 = 6;
+
+// Masquerade — `enum nft_masq_attributes`.
+/// `NFTA_MASQ_FLAGS` — the `NF_NAT_RANGE_*` flags of a `masquerade`.
+pub const NFTA_MASQ_FLAGS: u16 = 1;
+/// `NFTA_MASQ_REG_PROTO_MIN` — the register holding the first port.
+pub const NFTA_MASQ_REG_PROTO_MIN: u16 = 2;
+/// `NFTA_MASQ_REG_PROTO_MAX` — the register holding the last port.
+pub const NFTA_MASQ_REG_PROTO_MAX: u16 = 3;
 
 // =============================================================================
 // Set Attributes

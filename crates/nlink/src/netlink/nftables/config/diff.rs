@@ -1113,13 +1113,9 @@ fn keep_what_staying_rules_use(
 
 /// Does `rule` offload to the flowtable `name`?
 fn references_flowtable(rule: &RuleInfo, name: &str) -> bool {
-    use crate::netlink::attr::{AttrIter, get};
-    rule.expressions().iter().any(|e| match e {
-        // NFTA_FLOW_TABLE_NAME = 1
-        RuleExpr::Unknown { name: n, data } if n == "flow_offload" => AttrIter::new(data)
-            .any(|(attr, payload)| attr == 1 && get::string(payload).ok() == Some(name)),
-        _ => false,
-    })
+    rule.expressions()
+        .iter()
+        .any(|e| matches!(e, RuleExpr::FlowOffload { flowtable } if flowtable == name))
 }
 
 /// Does `rule` jump or go to `chain`?
