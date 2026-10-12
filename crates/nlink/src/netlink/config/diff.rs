@@ -2889,7 +2889,7 @@ fn declared_from_live(
     Some(DeclaredRoute {
         destination,
         prefix_len: r.dst_len(),
-        gateway: r.gateway().copied(),
+        gateway: r.gateway().or(r.via()).copied(),
         dev: r
             .oif()
             .and_then(|idx| ifindex_to_name.get(&idx))
@@ -2903,6 +2903,7 @@ fn declared_from_live(
             scope: Some(r.scope()),
             onlink: r.is_onlink(),
             nhid: r.nh_id(),
+            mpls_encap: r.mpls_encap_labels().unwrap_or_default().to_vec(),
             multipath: r
                 .multipath()
                 .unwrap_or_default()
@@ -2929,6 +2930,10 @@ pub(crate) fn route_text(route: &DeclaredRoute) -> String {
     }
     for hop in &route.attrs.multipath {
         out.push_str(&format!(" {hop}"));
+    }
+    if !route.attrs.mpls_encap.is_empty() {
+        let labels: Vec<String> = route.attrs.mpls_encap.iter().map(u32::to_string).collect();
+        out.push_str(&format!(" encap mpls {}", labels.join("/")));
     }
     if let Some(g) = route.gateway {
         out.push_str(&format!(" via {g}"));
@@ -3017,6 +3022,7 @@ fn route_attrs_match(declared: &DeclaredRoute, r: &RouteMessage) -> bool {
     let a = &declared.attrs;
     let live = super::types::RouteAttrs::default().with_metrics(r.metrics());
     a.prefsrc.as_ref() == r.prefsrc()
+        && a.mpls_encap.as_slice() == r.mpls_encap_labels().unwrap_or_default()
         && a.onlink == r.is_onlink()
         && a.scope.is_none_or(|s| s == r.scope())
         && (a.mtu, a.advmss, a.window) == (live.mtu, live.advmss, live.window)
@@ -3048,8 +3054,9 @@ fn route_matches_but_metric(
                     && w.onlink == (h.flags & crate::netlink::route::rtnh_flags::ONLINK != 0)
             });
     }
-    // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
-    let gw_match = match (declared.gateway, r.gateway()) {
+    // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>. An IPv4 route's
+    // IPv6 gateway is RTA_VIA (#516).
+    let gw_match = match (declared.gateway, r.gateway().or(r.via())) {
         (None, None) => true,
         (Some(a), Some(b)) => a == *b,
         _ => false,

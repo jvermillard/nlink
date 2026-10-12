@@ -1317,6 +1317,32 @@ All notable changes to this project will be documented in this file.
       route whose hop's link is recreated taken as present (it does not
       converge).
 
+- **Declared routes via an IPv6 gateway, and with an MPLS encapsulation
+  (#516, row 11, last part).**
+  - **IPv6 gateways.** An IPv4 route may now name an IPv6 gateway
+    (RFC 5549). It goes out as `RTA_VIA` (kernel 5.2+) and compares
+    against it.
+    - Until now this was a validation error, "nlink does not model
+      `RTA_VIA`".
+    - An IPv6 route with an IPv4 gateway is still refused.
+    - `Ipv4Route::gateway_v6` is the imperative form.
+  - **MPLS encapsulation.** `RouteBuilder::encap_mpls(&[labels])` pushes
+    a label stack (`encap mpls`, the `mpls_iptunnel` module), compared
+    against the route's.
+  - **Parsing.** `RouteMessage::via()`, `encap_type()` and
+    `mpls_encap_labels()` read `RTA_VIA`, `RTA_ENCAP_TYPE` and an MPLS
+    `RTA_ENCAP`, which nlink did not parse before. `write_to` writes
+    them back.
+  - **Validation errors:**
+    - a label past 1048575;
+    - an encapsulation without a gateway or device.
+  - **Tests.**
+    - A transition test moves an IPv6 gateway and changes the labels in
+      place, then makes both plain routes, checked through `ip route`. It
+      passes on iproute2 6.15 and 6.1.
+    - It fails with `RTA_VIA` uncompared (no convergence), and with the
+      labels uncompared (they stay).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

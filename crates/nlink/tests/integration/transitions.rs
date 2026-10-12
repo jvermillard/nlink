@@ -2202,6 +2202,59 @@ async fn multipath_routes_change_and_come_back_after_a_recreate() -> nlink::Resu
     Ok(())
 }
 
+/// An IPv4 route via an IPv6 gateway (RFC 5549, `RTA_VIA`) and one with
+/// an MPLS encapsulation, A→B→C (#516). Step 2 moves the gateway and
+/// changes the labels; step 3 makes both plain IPv4 routes, which drops
+/// the encapsulation. `ip -j route` shows each step.
+#[tokio::test]
+async fn routes_via_ipv6_and_with_mpls_encap_change() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "mpls_iptunnel");
+
+    let step = |i: usize| {
+        let base = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address_with("d0", "10.90.0.1/24", |a| a)
+            .unwrap()
+            .address_with("d0", "fd00:90::1/64", |a| a.nodad())
+            .unwrap();
+        match i {
+            0 | 1 => {
+                let (gw6, labels): (&str, &[u32]) = if i == 0 { ("fd00:90::2", &[100, 200]) } else { ("fd00:90::3", &[300]) };
+                base.route("10.89.0.0/16", move |r| r.via(gw6).dev("d0"))
+                    .unwrap()
+                    .route("10.88.0.0/16", move |r| r.via("10.90.0.2").dev("d0").encap_mpls(labels))
+                    .unwrap()
+            }
+            _ => base
+                .route("10.89.0.0/16", |r| r.via("10.90.0.2").dev("d0"))
+                .unwrap()
+                .route("10.88.0.0/16", |r| r.via("10.90.0.2").dev("d0"))
+                .unwrap(),
+        }
+    };
+    let steps = [step(0), step(1), step(2)];
+    let ns = TestNamespace::new("tr-via")?;
+    crate::common::converge::assert_transition_with_previous(&ns, &steps, async |i, _conn| {
+        // Text: iproute2 6.1's JSON puts the labels in the route's `dst`.
+        let show = |dst: &str| ns.exec("ip", &["route", "show", dst]).map_err(|e| e.to_string());
+        let (via, encap) = (show("10.89.0.0/16")?, show("10.88.0.0/16")?);
+        let (want_via, want_encap) = match i {
+            0 => ("via inet6 fd00:90::2 dev d0", "encap mpls  100/200 via 10.90.0.2 dev d0"),
+            1 => ("via inet6 fd00:90::3 dev d0", "encap mpls  300 via 10.90.0.2 dev d0"),
+            _ => ("via 10.90.0.2 dev d0", "10.88.0.0/16 via 10.90.0.2 dev d0"),
+        };
+        if !via.contains(want_via) {
+            return Err(format!("step {}: via route: {via}", i + 1));
+        }
+        if !encap.contains(want_encap) {
+            return Err(format!("step {}: encap route: {encap}", i + 1));
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.
