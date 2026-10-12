@@ -11,7 +11,7 @@ use std::{
 use super::kind::{self, KindPlan, KindUpdate, LinkRecreate};
 use super::types::{
     DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredLinkType, DeclaredNeighbour, DeclaredQdisc,
-    DeclaredRoute, DeclaredRule, RuleAction,
+    DeclaredNexthop, DeclaredRoute, DeclaredRule, RuleAction,
     DeclaredRouteType, LinkState, MasterSpec, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
@@ -73,8 +73,9 @@ pub struct PlanOptions {
     /// - **Links and qdiscs are never purged** — deleting
     ///   interfaces is too destructive to infer; use the imperative
     ///   `Connection::del_link` / `del_qdisc` for those.
-    /// - **Neighbours, FDB entries and rules are never purged** (#516): one
-    ///   the previous config declared goes through [`Self::previous`].
+    /// - **Neighbours, FDB entries, rules and nexthop objects are never
+    ///   purged** (#516): one the previous config declared goes through
+    ///   [`Self::previous`].
     pub purge: bool,
 
     /// Extra route tables to purge `static`/`boot` routes from, on
@@ -306,6 +307,26 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) fdb_replaced: Vec<(DeclaredFdb, DeclaredFdb)>,
 
+    /// Nexthop objects to install with `NLM_F_REPLACE` (#516), single
+    /// nexthops before the groups made of them: missing, or different —
+    /// or on a link the apply deletes or flushes, which the kernel deletes
+    /// them with.
+    pub nexthops_to_set: Vec<DeclaredNexthop>,
+    /// Nexthop objects the previous config declared and this one does
+    /// not, still in the kernel with the config's protocol, groups before
+    /// their members (#516). Only with [`PlanOptions::previous`].
+    pub nexthops_to_remove: Vec<DeclaredNexthop>,
+    /// Declared nexthops the apply refuses to install (#516): the id is
+    /// another tool's, or the change is between a group and a single
+    /// nexthop, which the kernel will not replace. The apply fails on the
+    /// first, before it changes anything.
+    pub nexthops_refused: Vec<NexthopConflict>,
+    /// The nexthop each in `nexthops_to_set` replaces, when one is there.
+    /// Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) nexthops_replaced: Vec<(DeclaredNexthop, DeclaredNexthop)>,
+
     /// Rules to add (#516): none with the config's protocol matches them.
     pub rules_to_add: Vec<DeclaredRule>,
     /// Rules the previous config declared and this one does not, still in
@@ -463,6 +484,9 @@ impl ConfigDiff {
             && self.fdb_to_remove.is_empty()
             && self.rules_to_add.is_empty()
             && self.rules_to_remove.is_empty()
+            && self.nexthops_to_set.is_empty()
+            && self.nexthops_to_remove.is_empty()
+            && self.nexthops_refused.is_empty()
             && self.tc.is_empty()
     }
 
@@ -488,6 +512,9 @@ impl ConfigDiff {
             + self.fdb_to_remove.len()
             + self.rules_to_add.len()
             + self.rules_to_remove.len()
+            + self.nexthops_to_set.len()
+            + self.nexthops_to_remove.len()
+            + self.nexthops_refused.len()
             + self.tc.iter().map(|t| t.len()).sum::<usize>()
     }
 
@@ -554,6 +581,12 @@ impl ConfigDiff {
         }
         for conflict in &self.routes_refused {
             lines.push(conflict.to_string());
+        }
+        for conflict in &self.nexthops_refused {
+            lines.push(conflict.to_string());
+        }
+        for n in &self.nexthops_to_set {
+            lines.push(nexthop_line(n, &self.nexthops_replaced));
         }
         // Qdiscs
         for qdisc in &self.qdiscs_to_add {
@@ -626,6 +659,9 @@ impl ConfigDiff {
         for r in &self.rules_to_remove {
             lines.push(format!("- {r}"));
         }
+        for n in &self.nexthops_to_remove {
+            lines.push(format!("- {n}"));
+        }
 
         if lines.is_empty() {
             "No changes needed".to_string()
@@ -649,6 +685,33 @@ pub(crate) fn neighbour_line(
             None => format!("~ {n}"),
         },
         None => format!("+ {n}"),
+    }
+}
+
+/// A nexthop the apply installs, as the diff and the plan print it.
+pub(crate) fn nexthop_line(n: &DeclaredNexthop, replaced: &[(DeclaredNexthop, DeclaredNexthop)]) -> String {
+    match replaced.iter().find(|(d, _)| d == n) {
+        Some((_, before)) => format!("~ {n} (replacing{})", before.to_string().trim_start_matches(&format!("nexthop {}", n.id))),
+        None => format!("+ {n}"),
+    }
+}
+
+/// A declared nexthop the apply will not install (#516).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct NexthopConflict {
+    /// The declared nexthop.
+    pub nexthop: DeclaredNexthop,
+    /// Why: what has its id.
+    pub reason: String,
+}
+
+impl std::fmt::Display for NexthopConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "! {} ({})", self.nexthop, self.reason)
     }
 }
 
@@ -1022,6 +1085,10 @@ pub struct Snapshot {
     /// [`read`](Self::read), and by `read_for` when its config or the
     /// previous one declares one.
     rules: Vec<RuleMessage>,
+    /// Every nexthop object (#516): read by [`read`](Self::read), and by
+    /// `read_for` when its config or the previous one declares one or a
+    /// route through one.
+    nexthops: Vec<crate::netlink::nexthop::Nexthop>,
     /// The id this namespace knows each namespace by, for the veth peers
     /// a config places in one (#516): every named namespace for
     /// [`read`](Self::read), the ones a config names for `read_for`. A
@@ -1048,6 +1115,7 @@ impl Snapshot {
         snapshot.read_neighbours(conn).await?;
         snapshot.fdb = conn.get_bridge_neighbors().await?;
         snapshot.rules = conn.get_rules().await?;
+        snapshot.nexthops = read_nexthops(conn).await?;
         let named: Vec<crate::netlink::namespace::NetnsRef> = crate::netlink::namespace::list()?
             .into_iter()
             .map(crate::netlink::namespace::NetnsRef::Named)
@@ -1145,6 +1213,12 @@ impl Snapshot {
         if !config.rules.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.rules.is_empty()) {
             snapshot.rules = conn.get_rules().await?;
         }
+        let wants_nexthops = |c: &NetworkConfig| {
+            !c.nexthops.is_empty() || c.routes.iter().any(|r| r.attrs.nhid.is_some())
+        };
+        if wants_nexthops(config) || opts.previous.as_deref().is_some_and(wants_nexthops) {
+            snapshot.nexthops = read_nexthops(conn).await?;
+        }
         let peer_namespaces: Vec<crate::netlink::namespace::NetnsRef> =
             config.links.iter().filter_map(|l| l.peer_netns().cloned()).collect();
         snapshot.read_netns_ids(conn, peer_namespaces, true).await?;
@@ -1165,6 +1239,7 @@ impl Snapshot {
             fdb: Vec::new(),
             rules: Vec::new(),
             netns_ids: HashMap::new(),
+            nexthops: Vec::new(),
         })
     }
 
@@ -1186,6 +1261,15 @@ impl Snapshot {
     /// The qdiscs it holds.
     pub fn qdiscs(&self) -> &[TcMessage] {
         &self.qdiscs
+    }
+}
+
+/// Every nexthop object; none on a kernel without them (before 5.3).
+async fn read_nexthops(conn: &Connection<Route>) -> Result<Vec<crate::netlink::nexthop::Nexthop>> {
+    match conn.get_nexthops().await {
+        Ok(n) => Ok(n),
+        Err(e) if e.is_not_supported() => Ok(Vec::new()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1307,6 +1391,14 @@ pub(crate) fn diff_snapshot(
         .into_iter()
         .filter(|r| r.oif().is_none_or(|oif| !flushed.contains(&oif)))
         .collect();
+    // Nexthop objects on a link the apply deletes or flushes go with it,
+    // and so does every route through them (#516): the declared ones are
+    // put back.
+    let lost_nexthops = lost_nexthops(&snapshot.nexthops, &plan.gone, &flushed);
+    let current_routes: Vec<RouteMessage> = current_routes
+        .into_iter()
+        .filter(|r| r.nh_id().is_none_or(|id| !lost_nexthops.contains(&id)))
+        .collect();
 
     // Plan 186 §3c — topo-sort `links_to_add` so a child whose
     // parent is also being created in this apply lands AFTER
@@ -1359,6 +1451,9 @@ pub(crate) fn diff_snapshot(
 
     // Rules (#516): by name, so no link change touches them.
     diff_rules(config, snapshot, opts, &mut diff);
+
+    // Nexthop objects (#516).
+    diff_nexthops(config, snapshot, &ifindex_to_name, &lost_nexthops, opts, &mut diff);
 
     // TC trees (#514), against what the recreates leave: a recreated link
     // has none. The apply diffs each again after the qdisc step.
@@ -1507,6 +1602,119 @@ fn diff_fdb(
             diff.fdb_to_remove.push(have);
         }
     }
+}
+
+/// The nexthops a link the apply deletes (`gone`) or flushes takes with it
+/// (#516): the ones on it, and a group all of whose members are.
+fn lost_nexthops(
+    live: &[crate::netlink::nexthop::Nexthop],
+    gone: &HashSet<u32>,
+    flushed: &HashSet<u32>,
+) -> HashSet<u32> {
+    let mut lost: HashSet<u32> = live
+        .iter()
+        .filter(|n| n.ifindex().is_some_and(|i| gone.contains(&i) || flushed.contains(&i)))
+        .map(|n| n.id())
+        .collect();
+    for n in live {
+        if let Some(members) = n.group()
+            && !members.is_empty()
+            && members.iter().all(|m| lost.contains(&m.id()))
+        {
+            lost.insert(n.id());
+        }
+    }
+    lost
+}
+
+/// A kernel nexthop as a declaration (#516).
+pub(crate) fn nexthop_from_live(
+    n: &crate::netlink::nexthop::Nexthop,
+    names: &HashMap<u32, &str>,
+) -> DeclaredNexthop {
+    let group: Vec<(u32, u16)> = n
+        .group()
+        .map(|g| g.iter().map(|m| (m.id(), m.weight())).collect())
+        .unwrap_or_default();
+    DeclaredNexthop {
+        id: n.id(),
+        gateway: n.gateway(),
+        dev: n.ifindex().and_then(|i| names.get(&i)).map(|d| d.to_string()),
+        onlink: n.is_onlink(),
+        blackhole: n.is_blackhole(),
+        ipv6: group.is_empty() && n.gateway().is_none() && n.family() == libc::AF_INET6 as u8,
+        group,
+    }
+}
+
+/// A declaration as [`nexthop_from_live`] reads its kernel nexthop back.
+fn nexthop_normal(n: &DeclaredNexthop) -> DeclaredNexthop {
+    let mut n = n.clone();
+    n.ipv6 = !n.is_group() && n.gateway.is_none() && n.is_ipv6();
+    n
+}
+
+/// The declared nexthops against the kernel's (#516). Only one with the
+/// config's protocol is the config's: another with the id is another
+/// tool's, and refused.
+fn diff_nexthops(
+    config: &NetworkConfig,
+    snapshot: &Snapshot,
+    names: &HashMap<u32, &str>,
+    lost: &HashSet<u32>,
+    opts: &PlanOptions,
+    diff: &mut ConfigDiff,
+) {
+    let ours = u8::from(config.routes_protocol());
+    let live: HashMap<u32, &crate::netlink::nexthop::Nexthop> = snapshot
+        .nexthops
+        .iter()
+        .filter(|n| !lost.contains(&n.id()))
+        .map(|n| (n.id(), n))
+        .collect();
+    let mut sets = Vec::new();
+    for d in &config.nexthops {
+        let Some(l) = live.get(&d.id) else {
+            sets.push(d.clone());
+            continue;
+        };
+        let have = nexthop_from_live(l, names);
+        if l.protocol() != ours {
+            diff.nexthops_refused.push(NexthopConflict {
+                nexthop: d.clone(),
+                reason: format!(
+                    "its id is {have}, protocol {}, which this config does not own; declare it under another id",
+                    l.protocol()
+                ),
+            });
+        } else if have == nexthop_normal(d) {
+        } else if have.is_group() != d.is_group() {
+            diff.nexthops_refused.push(NexthopConflict {
+                nexthop: d.clone(),
+                reason: format!(
+                    "its id is {have}: the kernel will not turn a nexthop into a group or a group \
+                     into a nexthop; declare it under another id"
+                ),
+            });
+        } else {
+            diff.nexthops_replaced.push((d.clone(), have));
+            sets.push(d.clone());
+        }
+    }
+    // A group's members first.
+    sets.sort_by_key(DeclaredNexthop::is_group);
+    diff.nexthops_to_set = sets;
+    let mut removes: Vec<DeclaredNexthop> = opts
+        .previous
+        .iter()
+        .flat_map(|p| p.nexthops.iter())
+        .filter(|p| !config.nexthops.iter().any(|d| d.id == p.id))
+        .filter_map(|p| live.get(&p.id).filter(|l| l.protocol() == ours))
+        .map(|l| nexthop_from_live(l, names))
+        .collect();
+    // A group before its members.
+    removes.sort_by_key(|n| !n.is_group());
+    diff.nexthops_to_remove = removes;
 }
 
 /// A kernel rule as a declaration, if it is one a declaration can be: one
@@ -2689,6 +2897,7 @@ fn declared_from_live(
             prefsrc: r.prefsrc().copied(),
             scope: Some(r.scope()),
             onlink: r.is_onlink(),
+            nhid: r.nh_id(),
             ..Default::default()
         }
         .with_metrics(r.metrics()),
@@ -2792,6 +3001,12 @@ fn route_matches_but_metric(
     declared_oif: Option<u32>,
     r: &RouteMessage,
 ) -> bool {
+    // Through a nexthop object (#516): the id is the route's next hop, and
+    // the gateway, device and type the kernel dumps with it are the
+    // object's — a route through a blackhole nexthop is a blackhole route.
+    if declared.attrs.nhid.is_some() || r.nh_id().is_some() {
+        return declared.attrs.nhid == r.nh_id();
+    }
     // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
     let gw_match = match (declared.gateway, r.gateway()) {
         (None, None) => true,
@@ -3446,6 +3661,9 @@ mod tests {
                 "links-to-remove",
                 "neighbours-to-remove",
                 "neighbours-to-set",
+                "nexthops-refused",
+                "nexthops-to-remove",
+                "nexthops-to-set",
                 "qdiscs-to-add",
                 "qdiscs-to-remove",
                 "qdiscs-to-replace",

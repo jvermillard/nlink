@@ -1964,6 +1964,7 @@ fn undeclarable_on(
     name: &str,
     extras: &LinkExtras,
     declared: &[&DeclaredNeighbour],
+    declared_nexthops: &HashSet<u32>,
     blocked_by: &mut Vec<Blocker>,
 ) {
     let is_declared = |dst: &IpAddr, proxy: bool| {
@@ -1997,7 +1998,11 @@ fn undeclarable_on(
             });
         }
     }
-    for nh in extras.nexthops.iter().filter(|nh| nh.ifindex() == Some(ifindex)) {
+    for nh in extras
+        .nexthops
+        .iter()
+        .filter(|nh| nh.ifindex() == Some(ifindex) && !declared_nexthops.contains(&nh.id()))
+    {
         blocked_by.push(Blocker::Nexthop {
             dev: name.to_string(),
             id: nh.id(),
@@ -2051,6 +2056,14 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
         .neighbours
         .iter()
         .chain(opts.previous.iter().flat_map(|p| p.neighbours.iter()))
+        .collect();
+    // Nexthop objects this config or the previous one declares: put back,
+    // or meant to go (#516).
+    let declared_nexthops: HashSet<u32> = config
+        .nexthops
+        .iter()
+        .chain(opts.previous.iter().flat_map(|p| p.nexthops.iter()))
+        .map(|n| n.id)
         .collect();
     // FDB entries this config or the previous one declares: put back, or
     // meant to go (#516). Declared without a VLAN, an entry is one per VLAN
@@ -2365,7 +2378,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     });
                 }
             }
-            undeclarable_on(l.ifindex(), name, extras, &declared_neighbours, &mut blocked_by);
+            undeclarable_on(l.ifindex(), name, extras, &declared_neighbours, &declared_nexthops, &mut blocked_by);
         }
 
         // The ports of every deleted master, which the kernel releases.
@@ -2438,7 +2451,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     blocked_by.push(route_label(r, name, how));
                 }
             }
-            undeclarable_on(ifindex, name, extras, &declared_neighbours, &mut blocked_by);
+            undeclarable_on(ifindex, name, extras, &declared_neighbours, &declared_nexthops, &mut blocked_by);
         }
 
         // A bridge entry is dumped once per VLAN as well as once without.

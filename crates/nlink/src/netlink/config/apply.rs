@@ -386,6 +386,9 @@ fn step_operation(step: &Step) -> String {
     match step {
         Step::MissingLink { name } => format!("link {name}"),
         Step::RefuseRoute(c) => format!("add route {}/{}", c.route.destination, c.route.prefix_len),
+        Step::RefuseNexthop(c) => format!("set nexthop {}", c.nexthop.id),
+        Step::SetNexthop { after, .. } => format!("set {after}"),
+        Step::DeleteNexthop(n) => format!("remove {n}"),
         Step::RefuseRemoval(r) => format!("delete link {}", r.name),
         Step::RefuseRecreate(r) => format!("recreate link {}", r.name),
         Step::DeleteForRecreate(r) => {
@@ -437,6 +440,10 @@ fn refusal(step: &Step) -> Option<Error> {
             "route {}/{}: adding it would replace {}, which this config does not own. Give \
              the declared route another metric, or remove the other route, and apply again.",
             conflict.route.destination, conflict.route.prefix_len, conflict.held_by
+        )),
+        Step::RefuseNexthop(conflict) => Error::NotSupported(format!(
+            "nexthop {}: {}",
+            conflict.nexthop.id, conflict.reason
         )),
         // A removal that would destroy what no config declares (#512).
         Step::RefuseRemoval(removal) => Error::NotSupported(format!(
@@ -505,6 +512,36 @@ fn neighbour_config(n: &super::DeclaredNeighbour) -> crate::netlink::neigh::Neig
         Some(mac) => c.permanent().lladdr(mac),
         None => c.permanent(),
     }
+}
+
+/// Install a declared nexthop with `protocol`, replacing one at its id
+/// (#516).
+async fn set_nexthop(conn: &Connection<Route>, n: &super::DeclaredNexthop, protocol: u8) -> Result<()> {
+    use crate::netlink::nexthop::{NexthopBuilder, NexthopGroupBuilder};
+    if n.is_group() {
+        let mut g = NexthopGroupBuilder::new(n.id).protocol(protocol);
+        for (id, weight) in &n.group {
+            g = g.member(*id, *weight);
+        }
+        return conn.replace_nexthop_group(g).await;
+    }
+    let mut b = NexthopBuilder::new(n.id).protocol(protocol);
+    if let Some(gw) = n.gateway {
+        b = b.gateway(gw);
+    }
+    if let Some(dev) = &n.dev {
+        b = b.dev(dev.as_str());
+    }
+    if n.onlink {
+        b = b.onlink();
+    }
+    if n.blackhole {
+        b = b.blackhole();
+    }
+    if n.ipv6 {
+        b = b.ipv6();
+    }
+    conn.replace_nexthop(b).await
 }
 
 /// The kernel rule a declared rule is, with `protocol` (#516).
@@ -579,6 +616,7 @@ async fn run_step(
     Ok(match step {
         Step::MissingLink { .. }
         | Step::RefuseRoute(_)
+        | Step::RefuseNexthop(_)
         | Step::RefuseRemoval(_)
         | Step::RefuseRecreate(_) => unreachable!("a refusal fails above"),
         // A link the kernel deleted along with a recreated one is already
@@ -717,6 +755,17 @@ async fn run_step(
             // entry moved to another port.
             Err(e2) if e2.is_not_found() => Outcome::Unchanged(Some(format!("{e} already absent"))),
             Err(e2) => return Err(e2),
+        },
+        Step::SetNexthop { after: n, .. } => {
+            let protocol = u8::from(plan.routes_protocol.unwrap_or(RouteProtocol::Boot));
+            set_nexthop(conn, n, protocol).await?;
+            Outcome::Changed(format!("Set {n}"), 1)
+        }
+        Step::DeleteNexthop(n) => match conn.del_nexthop(n.id).await {
+            Ok(()) => Outcome::Changed(format!("Removed {n}"), 1),
+            // Gone already: its link went down, or its last member did.
+            Err(e) if e.is_not_found() => Outcome::Unchanged(Some(format!("{n} already absent"))),
+            Err(e) => return Err(e),
         },
         Step::AddRule(r) => {
             let protocol = u8::from(plan.routes_protocol.unwrap_or(RouteProtocol::Boot));
@@ -1773,6 +1822,9 @@ async fn add_route(
             if let Some(metrics) = route.attrs.metrics() {
                 config = config.metrics(metrics);
             }
+            if let Some(id) = route.attrs.nhid {
+                config = config.nexthop_group(id);
+            }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -1813,6 +1865,9 @@ async fn add_route(
             }
             if let Some(metrics) = route.attrs.metrics() {
                 config = config.metrics(metrics);
+            }
+            if let Some(id) = route.attrs.nhid {
+                config = config.nexthop_group(id);
             }
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
