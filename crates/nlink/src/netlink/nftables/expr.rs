@@ -70,6 +70,10 @@ pub enum Expr {
     Masquerade(MasqExpr),
     /// NAT (snat/dnat) with optional address and port.
     Nat(NatExpr),
+    /// Any NAT statement at register level — snat, dnat, masquerade or
+    /// redirect, with ranges and flags. [`Rule::nat`](super::types::Rule::nat)
+    /// builds one after loading the values it names (#528).
+    NatRegs(NatRegs),
     /// Redirect to the local machine — see [`RedirExpr`].
     Redirect(RedirExpr),
     /// Reject the packet — send an ICMP unreachable or a TCP RST, then drop.
@@ -749,6 +753,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.nest_end(data);
         }
+        Expr::NatRegs(nat) => write_nat_regs(builder, nat),
         Expr::Nat(nat) => {
             // NAT needs to load address/port into registers first via Immediate,
             // then reference those registers in the nat expression.
@@ -1001,6 +1006,59 @@ pub(crate) fn write_limit_attrs(builder: &mut MessageBuilder, limit: &LimitExpr)
     // was replaced on every apply.
     let flags = if limit.over { NFT_LIMIT_F_INV } else { 0 };
     builder.append_attr_u32_be(NFTA_LIMIT_FLAGS, flags);
+}
+
+/// A [`NatRegs`], in the order each kind's `dump` writes its attributes,
+/// so the declared rule matches its echo. The kernel ORs the derived flags
+/// in (an address range is `MAP_IPS`, a port range `PROTO_SPECIFIED`) and
+/// dumps the result; they are sent already ORed.
+fn write_nat_regs(builder: &mut MessageBuilder, nat: &NatRegs) {
+    let mut flags = nat.flags;
+    if nat.proto.is_some() {
+        flags |= NatFlags::PROTO_SPECIFIED;
+    }
+    let range = |builder: &mut MessageBuilder, min, max, regs: Option<(Register, Register)>| {
+        if let Some((lo, hi)) = regs {
+            builder.append_attr_u32_be(min, lo.wire());
+            builder.append_attr_u32_be(max, hi.wire());
+        }
+    };
+    match nat.kind {
+        NatKind::Snat | NatKind::Dnat => {
+            if nat.addr.is_some() {
+                flags |= NatFlags::MAP_IPS;
+            }
+            builder.append_attr_str(NFTA_EXPR_NAME, "nat");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            let nat_type = if nat.kind == NatKind::Snat { NatType::Snat } else { NatType::Dnat };
+            builder.append_attr_u32_be(NFTA_NAT_TYPE, nat_type as u32);
+            builder.append_attr_u32_be(NFTA_NAT_FAMILY, nat.family as u32);
+            range(builder, NFTA_NAT_REG_ADDR_MIN, NFTA_NAT_REG_ADDR_MAX, nat.addr);
+            range(builder, NFTA_NAT_REG_PROTO_MIN, NFTA_NAT_REG_PROTO_MAX, nat.proto);
+            if !flags.is_empty() {
+                builder.append_attr_u32_be(NFTA_NAT_FLAGS, flags.bits());
+            }
+            builder.nest_end(data);
+        }
+        NatKind::Masquerade => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "masq");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            if !flags.is_empty() {
+                builder.append_attr_u32_be(NFTA_MASQ_FLAGS, flags.bits());
+            }
+            range(builder, NFTA_MASQ_REG_PROTO_MIN, NFTA_MASQ_REG_PROTO_MAX, nat.proto);
+            builder.nest_end(data);
+        }
+        NatKind::Redirect => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "redir");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            range(builder, NFTA_REDIR_REG_PROTO_MIN, NFTA_REDIR_REG_PROTO_MAX, nat.proto);
+            if !flags.is_empty() {
+                builder.append_attr_u32_be(NFTA_REDIR_FLAGS, flags.bits());
+            }
+            builder.nest_end(data);
+        }
+    }
 }
 
 /// The attributes of a `quota`, as an expression or a quota object.
@@ -2377,6 +2435,91 @@ mod decode_tests {
                 },
             ]
         );
+    }
+
+    /// #528: `Rule::nat` loads each range into the next registers, and the
+    /// statement decodes back to them with the flags the ranges imply.
+    #[test]
+    fn nat_statements_load_their_ranges_and_decode() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        use super::super::types::{NatStatement, Rule};
+        let decode = |rule: Rule| {
+            assert_eq!(rule.error, None);
+            parse_expressions(&encode(&rule.exprs))
+        };
+        let (a, b) = (Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 9));
+        let exprs = decode(Rule::new("t", "c").nat(NatStatement::snat(a).to(b).ports(40000, 40010).fully_random()));
+        assert_eq!(
+            exprs,
+            vec![
+                RuleExpr::Immediate { dreg: Register::R0, data: a.octets().to_vec() },
+                RuleExpr::Immediate { dreg: Register::R1, data: b.octets().to_vec() },
+                RuleExpr::Immediate { dreg: Register::R2, data: 40000u16.to_be_bytes().to_vec() },
+                RuleExpr::Immediate { dreg: Register::R3, data: 40010u16.to_be_bytes().to_vec() },
+                RuleExpr::Nat {
+                    nat_type: NatType::Snat,
+                    family: Family::Ip,
+                    addr: Some((Register::R0, Register::R1)),
+                    proto: Some((Register::R2, Register::R3)),
+                    flags: NatFlags::MAP_IPS | NatFlags::PROTO_SPECIFIED | NatFlags::PROTO_RANDOM_FULLY,
+                },
+            ]
+        );
+        let exprs = decode(Rule::new("t", "c").nat(NatStatement::dnat_to_port(Family::Ip6, 8080)));
+        assert!(matches!(
+            exprs.last(),
+            Some(RuleExpr::Nat { nat_type: NatType::Dnat, family: Family::Ip6, addr: None, proto: Some((Register::R0, Register::R0)), flags })
+                if *flags == NatFlags::PROTO_SPECIFIED
+        ), "{exprs:?}");
+        let exprs = decode(Rule::new("t", "c").nat(NatStatement::masquerade().ports(1024, 2048).random()));
+        assert_eq!(
+            exprs.last(),
+            Some(&RuleExpr::Masq {
+                proto: Some((Register::R0, Register::R1)),
+                flags: NatFlags::PROTO_SPECIFIED | NatFlags::PROTO_RANDOM,
+            })
+        );
+        let exprs = decode(Rule::new("t", "c").nat(NatStatement::snat(Ipv6Addr::LOCALHOST)));
+        assert!(matches!(exprs.last(), Some(RuleExpr::Nat { family: Family::Ip6, .. })), "{exprs:?}");
+    }
+
+    /// The single-value forms are the bytes the older builders write, so a
+    /// rule moved to `nat()` is not replaced by the declarative diff.
+    #[test]
+    fn nat_single_values_encode_as_the_older_builders() {
+        use std::net::Ipv4Addr;
+
+        use super::super::types::{NatStatement, Rule};
+        let a = Ipv4Addr::new(192, 0, 2, 1);
+        let same = |new: Rule, old: Rule| assert_eq!(encode(&new.exprs), encode(&old.exprs));
+        same(Rule::new("t", "c").nat(NatStatement::snat(a).port(4000)), Rule::new("t", "c").snat(a, Some(4000)));
+        same(Rule::new("t", "c").nat(NatStatement::dnat(a)), Rule::new("t", "c").dnat(a, None));
+        same(Rule::new("t", "c").nat(NatStatement::redirect().port(3128)), Rule::new("t", "c").redirect(Some(3128)));
+        same(Rule::new("t", "c").nat(NatStatement::redirect()), Rule::new("t", "c").redirect(None));
+        same(Rule::new("t", "c").nat(NatStatement::masquerade()), Rule::new("t", "c").masquerade());
+    }
+
+    /// What the kernel would refuse fails the rule, naming the statement.
+    #[test]
+    fn nat_statements_the_kernel_refuses_fail_the_rule() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        use super::super::types::{NatStatement, Rule};
+        let v4 = Ipv4Addr::new(10, 0, 0, 1);
+        for (nat, want) in [
+            (NatStatement::masquerade().to(v4), "masquerade has no address"),
+            (NatStatement::snat(v4).to(Ipv6Addr::LOCALHOST), "mixes IPv4 and IPv6"),
+            (NatStatement::snat(Ipv4Addr::new(10, 0, 0, 9)).to(v4), "runs backwards"),
+            (NatStatement::dnat(v4).ports(9, 1), "port range 9-1 runs backwards"),
+            (NatStatement::dnat_to_port(Family::Inet, 80), "must be ip or ip6"),
+            (NatStatement::redirect().netmap(), "cannot netmap"),
+            (NatStatement::snat_to_port(Family::Ip, 1).netmap(), "netmap needs an address range"),
+        ] {
+            let rule = Rule::new("t", "c").nat(nat);
+            let error = rule.error.unwrap_or_default();
+            assert!(error.starts_with("nat: ") && error.contains(want), "{error:?} lacks {want:?}");
+        }
     }
 
     /// What these decoders cannot carry demotes to `Unknown`, never to a

@@ -890,3 +890,89 @@ async fn statements_nft_installs_decode_typed() -> nlink::Result<()> {
     assert!(has(&|e| matches!(e, RuleExpr::Redir { proto: Some(_), flags, .. } if flags.contains(NatFlags::PROTO_SPECIFIED))));
     Ok(())
 }
+
+/// Bind `listen_port` in `pair.b`, send `count` datagrams from `pair.a`
+/// to `b:send_port`, and return the source of each that arrived.
+fn arrivals(
+    pair: &crate::common::topo::NsPair,
+    send_port: u16,
+    listen_port: u16,
+    count: usize,
+) -> nlink::Result<Vec<std::net::SocketAddr>> {
+    use std::net::{SocketAddr, UdpSocket};
+    let socket = crate::common::traffic::in_ns(&pair.b, move || {
+        UdpSocket::bind((Ipv4Addr::UNSPECIFIED, listen_port))
+    })
+    .map_err(nlink::Error::Io)?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(nlink::Error::Io)?;
+    send_udp(&pair.a, &[SocketAddr::from((pair.b_addr, send_port))], count);
+    let mut buf = [0u8; 64];
+    let mut from = Vec::new();
+    while let Ok((_, source)) = socket.recv_from(&mut buf) {
+        from.push(source);
+    }
+    Ok(from)
+}
+
+/// #528: NAT ranges rewrite real traffic as declared. From `a`: a snat to
+/// an address and port range, a masquerade to a port range, a port-only
+/// dnat; in `b`, a redirect to another port. Each is checked by where the
+/// datagrams arrive and with what source.
+#[tokio::test]
+async fn nat_ranges_rewrite_traffic_as_declared() -> nlink::Result<()> {
+    use nlink::netlink::nftables::NatStatement;
+    use std::net::IpAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_nat", "nft_masq", "nft_redir", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nat-range", 93).await?;
+    let (lo, hi) = (Ipv4Addr::new(10, 93, 0, 100), Ipv4Addr::new(10, 93, 0, 101));
+    let nat_chain = |hook, priority| {
+        move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+            c.hook(hook).priority(priority).chain_type(ChainType::Nat)
+        }
+    };
+    let a = NftablesConfig::new().table("n", Family::Ip, |t| {
+        t.chain("post", nat_chain(Hook::Postrouting, Priority::SrcNat))
+            .chain("out", nat_chain(Hook::Output, Priority::DstNat))
+            .rule_keyed("post", "snat", |r| {
+                r.match_udp_dport(7000).nat(NatStatement::snat(lo).to(hi).ports(40000, 40010))
+            })
+            .rule_keyed("post", "masq", |r| {
+                r.match_udp_dport(7003).nat(NatStatement::masquerade().ports(41000, 41010))
+            })
+            .rule_keyed("out", "dnat-port", |r| {
+                r.match_udp_dport(7001).nat(NatStatement::dnat_to_port(Family::Ip, 7002))
+            })
+    });
+    let nft = pair.a.connection_for::<Nftables>()?;
+    a.diff(&nft).await?.apply(&nft).await?;
+    let b = NftablesConfig::new().table("n", Family::Ip, |t| {
+        t.chain("pre", nat_chain(Hook::Prerouting, Priority::DstNat))
+            .rule_keyed("pre", "redir", |r| {
+                r.match_udp_dport(7004).nat(NatStatement::redirect().port(7005))
+            })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+
+    let from = arrivals(&pair, 7000, 7000, 5)?;
+    assert!(!from.is_empty(), "nothing arrived through the snat");
+    for source in &from {
+        let IpAddr::V4(ip) = source.ip() else { panic!("{source}") };
+        assert!((lo..=hi).contains(&ip) && (40000..=40010).contains(&source.port()), "{source}");
+    }
+
+    let from = arrivals(&pair, 7003, 7003, 5)?;
+    assert!(!from.is_empty(), "nothing arrived through the masquerade");
+    for source in &from {
+        assert_eq!(source.ip(), IpAddr::V4(pair.a_addr), "{source}");
+        assert!((41000..=41010).contains(&source.port()), "{source}");
+    }
+
+    assert!(!arrivals(&pair, 7001, 7002, 5)?.is_empty(), "the port-only dnat did not reach :7002");
+    assert!(!arrivals(&pair, 7004, 7005, 5)?.is_empty(), "the redirect did not reach :7005");
+    Ok(())
+}

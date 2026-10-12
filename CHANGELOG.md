@@ -1734,6 +1734,42 @@ All notable changes to this project will be documented in this file.
     the decoders. Unit tests cover what nlink writes and what must stay
     `Unknown`.
 
+- **NAT ranges and flags (#528, second part).**
+  - **`NatStatement` and `Rule::nat`** write NAT statements as `nft` does:
+    - `snat`/`dnat` to an address, `.to(last)` for an address range,
+      and `.port(p)`/`.ports(lo, hi)` for a port range;
+    - port-only `dnat_to_port(family, p)` and `snat_to_port`;
+    - `masquerade()` and `redirect()` with ports;
+    - the flags `random()`, `fully_random()`, `persistent()` and
+      `netmap()`.
+  - **Before, these were missing:** NAT was one address and one port,
+    every NAT loaded an address, and masquerade took no options.
+  - **Registers.** The ranges go into the next free registers. The
+    statement is a new `Expr::NatRegs`, written with the flags the
+    kernel derives (`MAP_IPS`, `PROTO_SPECIFIED`) already set, so it
+    matches its echo. A single value is the same bytes as the older
+    `snat`/`dnat`/`redirect`/`masquerade` builders, which stay.
+  - **Errors.** A statement the kernel would refuse makes adding the rule
+    fail, naming it: an address on a masquerade, a range that mixes
+    families or runs backwards, a family other than `ip`/`ip6`, a
+    netmap without a range.
+  - **Tests.**
+    - **Convergence and parity.** Seven rules (ranges, flags, IPv6,
+      netmap, a port-only dnat, a masquerade and a redirect with port
+      ranges) reconcile after an apply. `nft list` shows each as written,
+      for example `snat ip to 10.0.0.1-10.0.0.9:40000-40010`, `dnat ip to
+      :8080`, `masquerade to :1024-2048 random`.
+    - **Traffic.** A traffic test sends through each statement between
+      two namespaces:
+      - snat sources land in the address and port range;
+      - masquerade sources land in the port range;
+      - a port-only dnat and a redirect reach their new port.
+    - **Red run.** Both fail if the implied `PROTO_SPECIFIED` is not
+      sent: the diff keeps four changes, and the masquerade's source port
+      falls outside its range.
+    - **Unit tests.** Unit tests check the register loads and decode, the
+      byte equality with the older builders, and every refusal.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
