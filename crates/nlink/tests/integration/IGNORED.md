@@ -58,7 +58,7 @@ add a row with a tracking plan.
 
 | Test | Reason | Tracking |
 |---|---|---|
-| `add_sa_with_offload_attr_id_locked_by_constants_gate` | Plan 221 W4 — locked at build time, not kernel-round-trip | The W4 fix (`XFRMA_OFFLOAD_DEV: 26 → 28`) is verified at build time by `sys_sizeof.rs::plan_222_1_xfrm_attr_ids_match_kernel_uapi` + `xfrm.rs::xfrm_offload_kernel_constants`. A kernel-round-trip test would need offload-capable NIC hardware (CI runners lack it); EINVAL from no-offload kernels is indistinguishable from EINVAL on the attribute-size bug without `NETLINK_EXT_ACK` text parsing, which not every kernel emits for this code path. The `#[ignore]`'d skeleton documents the verification sites. |
+| `add_sa_with_offload_attr_id_locked_by_constants_gate` | Plan 221 W4 — locked at build time, not kernel-round-trip | The W4 fix (`XFRMA_OFFLOAD_DEV: 26 → 28`) is verified at build time by `scripts/audit-uapi-constants.sh` (xfrm.rs's constants against the kernel headers) + `xfrm.rs::xfrm_offload_kernel_constants`. A kernel-round-trip test would need offload-capable NIC hardware (CI runners lack it); EINVAL from no-offload kernels is indistinguishable from EINVAL on the attribute-size bug without `NETLINK_EXT_ACK` text parsing, which not every kernel emits for this code path. The `#[ignore]`'d skeleton documents the verification sites. |
 
 ## How to run locally
 

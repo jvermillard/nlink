@@ -142,6 +142,21 @@ PY
 expect_fail "#266 a wrong plain pub const is caught" "IFLA_BRPORT_MCAST_TO_UCAST"
 restore
 
+# 4b'. The same pass reads private constants. xfrm.rs declares its message types
+# `const`, not `pub const`, and the pass read only `pub` until #167, so the
+# constants of the 0.19.1 hotfix were never checked. Reproduce that bug:
+# XFRM_MSG_FLUSHSA at 25, which is XFRM_MSG_UPDPOLICY.
+python3 - "$WORK_DIR/crates/nlink/src/netlink/xfrm.rs" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+assert "const XFRM_MSG_FLUSHSA: u16 = 28;" in s
+s = s.replace("const XFRM_MSG_FLUSHSA: u16 = 28;", "const XFRM_MSG_FLUSHSA: u16 = 25;")
+open(p, "w").write(s)
+PY
+expect_fail "#167 a wrong private const is caught" "XFRM_MSG_FLUSHSA"
+restore
+
 # 4c. A plain const whose name the kernel does not define must be ignored, not
 # guessed at. The pass is exact-name-match only; anything looser would need a
 # mapping table and would invent failures on nlink-local constants.

@@ -43,8 +43,17 @@ def c_upper(name: str) -> str:
 
 def derive(spec: dict) -> dict[str, int]:
     """Every constant one spec defines, by the generator's naming rules."""
-    family = spec["name"]
     out: dict[str, int] = {}
+    for consts in derive_groups(spec).values():
+        out.update(consts)
+    return out
+
+
+def derive_groups(spec: dict) -> dict[str, dict[str, int]]:
+    """The same constants, keyed by the definition that declares them:
+    `"enum <name>"`, `"attrs <set>"`, `"const"` or `"ops"`."""
+    family = spec["name"]
+    groups: dict[str, dict[str, int]] = {}
 
     for d in spec.get("definitions") or []:
         if d.get("header"):
@@ -52,10 +61,12 @@ def derive(spec: dict) -> dict[str, int]:
         kind = d.get("type")
         if kind == "const":
             if isinstance(d.get("value"), int):
-                out[c_upper(d.get("name-prefix", f"{family}-") + d["name"])] = d["value"]
+                name = c_upper(d.get("name-prefix", f"{family}-") + d["name"])
+                groups.setdefault("const", {})[name] = d["value"]
         elif kind in ("enum", "flags"):
             prefix = d.get("name-prefix", f"{family}-{d['name']}-")
             value = d.get("value-start", 0)
+            out = groups.setdefault(f"enum {d['name']}", {})
             for i, entry in enumerate(d.get("entries") or []):
                 if isinstance(entry, dict):
                     name = entry["name"]
@@ -79,6 +90,7 @@ def derive(spec: dict) -> dict[str, int]:
         else:
             prefix = f"{family}-a-{attr_set['name']}-"
         value = 1
+        out = groups.setdefault(f"attrs {attr_set['name']}", {})
         for attr in attr_set.get("attributes") or []:
             if "value" in attr:
                 value = attr["value"]
@@ -89,13 +101,14 @@ def derive(spec: dict) -> dict[str, int]:
     if operations.get("enum-model", "unified") == "unified":
         prefix = operations.get("name-prefix", f"{family}-cmd-")
         value = 1
+        out = groups.setdefault("ops", {})
         for op in operations.get("list") or []:
             if "value" in op:
                 value = op["value"]
             out[c_upper(prefix + op["name"])] = value
             value += 1
 
-    return out
+    return {group: consts for group, consts in groups.items() if consts}
 
 
 def verify_hashes(spec_dir: Path = SPEC_DIR) -> list[str]:
@@ -129,9 +142,17 @@ def verify_hashes(spec_dir: Path = SPEC_DIR) -> list[str]:
 
 def load(spec_dir: Path = SPEC_DIR) -> dict[str, dict[str, int]]:
     """`{spec name: {C_NAME: value}}` for every vendored spec. Needs PyYAML."""
+    return {
+        name: {k: v for consts in groups.values() for k, v in consts.items()}
+        for name, groups in load_groups(spec_dir).items()
+    }
+
+
+def load_groups(spec_dir: Path = SPEC_DIR) -> dict[str, dict[str, dict[str, int]]]:
+    """`{spec name: {group: {C_NAME: value}}}`, as `derive_groups` keys them."""
     import yaml  # noqa: PLC0415  (optional dependency, imported on use)
 
-    out: dict[str, dict[str, int]] = {}
-    for path in sorted(spec_dir.glob("*.yaml")):
-        out[path.stem] = derive(yaml.safe_load(path.read_text()))
-    return out
+    return {
+        path.stem: derive_groups(yaml.safe_load(path.read_text()))
+        for path in sorted(spec_dir.glob("*.yaml"))
+    }

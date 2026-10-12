@@ -44,3 +44,10 @@ seg6_local_flv          = SEG6_LOCAL_FLV
 # every clsact qdisc install fail; the gate could not see it because the
 # constants carry the kernel suffix only.
 tc_handle               = TC_H
+
+# MPTCP path manager (#167: the YNL coverage report showed it at 0%).
+mptcp_pm_cmd            = MPTCP_PM_CMD
+mptcp_pm_attr           = MPTCP_PM_ATTR
+mptcp_pm_addr_attr      = MPTCP_PM_ADDR_ATTR
+mptcp_attr              = MPTCP_ATTR
+mptcp_pm_flags          = MPTCP_PM_ADDR_FLAG
