@@ -4,7 +4,7 @@
 //! of counter objects.
 
 use super::expr::{LimitExpr, QuotaExpr};
-use super::types::{Family, LimitUnit};
+use super::types::Family;
 use super::*;
 use crate::netlink::attr::{AttrIter, get};
 use crate::netlink::builder::MessageBuilder;
@@ -280,31 +280,14 @@ fn parse_state(object_type: u32, data: &[u8]) -> Option<ObjectState> {
                 depleted: flags & NFT_QUOTA_F_DEPLETED != 0,
             })
         }
-        ObjectType::Limit => {
-            // A byte-rate limit (NFT_LIMIT_PKT_BYTES) is not a LimitExpr.
-            if u32_of(NFTA_LIMIT_TYPE).unwrap_or(0) != 0 {
-                return None;
-            }
-            let unit = match u64_of(NFTA_LIMIT_UNIT)? {
-                1 => LimitUnit::Second,
-                60 => LimitUnit::Minute,
-                3600 => LimitUnit::Hour,
-                86400 => LimitUnit::Day,
-                _ => return None,
-            };
-            let mut limit = LimitExpr::packets(u64_of(NFTA_LIMIT_RATE)?, unit)
-                .burst(u32_of(NFTA_LIMIT_BURST).unwrap_or(0));
-            if u32_of(NFTA_LIMIT_FLAGS).unwrap_or(0) & NFT_LIMIT_F_INV != 0 {
-                limit = limit.over();
-            }
-            Some(ObjectState::Limit(limit))
-        }
+        ObjectType::Limit => super::expr::parse_limit_attrs(data).map(ObjectState::Limit),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netlink::nftables::types::LimitUnit;
 
     fn data_of(config: &ObjectConfig) -> Vec<u8> {
         let mut b = MessageBuilder::new(0, 0);

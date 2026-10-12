@@ -821,3 +821,72 @@ async fn rule_position_inserts_after_the_named_rule() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #528: what `nft` itself installs — limit, log, reject, every NAT form,
+/// flow offload — decodes as its typed `RuleExpr`, never `Unknown`. Each
+/// rule is written in nft's syntax and read back through nlink, so the
+/// decoders are checked against the reference tool's encoding, not only
+/// nlink's own.
+#[tokio::test]
+async fn statements_nft_installs_decode_typed() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{NatFlags, NatType};
+    nlink::require_root!();
+    nlink::require_modules!(
+        "nf_tables", "nft_limit", "nft_log", "nft_reject_inet", "nft_nat", "nft_masq",
+        "nft_redir", "nf_flow_table", "nft_flow_offload", "dummy"
+    );
+    let ns = TestNamespace::new("nft-decode")?;
+    ns.add_dummy("d0")?;
+    let script = "table inet t {
+        flowtable ft { hook ingress priority 0; devices = { d0 }; }
+        chain filt { type filter hook forward priority 0;
+            limit rate 10/minute burst 3 packets
+            log prefix \"x: \" group 2
+            log
+            reject with icmpx type port-unreachable
+            meta l4proto tcp reject with tcp reset
+            flow add @ft
+        }
+    }
+    table ip n {
+        chain post { type nat hook postrouting priority 100;
+            oifname \"d0\" masquerade random
+            meta l4proto tcp oifname \"d0\" masquerade to :1024-2048
+            snat to 10.0.0.1-10.0.0.9 fully-random
+        }
+        chain pre { type nat hook prerouting priority -100;
+            tcp dport 80 dnat to 10.0.0.1:8080
+            tcp dport 81 redirect to :3128
+        }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-decode-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::Io)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let mut exprs = Vec::new();
+    for (table, family) in [("t", Family::Inet), ("n", Family::Ip)] {
+        for rule in nft.list_rules(table, family).await? {
+            exprs.extend(rule.expressions());
+        }
+    }
+    let unknown: Vec<_> = exprs.iter().filter(|e| matches!(e, RuleExpr::Unknown { .. })).collect();
+    assert!(unknown.is_empty(), "undecoded: {unknown:?}");
+
+    let has = |f: &dyn Fn(&RuleExpr) -> bool| exprs.iter().any(f);
+    assert!(has(&|e| matches!(e, RuleExpr::Limit(l) if l.rate == 10 && l.burst == 3)));
+    assert!(has(&|e| matches!(e, RuleExpr::Log(l) if l.prefix.as_deref() == Some("x: ") && l.group == Some(2))));
+    assert!(has(&|e| matches!(e, RuleExpr::Log(l) if l.prefix.is_none() && l.group.is_none())));
+    assert!(has(&|e| matches!(e, RuleExpr::Reject { icmp_code: Some(_), .. })));
+    assert!(has(&|e| matches!(e, RuleExpr::Reject { icmp_code: None, .. })), "tcp reset");
+    assert!(has(&|e| matches!(e, RuleExpr::FlowOffload { flowtable, .. } if flowtable == "ft")));
+    assert!(has(&|e| matches!(e, RuleExpr::Masq { proto: None, flags, .. } if flags.contains(NatFlags::PROTO_RANDOM))));
+    assert!(has(&|e| matches!(e, RuleExpr::Masq { proto: Some((lo, hi)), .. } if lo != hi)), "a port range: two registers");
+    assert!(has(&|e| matches!(e, RuleExpr::Nat { nat_type: NatType::Snat, family: Family::Ip, addr: Some((lo, hi)), flags, .. }
+        if lo != hi && flags.contains(NatFlags::MAP_IPS | NatFlags::PROTO_RANDOM_FULLY))));
+    assert!(has(&|e| matches!(e, RuleExpr::Nat { nat_type: NatType::Dnat, addr: Some(_), proto: Some(_), .. })));
+    assert!(has(&|e| matches!(e, RuleExpr::Redir { proto: Some(_), flags, .. } if flags.contains(NatFlags::PROTO_SPECIFIED))));
+    Ok(())
+}
