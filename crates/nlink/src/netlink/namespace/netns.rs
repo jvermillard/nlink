@@ -259,6 +259,15 @@ impl Netns {
         super::delete(&name)
     }
 
+    /// `cmd`, to spawn in this namespace with the options of
+    /// [`NetnsCommand`](super::NetnsCommand) (#521). An `/etc/netns`
+    /// overlay needs a namespace opened by name.
+    pub fn command(&self, cmd: std::process::Command) -> Result<super::NetnsCommand> {
+        use std::os::fd::AsFd;
+        let fd = self.as_fd().try_clone_to_owned().map_err(Error::Io)?;
+        Ok(super::NetnsCommand::with_fd(fd, self.name.as_deref().map(str::to_string), cmd))
+    }
+
     /// The namespace's identity.
     pub fn id(&self) -> NetnsId {
         self.id
