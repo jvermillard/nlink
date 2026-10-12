@@ -712,6 +712,12 @@ All notable changes to this project will be documented in this file.
   error. `get_bond_info` reports a missing interface as not found. A
   panicked lab helper is `ErrorDetail::Internal`.
 
+- **`--features serde` without `output` compiles again (#741).**
+  `ErrorDetail::Json` and its `From<serde_json::Error>` were gated on
+  `output` alone, so the JSON helpers' error (#718) didn't compile under
+  `serde` or `schemars` by themselves. CI now checks both features on their
+  own, and the integration lane builds with `serde`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
