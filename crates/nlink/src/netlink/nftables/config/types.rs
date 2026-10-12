@@ -92,6 +92,8 @@ pub struct DeclaredTable {
     pub(crate) name: String,
     pub(crate) family: Family,
     pub(crate) flags: u32,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) comment: Option<String>,
     pub(crate) chains: Vec<DeclaredChain>,
     pub(crate) rules: Vec<DeclaredRule>,
     pub(crate) flowtables: Vec<DeclaredFlowtable>,
@@ -100,6 +102,11 @@ pub struct DeclaredTable {
 }
 
 impl DeclaredTable {
+    /// The table's comment (#528).
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
     /// Table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -170,6 +177,7 @@ pub struct DeclaredTableBuilder {
     name: String,
     family: Family,
     flags: u32,
+    comment: Option<String>,
     chains: Vec<DeclaredChain>,
     rules: Vec<DeclaredRule>,
     flowtables: Vec<DeclaredFlowtable>,
@@ -183,6 +191,7 @@ impl DeclaredTableBuilder {
             name,
             family,
             flags: 0,
+            comment: None,
             chains: Vec::new(),
             rules: Vec::new(),
             flowtables: Vec::new(),
@@ -197,6 +206,14 @@ impl DeclaredTableBuilder {
     /// tables).
     pub fn flags(mut self, flags: u32) -> Self {
         self.flags = flags;
+        self
+    }
+
+    /// Give the table a comment, which `nft list` shows (#528). It is
+    /// written when the table is created: the diff does not compare
+    /// comments, so changing one later is not applied.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
         self
     }
 
@@ -308,6 +325,7 @@ impl DeclaredTableBuilder {
             name: self.name,
             family: self.family,
             flags: self.flags,
+            comment: self.comment,
             chains: self.chains,
             rules: self.rules,
             flowtables: self.flowtables,
@@ -335,9 +353,16 @@ pub struct DeclaredChain {
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) device: Option<String>,
     pub(crate) exclusive: bool,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) comment: Option<String>,
 }
 
 impl DeclaredChain {
+    /// The chain's comment (#528).
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
     /// Whether this chain owns all of its rules: a rule nlink did not write
     /// is deleted rather than left alone. See
     /// [`DeclaredChainBuilder::exclusive`].
@@ -378,6 +403,7 @@ pub struct DeclaredChainBuilder {
     chain_type: Option<ChainType>,
     device: Option<String>,
     exclusive: bool,
+    comment: Option<String>,
 }
 
 impl DeclaredChainBuilder {
@@ -390,7 +416,15 @@ impl DeclaredChainBuilder {
             chain_type: None,
             device: None,
             exclusive: false,
+            comment: None,
         }
+    }
+
+    /// Give the chain a comment, which `nft list` shows (#528). Written
+    /// when the chain is created; the diff does not compare comments.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
     }
 
     /// Own every rule in this chain: rules nlink did not write — added by
@@ -455,6 +489,7 @@ impl DeclaredChainBuilder {
             chain_type: self.chain_type,
             device: self.device,
             exclusive: self.exclusive,
+            comment: self.comment,
         }
     }
 }
@@ -490,6 +525,8 @@ pub struct DeclaredSet {
     pub(crate) element_mode: Option<SetElementMode>,
     pub(crate) data_type: Option<SetDataType>,
     pub(crate) elements: Vec<SetElement>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) comment: Option<String>,
 }
 
 /// How a declared set's elements are reconciled with the kernel's.
@@ -598,6 +635,7 @@ impl DeclaredSet {
         set.timeout = self.timeout;
         set.gc_interval = self.gc_interval;
         set.data_type = self.data_type.clone();
+        set.comment = self.comment.clone();
         set
     }
 }
@@ -614,9 +652,17 @@ pub struct DeclaredSetBuilder {
     element_mode: Option<SetElementMode>,
     data_type: Option<SetDataType>,
     elements: Vec<SetElement>,
+    comment: Option<String>,
 }
 
 impl DeclaredSetBuilder {
+    /// Give the set a comment, which `nft list` shows (#528). Written
+    /// when the set is created; the diff does not compare comments.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
+    }
+
     fn new(name: String) -> Self {
         Self {
             name,
@@ -630,6 +676,7 @@ impl DeclaredSetBuilder {
             element_mode: None,
             data_type: None,
             elements: Vec::new(),
+            comment: None,
         }
     }
 
@@ -773,6 +820,7 @@ impl DeclaredSetBuilder {
             element_mode: self.element_mode,
             data_type: self.data_type,
             elements: self.elements,
+            comment: self.comment,
         }
     }
 }

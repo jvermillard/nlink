@@ -1,5 +1,6 @@
 //! nftables connection implementation for `Connection<Nftables>`.
 
+use super::userdata::{NFTNL_UDATA_COMMENT, NFTNL_UDATA_SET_COMMENT};
 use super::object::{Object, ObjectInfo, ObjectType};
 use super::{expr::write_expressions, types::*, *};
 use crate::netlink::{
@@ -77,6 +78,24 @@ impl Connection<Nftables> {
         N: TryInto<TableName>,
         N::Error: Into<Error>,
     {
+        self.add_table_with_comment(name, family, flags, None).await
+    }
+
+    /// Add a table with `flags` (0 for none) and a comment, which `nft
+    /// list` shows (#528). The comment is written when the table is
+    /// created; one longer than 127 bytes fails.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_table_with_comment", flags))]
+    pub async fn add_table_with_comment<N>(
+        &self,
+        name: N,
+        family: Family,
+        flags: u32,
+        comment: Option<&str>,
+    ) -> Result<()>
+    where
+        N: TryInto<TableName>,
+        N::Error: Into<Error>,
+    {
         let name: TableName = name.try_into().map_err(Into::into)?;
 
         let mut builder = MessageBuilder::new(
@@ -92,6 +111,7 @@ impl Connection<Nftables> {
             // `parse_table` which reads it as `from_be_bytes`).
             builder.append_attr_u32_be(NFTA_TABLE_FLAGS, flags);
         }
+        append_comment(&mut builder, NFTA_TABLE_USERDATA, NFTNL_UDATA_COMMENT, comment)?;
 
         self.nft_request_ack(builder).await
     }
@@ -355,6 +375,7 @@ impl Connection<Nftables> {
         if let Some(policy) = chain.policy {
             builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
         }
+        append_comment(&mut builder, NFTA_CHAIN_USERDATA, NFTNL_UDATA_COMMENT, chain.comment.as_deref())?;
 
         self.nft_request_ack(builder).await
     }
@@ -602,6 +623,7 @@ impl Connection<Nftables> {
         append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
+        append_comment(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref())?;
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
 
@@ -716,7 +738,7 @@ impl Connection<Nftables> {
             nft_msg_type(NFT_MSG_NEWOBJ),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
-        append_object(&mut builder, object);
+        append_object(&mut builder, object)?;
         self.nft_request_ack(builder).await
     }
 
@@ -1465,6 +1487,7 @@ pub(crate) fn parse_table(data: &[u8], family: Family) -> Option<Table> {
         flags: 0,
         use_count: 0,
         handle: 0,
+        comment: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -1480,6 +1503,9 @@ pub(crate) fn parse_table(data: &[u8], family: Family) -> Option<Table> {
             }
             NFTA_TABLE_HANDLE if payload.len() >= 8 => {
                 table.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
+            }
+            NFTA_TABLE_USERDATA => {
+                table.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_COMMENT);
             }
             _ => {}
         }
@@ -1504,10 +1530,14 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
         handle: 0,
         device: None,
         devices: Vec::new(),
+        comment: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            NFTA_CHAIN_USERDATA => {
+                chain.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_COMMENT);
+            }
             NFTA_CHAIN_TABLE => {
                 chain.table = attr_str(payload).unwrap_or_default();
             }
@@ -1621,10 +1651,14 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         data_type: None,
         data_len: None,
         object_type: None,
+        comment: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            NFTA_SET_USERDATA => {
+                set.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_SET_COMMENT);
+            }
             NFTA_SET_DATA_TYPE if payload.len() >= 4 => {
                 set.data_type = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
             }
@@ -1712,6 +1746,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
     let mut timeout = None;
     let mut expiration = None;
     let mut data = None;
+    let mut comment = None;
     let millis = |payload: &[u8]| {
         payload
             .get(..8)
@@ -1742,6 +1777,9 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
                 data = attr_str(payload).map(SetElementData::Object);
             }
             NFTA_SET_ELEM_EXPIRATION => expiration = millis(payload),
+            NFTA_SET_ELEM_USERDATA => {
+                comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_COMMENT);
+            }
             NFTA_SET_ELEM_FLAGS if payload.len() >= 4 => {
                 flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
             }
@@ -1749,12 +1787,16 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
         }
     }
     match key {
-        Some(key) => Some(
-            SetElement::from_wire(key, flags)
+        Some(key) => {
+            let element = SetElement::from_wire(key, flags)
                 .with_key_end(key_end)
                 .with_timers(timeout, expiration)
-                .with_data(data),
-        ),
+                .with_data(data);
+            Some(match comment {
+                Some(comment) => element.with_comment(comment),
+                None => element,
+            })
+        }
         None if flags & NFT_SET_ELEM_CATCHALL != 0 => Some(SetElement::from_wire(Vec::new(), flags)),
         None => None,
     }
@@ -1921,6 +1963,11 @@ impl Transaction {
         if let Some(policy) = chain.policy {
             builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
         }
+        if let Err(e) =
+            append_comment(&mut builder, NFTA_CHAIN_USERDATA, NFTNL_UDATA_COMMENT, chain.comment.as_deref())
+        {
+            self.defer(e);
+        }
 
         self.push(builder);
         self
@@ -2039,7 +2086,19 @@ impl Transaction {
     /// batch. Mirrors the imperative
     /// [`Connection::<Nftables>::add_table_with_flags`](Connection).
     /// Use [`Self::add_table`] when no flags are needed.
-    pub fn add_table_with_flags(mut self, name: &str, family: Family, flags: u32) -> Self {
+    pub fn add_table_with_flags(self, name: &str, family: Family, flags: u32) -> Self {
+        self.add_table_with_comment(name, family, flags, None)
+    }
+
+    /// Add a table with `flags` (0 for none) and a comment (#528). A
+    /// comment longer than 127 bytes fails the commit.
+    pub fn add_table_with_comment(
+        mut self,
+        name: &str,
+        family: Family,
+        flags: u32,
+        comment: Option<&str>,
+    ) -> Self {
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWTABLE),
             NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
@@ -2052,6 +2111,9 @@ impl Transaction {
             // (matches the existing list_tables parser at
             // `parse_table` which reads it as `from_be_bytes`).
             builder.append_attr_u32_be(NFTA_TABLE_FLAGS, flags);
+        }
+        if let Err(e) = append_comment(&mut builder, NFTA_TABLE_USERDATA, NFTNL_UDATA_COMMENT, comment) {
+            self.defer(e);
         }
         self.push(builder);
         self
@@ -2212,6 +2274,13 @@ impl Transaction {
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
         append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
+        // A comment is a set's from its creation; an update leaves it.
+        if flags & NLM_F_EXCL != 0
+            && let Err(e) =
+                append_comment(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref())
+        {
+            self.defer(e);
+        }
         append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.push(builder);
@@ -2272,7 +2341,9 @@ impl Transaction {
     pub fn add_object(mut self, object: &Object) -> Self {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_NEWOBJ), NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL);
-        append_object(&mut builder, object);
+        if let Err(e) = append_object(&mut builder, object) {
+            self.defer(e);
+        }
         self.push(builder);
         self
     }
@@ -2284,7 +2355,9 @@ impl Transaction {
     /// update operation), so a changed limit must be deleted and created.
     pub fn update_object(mut self, object: &Object) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWOBJ), NLM_F_REQUEST);
-        append_object(&mut builder, object);
+        if let Err(e) = append_object(&mut builder, object) {
+            self.defer(e);
+        }
         self.push(builder);
         self
     }
@@ -2371,7 +2444,7 @@ impl RawMessage {
 }
 
 /// Append an object's table, name, type and data: a NEWOBJ's attributes.
-fn append_object(builder: &mut MessageBuilder, object: &Object) {
+fn append_object(builder: &mut MessageBuilder, object: &Object) -> Result<()> {
     append_object_key(
         builder,
         &object.table,
@@ -2380,6 +2453,16 @@ fn append_object(builder: &mut MessageBuilder, object: &Object) {
         object.family,
     );
     super::object::append_object_data(builder, &object.config);
+    append_comment(builder, NFTA_OBJ_USERDATA, NFTNL_UDATA_COMMENT, object.comment.as_deref())
+}
+
+/// A comment as the userdata attribute `attr`, of libnftnl TLV type
+/// `kind`, when there is one (#528).
+fn append_comment(builder: &mut MessageBuilder, attr: u16, kind: u8, comment: Option<&str>) -> Result<()> {
+    if let Some(comment) = comment {
+        builder.append_attr(attr, &super::userdata::encode_comment(kind, comment)?);
+    }
+    Ok(())
 }
 
 /// Append what names an object: nfgenmsg, table, name and type.
@@ -2514,6 +2597,10 @@ fn append_set_elements(
         ElementWrite::Add => (e.timeout(), e.data().cloned()),
         ElementWrite::Delete => (None, None),
     };
+    let comment = |e: &SetElement| match write {
+        ElementWrite::Add => e.comment().map(str::to_string),
+        ElementWrite::Delete => None,
+    };
 
     let nfgenmsg = NfGenMsg::new(set.family);
     builder.append(&nfgenmsg);
@@ -2535,6 +2622,7 @@ fn append_set_elements(
                 flags: 0,
                 timeout: carry(e).0,
                 data: carry(e).1,
+                comment: comment(e),
             })
             .collect()
     } else if set.flags.contains(SetFlags::INTERVAL) {
@@ -2543,6 +2631,7 @@ fn append_set_elements(
             .flat_map(|e| {
                 let mut wire = super::interval::lower(&super::interval::range_of(e));
                 (wire[0].timeout, wire[0].data) = carry(e);
+                wire[0].comment = comment(e);
                 wire
             })
             .collect()
@@ -2555,6 +2644,7 @@ fn append_set_elements(
                 flags: 0,
                 timeout: carry(e).0,
                 data: carry(e).1,
+                comment: comment(e),
             })
             .collect()
     };
@@ -2575,6 +2665,7 @@ fn append_set_elements(
         if let Some(timeout) = elem.timeout {
             builder.append_attr_u64_be(NFTA_SET_ELEM_TIMEOUT, super::expr::millis(timeout));
         }
+        append_comment(builder, NFTA_SET_ELEM_USERDATA, NFTNL_UDATA_COMMENT, elem.comment.as_deref())?;
         match &elem.data {
             None => {}
             Some(SetElementData::Value(value)) => {

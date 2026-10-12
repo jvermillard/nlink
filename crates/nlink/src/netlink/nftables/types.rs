@@ -1871,6 +1871,8 @@ pub struct Table {
     pub use_count: u32,
     /// Kernel handle.
     pub handle: u64,
+    /// Its comment, as `nft list` shows it (#528).
+    pub comment: Option<String>,
 }
 
 // =============================================================================
@@ -1889,6 +1891,7 @@ pub struct Chain {
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) policy: Option<Policy>,
     pub(crate) device: Option<String>,
+    pub(crate) comment: Option<String>,
 }
 
 impl Chain {
@@ -1916,7 +1919,16 @@ impl Chain {
             chain_type: None,
             policy: None,
             device: None,
+            comment: None,
         })
+    }
+
+    /// Give the chain a comment, which `nft list` shows (#528). It is
+    /// written when the chain is created: changing it later takes
+    /// recreating the chain. Adding one longer than 127 bytes fails.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
     }
 
     /// Set the address family.
@@ -1995,6 +2007,8 @@ pub struct ChainInfo {
     pub policy: Option<u32>,
     /// Kernel handle.
     pub handle: u64,
+    /// Its comment (#528).
+    pub comment: Option<String>,
 }
 
 // =============================================================================
@@ -4100,6 +4114,7 @@ pub struct Set {
     pub(crate) timeout: Option<std::time::Duration>,
     pub(crate) gc_interval: Option<std::time::Duration>,
     pub(crate) data_type: Option<SetDataType>,
+    pub(crate) comment: Option<String>,
 }
 
 impl Set {
@@ -4115,7 +4130,16 @@ impl Set {
             timeout: None,
             gc_interval: None,
             data_type: None,
+            comment: None,
         }
+    }
+
+    /// Give the set a comment, which `nft list` shows (#528). Written when
+    /// the set is created; changing it later takes recreating the set.
+    /// Adding one longer than 127 bytes fails.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
     }
 
     /// Make this a map (`NFT_SET_MAP`, or `NFT_SET_OBJECT` for an object
@@ -4289,6 +4313,8 @@ pub struct SetElement {
     expiration: Option<std::time::Duration>,
     /// `NFTA_SET_ELEM_FLAGS` as read back (`NFT_SET_ELEM_*`).
     flags: u32,
+    /// Its comment (#528).
+    comment: Option<String>,
 }
 
 /// What a map element maps its key to.
@@ -4315,7 +4341,22 @@ impl SetElement {
             timeout: None,
             expiration: None,
             flags: 0,
+            comment: None,
         }
+    }
+
+    /// With a comment, which `nft list` shows (#528). The declarative diff
+    /// matches elements by key, so a comment changed later is not
+    /// applied; an interval set that merges ranges drops them. Adding one
+    /// longer than 127 bytes fails.
+    pub fn with_comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
+    }
+
+    /// The element's comment.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 
     /// An IPv4 address element.
@@ -4665,6 +4706,8 @@ pub struct SetInfo {
     pub data_len: Option<u32>,
     /// An object map's object type (`NFTA_SET_OBJ_TYPE`, `NFT_OBJECT_*`).
     pub object_type: Option<u32>,
+    /// Its comment (#528).
+    pub comment: Option<String>,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,

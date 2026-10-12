@@ -708,3 +708,76 @@ async fn ct_keys_are_what_nft_writes() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #528: comments on tables, chains, sets, set elements and objects — the
+/// ones `nft list` shows — are written, read back and reconciled, and the
+/// ones `nft` writes read back too. One longer than libnftnl allows fails.
+#[tokio::test]
+async fn comments_on_every_object_are_written_and_read() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{Chain, Object, SetElement};
+    use std::net::Ipv4Addr;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-echo-comment")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("c", Family::Inet, |t| {
+            t.comment("lab table")
+                .chain("input", |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                        .comment("inbound")
+                })
+                .set("blocked", |s| {
+                    s.key_type(SetKeyType::Ipv4Addr)
+                        .comment("blocked hosts")
+                        .element(SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1)).with_comment("bad host"))
+                        .ipv4(Ipv4Addr::new(10, 0, 0, 2))
+                })
+        });
+        assert_reconciles(&conn, &cfg).await?;
+        conn.add_object(&Object::counter("c", "pkts").comment("counted").family(Family::Inet))
+            .await?;
+
+        let listed = ns.exec("nft", &["list", "table", "inet", "c"])?;
+        for want in [
+            "comment \"lab table\"",
+            "comment \"inbound\"",
+            "comment \"blocked hosts\"",
+            "10.0.0.1 comment \"bad host\"",
+            "comment \"counted\"",
+        ] {
+            assert!(listed.contains(want), "nft does not list {want:?}:\n{listed}");
+        }
+
+        let table = conn.list_tables_in(Family::Inet).await?.into_iter().find(|t| t.name == "c");
+        assert_eq!(table.and_then(|t| t.comment).as_deref(), Some("lab table"));
+        let chains = conn.list_chains_in("c", Family::Inet).await?;
+        assert_eq!(chains[0].comment.as_deref(), Some("inbound"));
+        let sets = conn.list_sets_in("c", Family::Inet).await?;
+        assert_eq!(sets[0].comment.as_deref(), Some("blocked hosts"));
+        let elements = conn.list_set_elements("c", "blocked", Family::Inet).await?;
+        let mut comments: Vec<_> = elements.iter().map(|e| e.comment()).collect();
+        comments.sort();
+        assert_eq!(comments, [None, Some("bad host")]);
+        let objects = conn.list_objects_in("c", Family::Inet).await?;
+        assert_eq!(objects[0].comment.as_deref(), Some("counted"));
+
+        // What nft writes, nlink reads.
+        ns.exec("nft", &["add table inet n { comment \"from nft\"; }"])?;
+        ns.exec("nft", &["add chain inet n x { comment \"nft chain\"; }"])?;
+        let table = conn.list_tables_in(Family::Inet).await?.into_iter().find(|t| t.name == "n");
+        assert_eq!(table.and_then(|t| t.comment).as_deref(), Some("from nft"));
+        let chains = conn.list_chains_in("n", Family::Inet).await?;
+        assert_eq!(chains[0].comment.as_deref(), Some("nft chain"));
+
+        // libnftnl's limit is 127 bytes and the NUL.
+        let long = Chain::new("c", "long")?.family(Family::Inet).comment("x".repeat(128));
+        let err = conn.add_chain(long).await.unwrap_err();
+        assert!(err.to_string().contains("at most 127"), "{err}");
+        Ok(())
+    })
+    .await
+}

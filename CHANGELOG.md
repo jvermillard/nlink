@@ -1903,6 +1903,35 @@ All notable changes to this project will be documented in this file.
       - the original tuple's destination is `b`;
       - `ct count over 1` passes the first flow and drops the second.
 
+- **Comments on tables, chains, sets, set elements and objects (#528,
+  seventh part).** Rules had comments; now everything `nft list` can show
+  a comment for has one.
+  - **Writing.**
+    - Imperative: `Chain::comment`, `Set::comment`, `Object::comment`,
+      `SetElement::with_comment`, and `add_table_with_comment` on the
+      connection and the transaction.
+    - Declarative: `comment` on the table, chain and set builders.
+  - **Reading.** `Table`, `ChainInfo`, `SetInfo` and `ObjectInfo` gain
+    `comment`, and `SetElement::comment()` returns an element's. Comments
+    are read from the libnftnl userdata TLVs, so the ones `nft` writes
+    read back too.
+  - **Encoding.**
+    - Each comment is the TLV libnftnl writes: type 0, or 7 for a set,
+      whose comment follows six other TLV types.
+    - It goes on a range's start element.
+    - One with a NUL, or longer than libnftnl's 127 bytes, fails the add
+      or the commit, naming its length.
+  - **Changing one later.** A comment is fixed when the kernel creates the
+    object, and the diff does not compare comments. A changed comment
+    takes recreating the object, which the docs say.
+  - **Tests.**
+    - A root test declares a commented table, chain, set and element and
+      adds a commented object. It reconciles, `nft list` shows every
+      comment, and each reads back through nlink.
+    - The table and chain comments `nft` writes read back.
+    - A 128-byte comment fails.
+    - With the comment writer a no-op, the test fails at `nft list`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

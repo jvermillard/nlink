@@ -698,6 +698,7 @@ mod tests {
             flags: 0,
             use_count: 0,
             handle: 3,
+            comment: None,
         };
         assert_json(
             &EventView::from(NftablesEvent::DelTable(table)),
