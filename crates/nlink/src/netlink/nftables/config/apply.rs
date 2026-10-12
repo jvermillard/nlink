@@ -93,6 +93,7 @@ fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<
     if let Some(comment) = declared.comment() {
         chain = chain.comment(comment);
     }
+    chain.owned = true;
     Ok(chain)
 }
 

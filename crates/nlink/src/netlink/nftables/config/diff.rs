@@ -1663,8 +1663,11 @@ impl NftablesConfig {
                     },
                 }
             }
+            // In a shared table only what nlink's apply made is its to
+            // delete (#527).
+            let shared = declared.mode() == super::TableMode::Shared;
             for c in chains_in_table {
-                if !declared_chain_names.contains(c.name.as_str()) {
+                if !declared_chain_names.contains(c.name.as_str()) && (!shared || c.managed) {
                     diff.chains_to_delete.push((
                         declared.name().to_string(),
                         declared.family(),
@@ -1734,7 +1737,7 @@ impl NftablesConfig {
                 }
             }
             for f in fts_in_table {
-                if !declared_ft_names.contains(f.name.as_str()) {
+                if !declared_ft_names.contains(f.name.as_str()) && !shared {
                     diff.flowtables_to_delete.push((
                         declared.family(),
                         declared.name().to_string(),
@@ -1777,7 +1780,7 @@ impl NftablesConfig {
                     .objects()
                     .iter()
                     .any(|o| o.name() == c.name && Some(o.config().object_type()) == c.object_type());
-                if declared_here {
+                if declared_here || (shared && !c.managed) {
                     continue;
                 }
                 match c.object_type() {
@@ -1950,7 +1953,7 @@ impl NftablesConfig {
             // reconcile, same as chains/flowtables). Sets in tables
             // we don't manage never reach here.
             for s in &current_sets {
-                if !declared_set_names.contains(s.name.as_str()) {
+                if !declared_set_names.contains(s.name.as_str()) && (!shared || s.managed) {
                     diff.sets_to_delete.push((
                         declared.name().to_string(),
                         declared.family(),
@@ -2198,6 +2201,7 @@ mod tests {
             device: None,
             devices: Vec::new(),
             comment: None,
+            managed: true,
         };
         fn base(c: super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder {
             c.hook(Hook::Input)
@@ -2644,6 +2648,7 @@ mod tests {
             data_len: None,
             object_type: None,
             comment: None,
+            managed: true,
         }
     }
 

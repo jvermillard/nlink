@@ -2018,6 +2018,30 @@ All notable changes to this project will be documented in this file.
       `nlink:`-looking comment beside a key.
     - With the old encoding restored, the first test fails.
 
+- **`TableMode::{Owned, Shared}`: tables nlink shares with other tools
+  (#527, third part).**
+  - **Owned (the default).** A declared table is owned as before: a chain,
+    set, object or flowtable the config does not declare is deleted.
+  - **Shared.** `DeclaredTableBuilder::mode(TableMode::Shared)` is for a
+    table other tools put things in too. Of the undeclared chains, sets
+    and objects, the diff deletes only the ones nlink's apply made, and it
+    deletes no undeclared flowtable (a flowtable has no userdata to tag).
+  - **The ownership tag.** The declarative apply now tags every chain, set
+    and object it creates with an ownership TLV in its userdata, in either
+    mode. `nft` does not show it.
+    - `ChainInfo`, `SetInfo` and `ObjectInfo` gain `managed`, read from the
+      tag.
+    - `RulesetSnapshot::from_config` marks everything managed.
+  - **Tests.**
+    - **Root.** A shared table's diff deletes nlink's own chain, set and
+      counter when the config stops declaring them, and keeps the ones
+      `nft` added. The tag reads back as `managed`, `nft list` shows no
+      trace of it, the second diff is empty, and an owned table deletes
+      what `nft` added.
+    - **Offline.** The same holds against a simulated snapshot.
+    - **Red run.** With the mode ignored, the shared diff deletes `nft`'s
+      items and the test fails.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

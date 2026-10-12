@@ -78,5 +78,5 @@ pub use diff::{
 pub use types::{
     DeclaredChain, DeclaredChainBuilder, DeclaredFlowtable, DeclaredFlowtableBuilder,
     DeclaredObject, DeclaredRule, DeclaredSet, DeclaredSetBuilder, DeclaredTable,
-    DeclaredTableBuilder, NftablesConfig, SetElementMode,
+    DeclaredTableBuilder, NftablesConfig, SetElementMode, TableMode,
 };

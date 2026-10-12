@@ -162,6 +162,35 @@ pub(crate) fn parse_comment(userdata: &[u8]) -> Option<String> {
     None
 }
 
+/// The TLV type of nlink's ownership tag on a chain, set or object (#527):
+/// present on what the declarative apply created, so a
+/// [`TableMode::Shared`](super::config::TableMode::Shared) table's diff
+/// deletes only what nlink made. nft skips the types it does not know.
+pub(crate) const NLINK_UDATA_OWNED: u8 = 0xF0;
+
+/// The userdata of a chain, set or object: its comment TLV of type
+/// `comment_kind`, then nlink's ownership tag if `owned`.
+pub(crate) fn encode_object_userdata(
+    comment_kind: u8,
+    comment: Option<&str>,
+    owned: bool,
+) -> crate::netlink::error::Result<Option<Vec<u8>>> {
+    let mut out = match comment {
+        Some(comment) => encode_comment(comment_kind, comment)?,
+        None => Vec::new(),
+    };
+    if owned {
+        out.extend_from_slice(&[NLINK_UDATA_OWNED, 6]);
+        out.extend_from_slice(b"nlink\0");
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+/// Whether userdata carries nlink's ownership tag.
+pub(crate) fn is_owned(userdata: &[u8]) -> bool {
+    comment_of(userdata, NLINK_UDATA_OWNED).is_some()
+}
+
 /// libnftnl's comment TLV type on a table, chain, object or set element
 /// (`NFTNL_UDATA_{TABLE,CHAIN,OBJ,SET_ELEM}_COMMENT`).
 pub(crate) const NFTNL_UDATA_COMMENT: u8 = 0;

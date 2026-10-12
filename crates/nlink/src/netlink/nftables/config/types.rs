@@ -82,6 +82,26 @@ impl NftablesConfig {
 // DeclaredTable
 // =============================================================================
 
+/// Who else may put things in a declared table (#527).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum TableMode {
+    /// The config owns the table: a chain, set, object or flowtable it does
+    /// not declare is deleted. Rules another tool wrote are still left
+    /// alone, unless the chain is
+    /// [`exclusive`](DeclaredChainBuilder::exclusive).
+    #[default]
+    Owned,
+    /// Others put things in the table too: of the chains, sets and objects
+    /// the config does not declare, only the ones nlink's apply created —
+    /// it tags them in their userdata — are deleted, and no undeclared
+    /// flowtable is (a flowtable has no userdata to tag).
+    Shared,
+}
+
 /// A declared table — name, family, flags, and nested chains +
 /// rules + flowtables.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -94,6 +114,7 @@ pub struct DeclaredTable {
     pub(crate) flags: u32,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) comment: Option<String>,
+    pub(crate) mode: TableMode,
     pub(crate) chains: Vec<DeclaredChain>,
     pub(crate) rules: Vec<DeclaredRule>,
     pub(crate) flowtables: Vec<DeclaredFlowtable>,
@@ -102,6 +123,11 @@ pub struct DeclaredTable {
 }
 
 impl DeclaredTable {
+    /// Whether the config owns the table or shares it (#527).
+    pub fn mode(&self) -> TableMode {
+        self.mode
+    }
+
     /// The table's comment (#528).
     pub fn comment(&self) -> Option<&str> {
         self.comment.as_deref()
@@ -167,7 +193,9 @@ impl DeclaredObject {
     }
     /// The runtime [`Object`] this declaration describes, in `table`.
     pub(crate) fn to_object(&self, table: &str, family: Family) -> Object {
-        Object::new(table, &self.name, self.config.clone()).family(family)
+        let mut object = Object::new(table, &self.name, self.config.clone()).family(family);
+        object.owned = true;
+        object
     }
 }
 
@@ -178,6 +206,7 @@ pub struct DeclaredTableBuilder {
     family: Family,
     flags: u32,
     comment: Option<String>,
+    mode: TableMode,
     chains: Vec<DeclaredChain>,
     rules: Vec<DeclaredRule>,
     flowtables: Vec<DeclaredFlowtable>,
@@ -192,6 +221,7 @@ impl DeclaredTableBuilder {
             family,
             flags: 0,
             comment: None,
+            mode: TableMode::Owned,
             chains: Vec::new(),
             rules: Vec::new(),
             flowtables: Vec::new(),
@@ -214,6 +244,12 @@ impl DeclaredTableBuilder {
     /// comments, so changing one later is not applied.
     pub fn comment(mut self, comment: impl Into<String>) -> Self {
         self.comment = Some(comment.into());
+        self
+    }
+
+    /// Share the table with other tools (#527): see [`TableMode::Shared`].
+    pub fn mode(mut self, mode: TableMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -326,6 +362,7 @@ impl DeclaredTableBuilder {
             family: self.family,
             flags: self.flags,
             comment: self.comment,
+            mode: self.mode,
             chains: self.chains,
             rules: self.rules,
             flowtables: self.flowtables,
@@ -636,6 +673,7 @@ impl DeclaredSet {
         set.gc_interval = self.gc_interval;
         set.data_type = self.data_type.clone();
         set.comment = self.comment.clone();
+        set.owned = true;
         set
     }
 }

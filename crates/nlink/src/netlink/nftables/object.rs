@@ -73,6 +73,8 @@ pub struct Object {
     pub(crate) family: Family,
     pub(crate) config: ObjectConfig,
     pub(crate) comment: Option<String>,
+    /// Tag it as the declarative apply's own (#527).
+    pub(crate) owned: bool,
 }
 
 impl Object {
@@ -84,6 +86,7 @@ impl Object {
             family: Family::Inet,
             config,
             comment: None,
+            owned: false,
         }
     }
 
@@ -149,6 +152,9 @@ pub struct ObjectInfo {
     pub state: ObjectState,
     /// Its comment (#528).
     pub comment: Option<String>,
+    /// Created by nlink's declarative apply: it carries nlink's ownership
+    /// tag (#527).
+    pub managed: bool,
 }
 
 impl ObjectInfo {
@@ -238,10 +244,12 @@ pub(crate) fn parse_object(data: &[u8], family: Family) -> Option<ObjectInfo> {
     let mut handle = 0;
     let mut use_count = 0;
     let mut comment = None;
+    let mut managed = false;
     for (attr, value) in AttrIter::new(data) {
         match attr & 0x7FFF {
             NFTA_OBJ_USERDATA => {
                 comment = super::userdata::comment_of(value, super::userdata::NFTNL_UDATA_COMMENT);
+                managed = super::userdata::is_owned(value);
             }
             NFTA_OBJ_TABLE => table = get::string(value).ok().map(str::to_string),
             NFTA_OBJ_NAME => name = get::string(value).ok().map(str::to_string),
@@ -265,6 +273,7 @@ pub(crate) fn parse_object(data: &[u8], family: Family) -> Option<ObjectInfo> {
         use_count,
         state,
         comment,
+        managed,
     })
 }
 

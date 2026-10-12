@@ -2131,3 +2131,62 @@ async fn the_offline_diff_is_the_kernel_diff() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #527: a shared table's diff deletes only what nlink's apply made. The
+/// chain, set and counter `nft` added stay when the config stops declaring
+/// nlink's own, which go; the ownership tag reads back, and `nft list`
+/// shows nothing of it. An owned table deletes what `nft` added.
+#[tokio::test]
+async fn a_shared_table_keeps_what_another_tool_added() -> nlink::Result<()> {
+    use nlink::netlink::nftables::config::TableMode;
+    use nlink::netlink::nftables::object::ObjectConfig;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-shared")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let config = |mode, ours: bool| {
+        NftablesConfig::new().table("s", Family::Inet, move |t| {
+            let t = t.mode(mode).chain("input", |c| {
+                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+            });
+            if ours {
+                t.chain("ours", |c| c)
+                    .set("our_set", |s| s.key_type(SetKeyType::Ipv4Addr))
+                    .object("our_counter", ObjectConfig::Counter)
+            } else {
+                t
+            }
+        })
+    };
+    let names = |d: &nlink::netlink::nftables::config::NftablesDiff| {
+        let mut n: Vec<String> = d.chains_to_delete.iter().map(|(_, _, c)| c.clone()).collect();
+        n.extend(d.sets_to_delete.iter().map(|(_, _, s)| s.clone()));
+        n.extend(d.objects_to_delete.iter().map(|(_, _, o, _)| o.clone()));
+        n.sort();
+        n
+    };
+    with_timeout(async {
+        config(TableMode::Shared, true).diff(&conn).await?.apply(&conn).await?;
+        ns.exec("nft", &["add chain inet s theirs"])?;
+        ns.exec("nft", &["add set inet s their_set { type ipv4_addr; }"])?;
+        ns.exec("nft", &["add counter inet s their_counter"])?;
+
+        let chains = conn.list_chains_in("s", Family::Inet).await?;
+        let managed = |name: &str| chains.iter().find(|c| c.name == name).map(|c| c.managed);
+        assert_eq!((managed("ours"), managed("theirs")), (Some(true), Some(false)));
+        let listed = ns.exec("nft", &["list", "table", "inet", "s"])?;
+        assert!(!listed.contains("nlink"), "{listed}");
+
+        let shared = config(TableMode::Shared, false).diff(&conn).await?;
+        assert_eq!(names(&shared), ["our_counter", "our_set", "ours"], "{shared}");
+        shared.apply(&conn).await?;
+        let again = config(TableMode::Shared, false).diff(&conn).await?;
+        assert!(again.is_empty(), "{again}");
+
+        let owned = config(TableMode::Owned, false).diff(&conn).await?;
+        assert_eq!(names(&owned), ["their_counter", "their_set", "theirs"], "{owned}");
+        Ok(())
+    })
+    .await
+}
