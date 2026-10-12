@@ -1,0 +1,12 @@
+# Constants a vendored YNL spec gets wrong, excused by name from the spec/header
+# comparison in scripts/audit_uapi_constants.py (#167). Each needs a reason.
+#
+# Keep this short: a disagreement is, by default, a bug in the derivation or in
+# nlink. Only list a name after checking which side is right.
+
+# nlctrl.yaml lists `mask` before `pad` in policy-attrs. netlink.h, which owns
+# these, has NL_POLICY_TYPE_ATTR_PAD = 11 and NL_POLICY_TYPE_ATTR_MASK = 12 (pad
+# was added first, in 5.8; mask after it). The spec is a description of the
+# header and has the order wrong.
+NL_POLICY_TYPE_ATTR_MASK
+NL_POLICY_TYPE_ATTR_PAD

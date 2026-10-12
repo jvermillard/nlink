@@ -708,9 +708,11 @@ message that names the wrong attribute. The 0.25.0 cycle found
 read as `None` on every interface, forever, with no error anywhere.
 
 `scripts/audit-uapi-constants.sh` (CI gate, #232) diffs every
-`#[repr(uN)]` enum in `crates/nlink/src/` against
-`/usr/include/linux` on every push — 644 discriminants across 62
-enums today. **Every such enum must be classified:**
+`#[repr(uN)]` enum in `crates/nlink/src/`, every enum declared through
+the GENL derives (`#[genl_attribute/command/enum(repr = "uN")]`), and
+every `pub const` the kernel names verbatim against `/usr/include/linux`
+on every push: 1033 discriminants across 108 enums, and 1932 consts,
+today. **Every such enum must be classified:**
 
 - mapped to its kernel prefix in `scripts/audit-uapi-constants.map`
   (with `Variant -> KERNEL_SUFFIX` overrides where the names don't
@@ -723,6 +725,18 @@ unchecked one. Be suspicious of allowlist entries — "there's no
 header constant for it" is exactly what a drifted enum would say.
 `scripts/test-audit-uapi-constants.sh` is the self-test companion;
 it reconstructs the real drifts and asserts the gate catches them.
+
+**The kernel's YNL specs are a second source (#167).** 16 of them, from
+v7.2, are vendored in `third_party/ynl-specs/` with per-file sha256s in
+`SOURCE`. `scripts/audit_uapi_ynl.py` derives their constants by the
+kernel generator's naming rules. A spec covers what the host's headers are
+too old for: ovpn and net_shaper on a 6.12 host, and anything newer than
+its kernel. A spec that disagrees with a header fails the build, unless
+the constant is listed in `audit-uapi-constants.ynl-quirks` with a
+reason. A spec edited by hand fails its hash; update the specs only
+through `scripts/vendor-ynl-specs.sh <tag>`. The audit needs PyYAML, and
+fails rather than skip without it. A constant a spec defines does not go
+in `audit-uapi-constants.newer`; that file is for what no spec covers.
 
 ## Observability
 

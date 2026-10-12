@@ -24,3 +24,9 @@ LacpRate
 # devlink_health_reporter_state is not exported in devlink.h (it is kernel-side
 # only); the values ride an ordinary u8 attribute.
 HealthState
+
+# Fixtures for nlink-macros' own unit tests (macros/mod.rs `mod tests`): a
+# made-up family that exercises the GENL derives. No kernel family behind them.
+TestCmd
+TestAttr
+TestMode

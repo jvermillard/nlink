@@ -250,3 +250,34 @@ PortFlavour = DEVLINK_PORT_FLAVOUR
 PortType = DEVLINK_PORT_TYPE
     NotSet -> NOTSET
 ReloadAction = DEVLINK_RELOAD_ACTION
+
+# ------------------------------------------------- genl derives (#167)
+# Declared through nlink-macros' #[genl_attribute/command/enum(repr = "uN")].
+# ovpn (6.16) and net_shaper (6.13) are newer than some build hosts' headers;
+# their constants come from the vendored YNL specs (third_party/ynl-specs).
+DpllAttr = DPLL_A
+DpllPinAttr = DPLL_A_PIN
+DpllCmd = DPLL_CMD
+DpllClockQualityLevel = DPLL_CLOCK_QUALITY_LEVEL
+DpllFeatureState = DPLL_FEATURE_STATE
+DpllLockStatus = DPLL_LOCK_STATUS
+DpllLockStatusError = DPLL_LOCK_STATUS_ERROR
+DpllMode = DPLL_MODE
+DpllPinDirection = DPLL_PIN_DIRECTION
+DpllPinState = DPLL_PIN_STATE
+DpllPinType = DPLL_PIN_TYPE
+DpllType = DPLL_TYPE
+NetShaperAttr = NET_SHAPER_A
+NetShaperCapsAttr = NET_SHAPER_A_CAPS
+NetShaperHandleAttr = NET_SHAPER_A_HANDLE
+NetShaperCmd = NET_SHAPER_CMD
+NetShaperMetric = NET_SHAPER_METRIC
+NetShaperScope = NET_SHAPER_SCOPE
+OvpnAttr = OVPN_A
+OvpnPeerAttr = OVPN_A_PEER
+OvpnKeyconfAttr = OVPN_A_KEYCONF
+OvpnKeydirAttr = OVPN_A_KEYDIR
+OvpnCmd = OVPN_CMD
+OvpnCipherAlg = OVPN_CIPHER_ALG
+OvpnDelPeerReason = OVPN_DEL_PEER_REASON
+OvpnKeySlot = OVPN_KEY_SLOT

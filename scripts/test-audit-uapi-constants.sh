@@ -34,6 +34,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR/crates/nlink"
 cp -r "$REPO_ROOT/scripts" "$WORK_DIR/scripts"
 cp -r "$REPO_ROOT/crates/nlink/src" "$WORK_DIR/crates/nlink/src"
+cp -r "$REPO_ROOT/third_party" "$WORK_DIR/third_party"
 
 # The wrapper locates the repo with `git rev-parse --show-toplevel`, and the
 # fixture cases revert with `git checkout`, so the copy needs to be a git repo.
@@ -255,8 +256,9 @@ else
 fi
 
 # 8. ...but the vouching is what makes it safe. Un-vouch one and it must fail
-#    again, exactly as an invented variant would.
-grep -v ETHTOOL_A_HEADER_PHY_INDEX "$WORK_DIR/scripts/audit-uapi-constants.newer" \
+#    again, exactly as an invented variant would. (ETHTOOL_A_HEADER_PHY_INDEX,
+#    also aged out above, needs no vouching: the ethtool spec defines it, #167.)
+grep -v ETH_SS_STATS_PHY "$WORK_DIR/scripts/audit-uapi-constants.newer" \
     > "$WORK_DIR/scripts/.newer.tmp"
 mv "$WORK_DIR/scripts/.newer.tmp" "$WORK_DIR/scripts/audit-uapi-constants.newer"
 
@@ -264,13 +266,74 @@ if output="$(NLINK_UAPI_HEADER_DIR="$OLD_HEADERS" run_audit)"; then
     echo "  FAIL older headers: an UNVOUCHED-FOR missing constant was waved through"
     echo "       — that is the hole an invented variant would hide in"
     FAILURES=$((FAILURES + 1))
-elif grep -qF "ETHTOOL_A_HEADER_PHY_INDEX" <<<"$output"; then
+elif grep -qF "ETH_SS_STATS_PHY" <<<"$output"; then
     echo "  ok   older headers: an unvouched-for missing constant still fails"
 else
     echo "  FAIL older headers: failed, but not about the constant we un-vouched"
     FAILURES=$((FAILURES + 1))
 fi
 restore
+
+# 9. #167 — a drift only a spec can see. ovpn (6.16) is newer than most build
+#    hosts' headers, so before the spec overlay its enums were checked against
+#    nothing at all.
+OVPN="$WORK_DIR/crates/nlink/src/netlink/genl/ovpn/types.rs"
+python3 - "$OVPN" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+assert "    TxId = 24," in s
+s = s.replace("    TxId = 24,", "    TxId = 25,")
+open(p, "w").write(s)
+PY
+expect_fail "#167 a drift in a family the headers lack is caught by its spec" "OvpnPeerAttr::TxId"
+restore
+
+# 10. A spec and a header that disagree: either the derivation is wrong for the
+#     case or the spec is, and neither is picked silently. The edit is re-hashed
+#     into SOURCE so that the hash check doesn't catch it first.
+python3 - "$WORK_DIR/third_party/ynl-specs" <<'PY'
+import hashlib, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+spec, source = d / "wireguard.yaml", d / "SOURCE"
+old = spec.read_bytes()
+new = old.replace(b"      - remove-me\n      - replace-allowedips\n",
+                  b"      - replace-allowedips\n      - remove-me\n")
+assert new != old
+spec.write_bytes(new)
+source.write_text(source.read_text().replace(
+    hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest()))
+PY
+expect_fail "#167 a spec that disagrees with the headers is caught" "The spec and the header disagree"
+restore
+
+# 11. A vendored spec edited by hand: its hash no longer matches SOURCE.
+echo "# edited" >> "$WORK_DIR/third_party/ynl-specs/ovpn.yaml"
+expect_fail "#167 a hand-edited spec is caught" "ovpn.yaml: sha256"
+restore
+
+# 12. An unclassified enum declared through the GENL derives, the form that
+#     went unchecked until #167 (all of ovpn, net_shaper and dpll).
+cat >> "$OVPN" <<'EOF'
+
+/// Fixture: a new GENL wire enum nobody classified.
+#[derive(GenlAttribute, Debug, Clone, Copy)]
+#[genl_attribute(repr = "u16")]
+pub enum FixtureUnclassifiedGenlAttr {
+    Unspec = 0,
+    Ifindex = 1,
+}
+EOF
+expect_fail "#167 an unclassified GENL-derive enum is caught" "FixtureUnclassifiedGenlAttr"
+restore
+
+# 13. No PyYAML is a failure, not a skip: the spec-only constants are vouched for
+#     nowhere else. A `yaml` module that refuses to import stands in for one
+#     that isn't installed.
+mkdir -p "$WORK_DIR/no-yaml"
+echo 'raise ImportError("simulated: PyYAML is not installed")' > "$WORK_DIR/no-yaml/yaml.py"
+PYTHONPATH="$WORK_DIR/no-yaml" expect_fail "#167 a missing PyYAML fails the audit" "PyYAML is not installed"
 
 echo
 if ((FAILURES > 0)); then
