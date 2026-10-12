@@ -125,6 +125,26 @@ MetaKey = NFT_META
     NfProto -> NFPROTO
     L4Proto -> L4PROTO
     CGroup -> CGROUP
+    IifType -> IFTYPE
+    OifType -> OIFTYPE
+    NfTrace -> NFTRACE
+    RtClassId -> RTCLASSID
+    BriIifName -> BRI_IIFNAME
+    BriOifName -> BRI_OIFNAME
+    PktType -> PKTTYPE
+    IifGroup -> IIFGROUP
+    OifGroup -> OIFGROUP
+    PRandom -> PRANDOM
+    SecPath -> SECPATH
+    IifKind -> IIFKIND
+    OifKind -> OIFKIND
+    BriIifPvid -> BRI_IIFPVID
+    BriIifVproto -> BRI_IIFVPROTO
+    TimeNs -> TIME_NS
+    TimeDay -> TIME_DAY
+    TimeHour -> TIME_HOUR
+    SdifName -> SDIFNAME
+    BriBroute -> BRI_BROUTE
 CtKey = NFT_CT
     L3Protocol -> L3PROTOCOL
 CmpOp = NFT_CMP
@@ -134,6 +154,11 @@ PayloadBase = NFT_PAYLOAD
     Transport -> TRANSPORT_HEADER
 NatType = NFT_NAT
 RangeOp = NFT_RANGE
+PktType = PACKET
+    OtherHost -> OTHERHOST
+FibResult = NFT_FIB_RESULT
+    OifName -> OIFNAME
+    AddrType -> ADDRTYPE
 LimitKind = NFT_LIMIT
     Packets -> PKTS
     Bytes -> PKT_BYTES

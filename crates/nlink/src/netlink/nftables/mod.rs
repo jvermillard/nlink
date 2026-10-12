@@ -409,6 +409,14 @@ pub const NFTA_LOG_QTHRESHOLD: u16 = 4;
 /// `NFTA_LOG_FLAGS` — what a syslog `log` adds: TCP sequence, options, ….
 pub const NFTA_LOG_FLAGS: u16 = 6;
 
+// Fib — `enum nft_fib_attributes`.
+/// `NFTA_FIB_DREG` — the register the result goes to.
+pub const NFTA_FIB_DREG: u16 = 1;
+/// `NFTA_FIB_RESULT` — an `nft_fib_result`.
+pub const NFTA_FIB_RESULT: u16 = 2;
+/// `NFTA_FIB_FLAGS` — the `NFTA_FIB_F_*` flags.
+pub const NFTA_FIB_FLAGS: u16 = 3;
+
 // Range — `enum nft_range_attributes`.
 /// `NFTA_RANGE_SREG` — the register compared.
 pub const NFTA_RANGE_SREG: u16 = 1;
