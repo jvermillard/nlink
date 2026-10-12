@@ -38,9 +38,19 @@
 //! - Linux with network-namespace support.
 //! - `CAP_SYS_ADMIN` (typically root) — the same requirement as
 //!   `ip netns add`.
-//! - The `ip` command in `PATH`, used by the `connect_to` / `add_dummy`
-//!   / `link_up` / `add_addr` convenience helpers. The low-level
-//!   `spawn` / `spawn_output` / `connection` methods don't need it.
+//!
+//! Only [`exec`](LabNamespace::exec) runs a program; the `connect_to` /
+//! `add_dummy` / `link_up` / `add_addr` helpers are netlink calls.
+//!
+//! # Identity
+//!
+//! A `LabNamespace` holds a [`Netns`](namespace::Netns) handle to the
+//! namespace it created (#520). Its connections, spawned processes and
+//! helpers all go to that namespace through the handle's fd, not by
+//! looking the name up again, and `Drop` deletes the name only while it
+//! still names that namespace. Like any handle it holds the namespace
+//! open: one whose name is deleted elsewhere lives on, unnamed, until the
+//! `LabNamespace` drops.
 //!
 //! # Naming
 //!
@@ -50,6 +60,8 @@
 
 use std::{
     future::Future,
+    os::fd::{AsFd, AsRawFd},
+    pin::Pin,
     process::{Child, Command, Output},
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -62,9 +74,16 @@ pub use veth::LabVeth;
 
 use tracing::warn;
 
+use std::net::IpAddr;
+
 use crate::{
     Result, Route,
-    netlink::{AsyncProtocolInit, Connection, ProtocolState, namespace},
+    netlink::{
+        AsyncProtocolInit, Connection, ProtocolState,
+        addr::{Ipv4Address, Ipv6Address},
+        link::{DummyLink, VethLink},
+        namespace,
+    },
 };
 
 static NAMESPACE_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -85,6 +104,7 @@ fn unique_ns_name(prefix: &str) -> String {
 /// See the [module-level docs](self) for usage.
 pub struct LabNamespace {
     name: String,
+    netns: namespace::Netns,
 }
 
 impl LabNamespace {
@@ -92,18 +112,16 @@ impl LabNamespace {
     ///
     /// The full name is `nlink-lab-<prefix>-<pid>-<counter>`.
     pub fn new(prefix: &str) -> Result<Self> {
-        let name = unique_ns_name(prefix);
-        namespace::create(&name)?;
-        Ok(Self { name })
+        Self::named(&unique_ns_name(prefix))
     }
 
     /// Create a namespace with a specific name.
     ///
     /// Errors if a namespace with that name already exists.
     pub fn named(name: &str) -> Result<Self> {
-        namespace::create(name)?;
         Ok(Self {
             name: name.to_string(),
+            netns: namespace::Netns::create(name)?,
         })
     }
 
@@ -112,9 +130,17 @@ impl LabNamespace {
         &self.name
     }
 
+    /// The handle to this namespace (#520): its identity, and
+    /// [`run`](namespace::Netns::run), [`socket`](namespace::Netns::socket),
+    /// [`sysctl`](namespace::Netns::sysctl) and
+    /// [`pids`](namespace::Netns::pids) inside it.
+    pub fn netns(&self) -> &namespace::Netns {
+        &self.netns
+    }
+
     /// Open a rtnetlink `Connection<Route>` scoped to this namespace.
     pub fn connection(&self) -> Result<Connection<Route>> {
-        namespace::connection_for(&self.name)
+        self.netns.connection()
     }
 
     /// Open a protocol-generic connection scoped to this namespace.
@@ -129,7 +155,7 @@ impl LabNamespace {
             + Default
             + crate::netlink::construction::SyncConstructible,
     {
-        namespace::connection_for(&self.name)
+        self.netns.connection()
     }
 
     /// Open a GENL-style connection that resolves its family ID
@@ -139,7 +165,7 @@ impl LabNamespace {
     where
         P: AsyncProtocolInit + crate::netlink::construction::AsyncConstructible,
     {
-        namespace::connection_for_async(&self.name).await
+        self.netns.connection_async().await
     }
 
     /// Spawn a child process inside this namespace.
@@ -148,12 +174,12 @@ impl LabNamespace {
     /// mechanism used by `ip netns exec` — no shelling to `ip netns
     /// exec` on the caller's side.
     pub fn spawn(&self, cmd: Command) -> Result<Child> {
-        namespace::spawn(&self.name, cmd)
+        self.netns.command(cmd)?.spawn()
     }
 
     /// Spawn and collect stdout/stderr.
     pub fn spawn_output(&self, cmd: Command) -> Result<Output> {
-        namespace::spawn_output(&self.name, cmd)
+        self.netns.command(cmd)?.output()
     }
 
     /// Run `cmd args...` in this namespace, returning stdout as a
@@ -163,7 +189,7 @@ impl LabNamespace {
     pub fn exec(&self, cmd: &str, args: &[&str]) -> Result<String> {
         let mut command = Command::new(cmd);
         command.args(args);
-        let output = namespace::spawn_output(&self.name, command)?;
+        let output = self.spawn_output(command)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -181,75 +207,99 @@ impl LabNamespace {
     pub fn exec_ignore(&self, cmd: &str, args: &[&str]) {
         let mut command = Command::new(cmd);
         command.args(args);
-        let _ = namespace::spawn_output(&self.name, command);
+        let _ = self.spawn_output(command);
+    }
+
+    /// Run `f` on a connection in this namespace, to completion, from
+    /// sync code: on a thread of its own with its own runtime, so it is
+    /// callable from inside a tokio runtime too.
+    fn route<T: Send>(
+        &self,
+        f: impl for<'c> FnOnce(&'c Connection<Route>) -> Pin<Box<dyn Future<Output = Result<T>> + 'c>>
+        + Send,
+    ) -> Result<T> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(crate::Error::Io)?;
+                    let conn = {
+                        let _entered = rt.enter();
+                        self.connection()?
+                    };
+                    rt.block_on(f(&conn))
+                })
+                .join()
+                .unwrap_or_else(|_| {
+                    Err(crate::Error::InvalidMessage(format!(
+                        "namespace {}: a lab helper panicked",
+                        self.name
+                    )))
+                })
+        })
     }
 
     /// Create a veth pair with one end in this namespace and the other
-    /// in `peer_ns`.
-    ///
-    /// Uses `ip link add ... type veth peer name ...` followed by
-    /// `ip link set <remote> netns <peer_ns>`, both run inside this
-    /// namespace.
+    /// in `peer_ns`, both down.
     pub fn connect_to(
         &self,
         peer_ns: &LabNamespace,
         local_name: &str,
         remote_name: &str,
     ) -> Result<()> {
-        let mut cmd = Command::new("ip");
-        cmd.args([
-            "link",
-            "add",
-            local_name,
-            "type",
-            "veth",
-            "peer",
-            "name",
-            remote_name,
-        ]);
-        let output = namespace::spawn_output(&self.name, cmd)?;
-        if !output.status.success() {
-            return Err(crate::Error::InvalidMessage(
-                "failed to create veth pair".into(),
-            ));
-        }
-
-        let mut cmd = Command::new("ip");
-        cmd.args(["link", "set", remote_name, "netns", &peer_ns.name]);
-        let output = namespace::spawn_output(&self.name, cmd)?;
-        if !output.status.success() {
-            return Err(crate::Error::InvalidMessage(
-                "failed to move veth peer".into(),
-            ));
-        }
-
-        Ok(())
+        let veth = VethLink::new(local_name, remote_name)
+            .peer_netns_fd(peer_ns.netns.as_fd().as_raw_fd());
+        self.route(move |conn| Box::pin(conn.add_link(veth)))
     }
 
-    /// Create a dummy interface inside this namespace. Convenience
-    /// wrapper around `ip link add <name> type dummy`.
+    /// Create a dummy interface inside this namespace, down.
     pub fn add_dummy(&self, name: &str) -> Result<()> {
-        self.exec("ip", &["link", "add", name, "type", "dummy"])?;
-        Ok(())
+        let name = name.to_string();
+        self.route(move |conn| Box::pin(async move { conn.add_link(DummyLink::new(&name)).await }))
     }
 
-    /// Bring an interface up. Convenience wrapper around `ip link set
-    /// <name> up`.
+    /// Bring an interface up.
     pub fn link_up(&self, name: &str) -> Result<()> {
-        self.exec("ip", &["link", "set", name, "up"])?;
-        Ok(())
+        let name = name.to_string();
+        self.route(move |conn| Box::pin(async move { conn.set_link_up(name.as_str()).await }))
     }
 
-    /// Add an IPv4/IPv6 address to an interface. Convenience wrapper
-    /// around `ip addr add <addr> dev <dev>`.
+    /// Add an IPv4 or IPv6 address, `10.0.0.1/24` or `fd00::1/64`, to an
+    /// interface. With no prefix length it is a host address (`/32`,
+    /// `/128`).
     pub fn add_addr(&self, dev: &str, addr: &str) -> Result<()> {
-        self.exec("ip", &["addr", "add", addr, "dev", dev])?;
-        Ok(())
+        let (ip, len) = crate::util::addr::parse_prefix(addr)?;
+        let dev = dev.to_string();
+        self.route(move |conn| {
+            Box::pin(async move {
+                match ip {
+                    IpAddr::V4(v4) => conn.add_address(Ipv4Address::new(dev.as_str(), v4, len)).await,
+                    IpAddr::V6(v6) => conn.add_address(Ipv6Address::new(dev.as_str(), v6, len)).await,
+                }
+            })
+        })
     }
 }
 
 impl Drop for LabNamespace {
     fn drop(&mut self) {
+        // Only while the name still names this namespace: one deleted and
+        // recreated under it since is someone else's.
+        match namespace::Netns::open(&self.name) {
+            Ok(now) if now.id() == self.netns.id() => {}
+            Ok(_) => {
+                warn!(
+                    namespace = %self.name,
+                    "LabNamespace::drop: the name now names another namespace; not deleting it"
+                );
+                return;
+            }
+            // Already gone.
+            Err(e) if e.is_not_found() => return,
+            Err(_) => {}
+        }
         if let Err(e) = namespace::delete(&self.name) {
             warn!(
                 namespace = %self.name,

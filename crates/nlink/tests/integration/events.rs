@@ -415,9 +415,9 @@ async fn the_rtnetlink_snapshot_covers_what_the_stream_subscribes_to() -> Result
 }
 
 /// Whether `b`'s end of the pair still exists.
-async fn peer_end_exists(pair: &crate::common::topo::NsPair) -> Result<bool> {
-    let conn = pair.b.connection()?;
-    Ok(conn.get_link_by_name(pair.b_if).await?.is_some())
+async fn peer_end_exists(b: &TestNamespace, b_if: &str) -> Result<bool> {
+    let conn = b.connection()?;
+    Ok(conn.get_link_by_name(b_if).await?.is_some())
 }
 
 /// #504: a socket keeps its namespace alive, so deleting the namespace
@@ -448,7 +448,7 @@ async fn an_event_stream_ends_when_its_namespace_is_deleted() -> Result<()> {
     namespace::delete(pair.a.name())?;
     // Still pinned by the stream: the veth's far end is still there.
     assert!(
-        peer_end_exists(&pair).await?,
+        peer_end_exists(&pair.b, pair.b_if).await?,
         "the stream should still pin the namespace"
     );
 
@@ -470,11 +470,14 @@ async fn an_event_stream_ends_when_its_namespace_is_deleted() -> Result<()> {
         "the stream ends after the error"
     );
 
-    // Dropping the stream closes the last socket in the namespace; the
-    // kernel frees it, and the veth's far end goes with it.
+    // Dropping the stream closes the last socket in the namespace — with
+    // the test's own handle, which holds it open as any `Netns` does (#520)
+    // — and the kernel frees it, the veth's far end with it.
     drop(stream);
+    let (b, b_if) = (pair.b, pair.b_if);
+    drop(pair.a);
     let gone_by = tokio::time::Instant::now() + WITHIN;
-    while peer_end_exists(&pair).await? {
+    while peer_end_exists(&b, b_if).await? {
         assert!(
             tokio::time::Instant::now() < gone_by,
             "the namespace was not freed after the stream dropped"
