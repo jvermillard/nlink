@@ -257,6 +257,205 @@ impl Backoff {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::netlink::Route {}
+    impl Sealed for crate::netlink::Nftables {}
+}
+
+/// A protocol with a resync event stream, which a
+/// [restarting stream](crate::Connection::events_restarting) can run:
+/// [`Route`](crate::netlink::Route) and
+/// [`Nftables`](crate::netlink::Nftables) (#523). Sealed.
+pub trait Restartable:
+    crate::netlink::stream::EventSource + sealed::Sealed + Send + Sync + Sized + 'static
+{
+    #[doc(hidden)]
+    type Resync: Stream<Item = crate::Result<ResyncedEvent<Self::Event>>> + Send + 'static;
+
+    #[doc(hidden)]
+    fn resync(
+        conn: crate::Connection<Self>,
+        factory: ConnectionFactory<Self>,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Self::Resync>> + Send>>;
+}
+
+impl Restartable for crate::netlink::Route {
+    type Resync = crate::netlink::route_resync::OwnedResyncStream;
+
+    fn resync(
+        conn: crate::Connection<Self>,
+        factory: ConnectionFactory<Self>,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Self::Resync>> + Send>> {
+        Box::pin(conn.into_events_with_resync(factory))
+    }
+}
+
+impl Restartable for crate::netlink::Nftables {
+    type Resync = crate::netlink::nftables::resync::OwnedResyncStream;
+
+    fn resync(
+        conn: crate::Connection<Self>,
+        factory: ConnectionFactory<Self>,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Self::Resync>> + Send>> {
+        Box::pin(conn.into_events_with_resync(factory))
+    }
+}
+
+/// Whether no restart can get past `e`: the namespace is gone.
+pub(crate) fn ends_restarting(e: &crate::Error) -> bool {
+    e.is_namespace_deleted() || matches!(e, crate::Error::NamespaceNotFound { .. })
+}
+
+impl<P: Restartable> crate::Connection<P> {
+    /// An event stream that does not end (#523): every group of the
+    /// protocol, resynced after an overflow as `into_events_with_resync`
+    /// is, on a connection from `factory` — and when that stream ends or
+    /// fails, the error is yielded and a new one is made after `backoff`.
+    /// For [`Route`](crate::netlink::Route) and
+    /// [`Nftables`](crate::netlink::Nftables).
+    ///
+    /// Each run begins with an initial snapshot
+    /// ([`ResyncMarker::InitialSyncStart`]), so a mirror rebuilds itself
+    /// after a restart. A namespace deleted under it, or one the factory
+    /// cannot find, ends the stream: no restart can bring it back. So
+    /// does [`Backoff::max_attempts`] restarts in a row without an event.
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use std::sync::Arc;
+    /// use nlink::netlink::{Connection, Route};
+    /// use nlink::netlink::resync::{Backoff, ConnectionFactory};
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let factory: ConnectionFactory<Route> =
+    ///     Arc::new(|| Box::pin(async { nlink::netlink::namespace::connection_for("lab-r1") }));
+    /// let mut events = Connection::<Route>::events_restarting(factory, Backoff::default());
+    /// while let Some(item) = events.next().await {
+    ///     match item {
+    ///         Ok(event) => println!("{event:?}"),
+    ///         // Reported, and the stream goes on.
+    ///         Err(e) => eprintln!("watch restarting: {e}"),
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn events_restarting(factory: ConnectionFactory<P>, backoff: Backoff) -> RestartingStream<P> {
+        RestartingStream {
+            factory,
+            backoff,
+            rcvbuf: None,
+            state: RestartState::New,
+            attempts: 0,
+        }
+    }
+}
+
+type StartFuture<P> = Pin<Box<dyn Future<Output = crate::Result<<P as Restartable>::Resync>> + Send>>;
+
+enum RestartState<P: Restartable> {
+    New,
+    Starting(StartFuture<P>),
+    Running(Pin<Box<P::Resync>>),
+    Waiting(Pin<Box<tokio::time::Sleep>>),
+    Done,
+}
+
+/// The stream of [`Connection::events_restarting`](crate::Connection::events_restarting)
+/// (#523).
+pub struct RestartingStream<P: Restartable> {
+    factory: ConnectionFactory<P>,
+    backoff: Backoff,
+    rcvbuf: Option<usize>,
+    state: RestartState<P>,
+    /// Restarts since an event was last delivered.
+    attempts: u32,
+}
+
+impl<P: Restartable> RestartingStream<P> {
+    /// The receive buffer of each run's event socket, in bytes
+    /// (`SO_RCVBUFFORCE`, falling back to `SO_RCVBUF`). A larger one
+    /// overflows, and resyncs, less often.
+    pub fn rcvbuf(mut self, bytes: usize) -> Self {
+        self.rcvbuf = Some(bytes);
+        self
+    }
+
+    fn start(&self) -> StartFuture<P> {
+        let factory = self.factory.clone();
+        let rcvbuf = self.rcvbuf;
+        Box::pin(async move {
+            let conn = (factory)().await?;
+            if let Some(bytes) = rcvbuf {
+                conn.socket().set_rcvbuf(bytes)?;
+            }
+            P::resync(conn, factory).await
+        })
+    }
+
+    /// After a failure: wait and start again, or end.
+    fn restart_or_end(&mut self, e: &crate::Error) {
+        self.attempts += 1;
+        let spent = self.backoff.max_attempts.is_some_and(|max| self.attempts > max);
+        self.state = if ends_restarting(e) || spent {
+            tracing::info!(error = %e, "restarting event stream: giving up");
+            RestartState::Done
+        } else {
+            let delay = self.backoff.delay(self.attempts);
+            tracing::warn!(error = %e, ?delay, attempt = self.attempts, "restarting event stream");
+            RestartState::Waiting(Box::pin(tokio::time::sleep(delay)))
+        };
+    }
+}
+
+impl<P: Restartable> Unpin for RestartingStream<P> {}
+
+impl<P: Restartable> Stream for RestartingStream<P> {
+    type Item = crate::Result<ResyncedEvent<P::Event>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.state {
+                RestartState::Done => return Poll::Ready(None),
+                RestartState::New => this.state = RestartState::Starting(this.start()),
+                RestartState::Waiting(sleep) => {
+                    if sleep.as_mut().poll(cx).is_pending() {
+                        return Poll::Pending;
+                    }
+                    this.state = RestartState::Starting(this.start());
+                }
+                RestartState::Starting(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(stream)) => this.state = RestartState::Running(Box::pin(stream)),
+                    Poll::Ready(Err(e)) => {
+                        this.restart_or_end(&e);
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                },
+                RestartState::Running(stream) => match stream.as_mut().poll_next(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Some(Ok(item))) => {
+                        if matches!(item, ResyncedEvent::Event(_)) {
+                            this.attempts = 0;
+                        }
+                        return Poll::Ready(Some(Ok(item)));
+                    }
+                    Poll::Ready(Some(Err(e))) => {
+                        this.restart_or_end(&e);
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Ready(None) => {
+                        let e = crate::Error::InvalidMessage("the event stream ended".into());
+                        this.restart_or_end(&e);
+                    }
+                },
+            }
+        }
+    }
+}
+
 /// Internal state-machine state for [`ResyncStream`].
 ///
 /// The `'a` lifetime threads through to the boxed snapshot
@@ -662,6 +861,43 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restarting_streams_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<RestartingStream<crate::netlink::Route>>();
+        assert_send::<RestartingStream<crate::netlink::Nftables>>();
+    }
+
+    /// A factory that never succeeds: an error per attempt, the waits
+    /// growing, then the end after `max_attempts` restarts.
+    #[tokio::test]
+    async fn a_restarting_stream_gives_up_after_max_attempts() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+        use tokio_stream::StreamExt;
+
+        use crate::netlink::Route;
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let counted = calls.clone();
+        let factory: ConnectionFactory<Route> = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(crate::Error::InvalidMessage("not yet".into())) })
+        });
+        let backoff = Backoff::new(Duration::from_millis(5), Duration::from_millis(20)).max_attempts(2);
+        let mut stream = crate::Connection::<Route>::events_restarting(factory, backoff);
+        let mut errors = 0;
+        while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream ends")
+        {
+            assert!(item.is_err(), "{item:?}");
+            errors += 1;
+        }
+        assert_eq!(errors, 3, "the first attempt and two restarts");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn backoff_doubles_up_to_its_max() {

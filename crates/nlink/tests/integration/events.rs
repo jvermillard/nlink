@@ -746,3 +746,89 @@ async fn gap_deltas_report_a_link_deleted_during_an_overflow() -> Result<()> {
     assert_eq!(mirror, fresh);
     Ok(())
 }
+
+/// Wait for the first item of `key` matching `want`, from a watch.
+async fn watch_until<K: Clone + std::hash::Hash + Eq + Unpin + std::fmt::Debug>(
+    watch: &mut nlink::facade::watch::MultiNsWatch<K>,
+    mut want: impl FnMut(&K, &nlink::facade::watch::NsEvent) -> bool,
+) -> (K, nlink::facade::watch::NsEvent) {
+    use tokio_stream::StreamExt;
+    let end = tokio::time::Instant::now() + WITHIN;
+    loop {
+        match tokio::time::timeout_at(end, watch.next()).await {
+            Ok(Some((key, event))) if want(&key, &event) => return (key, event),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the watch ended"),
+            Err(_) => panic!("no matching item within {WITHIN:?}"),
+        }
+    }
+}
+
+/// #523: one stream for many namespaces and both families. Each
+/// namespace's events come under its key; a deleted namespace yields
+/// `Gone` and leaves the watch, and the others go on.
+#[tokio::test]
+async fn a_multi_namespace_watch_follows_namespaces_until_they_go() -> Result<()> {
+    use nlink::facade::watch::{Families, MultiNsWatch, NsEvent};
+    use nlink::netlink::namespace::{self, Netns};
+    use nlink::netlink::nftables::{Family, NftablesEvent};
+    use nlink::netlink::resync::{Backoff, ResyncMarker, ResyncedEvent};
+    use nlink::netlink::Nftables;
+    require_root!();
+    nlink::require_modules!("dummy", "nf_tables");
+
+    let a = TestNamespace::new("mnw-a")?;
+    let b = TestNamespace::new("mnw-b")?;
+    let mut watch = MultiNsWatch::new(Families::ROUTE | Families::NFTABLES)
+        .backoff(Backoff::new(Duration::from_millis(10), Duration::from_millis(50)));
+    watch.add("a", &Netns::open(a.name())?)?;
+    watch.add("b", &Netns::open(b.name())?)?;
+    assert_eq!(watch.len(), 2);
+
+    // Four initial snapshots: two namespaces, two families each.
+    let mut ends = std::collections::BTreeSet::new();
+    while ends.len() < 4 {
+        let (key, event) = watch_until(&mut watch, |_, _| true).await;
+        match event {
+            NsEvent::Route(ResyncedEvent::Marker(ResyncMarker::ResyncEnd)) => {
+                ends.insert((key, "route"));
+            }
+            NsEvent::Nftables(ResyncedEvent::Marker(ResyncMarker::ResyncEnd)) => {
+                ends.insert((key, "nftables"));
+            }
+            NsEvent::Error(e) | NsEvent::Gone(e) => panic!("{key}: {e}"),
+            _ => {}
+        }
+    }
+
+    a.connection()?.add_link(DummyLink::new("d0")).await?;
+    let (key, _) = watch_until(&mut watch, |_, e| {
+        matches!(e, NsEvent::Route(ResyncedEvent::Event(NetworkEvent::NewLink(l))) if l.name() == Some("d0"))
+    })
+    .await;
+    assert_eq!(key, "a");
+
+    b.connection_for::<Nftables>()?.add_table("t", Family::Inet).await?;
+    let (key, _) = watch_until(&mut watch, |_, e| {
+        matches!(e, NsEvent::Nftables(ResyncedEvent::Event(NftablesEvent::NewTable(t))) if t.name == "t")
+    })
+    .await;
+    assert_eq!(key, "b");
+
+    namespace::delete(b.name())?;
+    let (key, event) = watch_until(&mut watch, |_, e| matches!(e, NsEvent::Gone(_))).await;
+    assert_eq!(key, "b");
+    let NsEvent::Gone(why) = event else { unreachable!() };
+    assert!(why.is_namespace_deleted(), "{why}");
+    assert!(!watch.contains(&"b"), "a gone namespace leaves the watch");
+    assert_eq!(watch.len(), 1);
+
+    // The other namespace is still watched.
+    a.connection()?.add_link(DummyLink::new("d1")).await?;
+    let (key, _) = watch_until(&mut watch, |_, e| {
+        matches!(e, NsEvent::Route(ResyncedEvent::Event(NetworkEvent::NewLink(l))) if l.name() == Some("d1"))
+    })
+    .await;
+    assert_eq!(key, "a");
+    Ok(())
+}
