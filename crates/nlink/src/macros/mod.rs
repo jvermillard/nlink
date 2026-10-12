@@ -1197,18 +1197,32 @@ mod tests {
     }
 
     #[test]
-    fn derived_genl_enum_unknown_value_surfaces_as_error() {
-        // Synthesize a frame with a value (=99) outside any
-        // TestMode variant. Parse should fail with
-        // Error::invalid_message carrying the UnknownValue text.
+    fn derived_genl_enum_unknown_value_reads_as_absent() {
+        // A value (=99) outside every TestMode variant: what a kernel
+        // newer than the enum sends. It reads as an absent attribute,
+        // and the rest of the message survives (#727).
         let mut builder = MessageBuilder::new(0, 0);
         let body_start = builder.len();
+        __rt::emit_u32_attr(&mut builder, 1, 7);
         __rt::emit_u32_attr(&mut builder, 2, 99); // attr=2, value=99 (not a variant)
-        let result = DerivedEnumField::from_bytes(&builder.as_bytes()[body_start..]);
-        let err = result.expect_err("parse should fail on unknown enum value");
-        // Inner UnknownValue's Display message is plumbed through.
-        let s = format!("{err}");
-        assert!(s.contains("99"), "expected error text to include 99: {s}");
+        let parsed = DerivedEnumField::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("an unknown enum value must not fail the message");
+        assert_eq!(parsed.id, 7);
+        assert_eq!(parsed.mode, None);
+    }
+
+    #[test]
+    fn derived_repeated_enum_skips_an_unknown_element() {
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        __rt::emit_u32_attr(&mut builder, 1, 42);
+        __rt::emit_u32_attr(&mut builder, 2, TestMode::Manual as u32);
+        __rt::emit_u32_attr(&mut builder, 2, 99);
+        __rt::emit_u32_attr(&mut builder, 2, TestMode::Automatic as u32);
+        let parsed = DerivedRepeatedEnum::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("an unknown enum element must not fail the message");
+        assert_eq!(parsed.id, 42);
+        assert_eq!(parsed.modes_supported, vec![TestMode::Manual, TestMode::Automatic]);
     }
 
     #[test]
