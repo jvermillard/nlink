@@ -107,8 +107,30 @@ pub enum ErrorObject {
     Qdisc {
         /// The link.
         dev: String,
-        /// Its kind: `htb`, `netem`, ….
-        kind: String,
+        /// Where it hangs, in tc(8) notation: `root`, `ingress`, `1:a`
+        /// (#718).
+        parent: String,
+        /// Its kind: `htb`, `netem`, …, where the code that failed knew it.
+        kind: Option<String>,
+    },
+    /// A traffic-control class (#718).
+    TcClass {
+        /// The link.
+        dev: String,
+        /// Its id, in tc(8) notation: `1:a`.
+        classid: String,
+    },
+    /// A traffic-control filter (#718), by what the kernel tells filters
+    /// apart by.
+    TcFilter {
+        /// The link.
+        dev: String,
+        /// The qdisc or hook it hangs off, in tc(8) notation.
+        parent: String,
+        /// Its priority.
+        priority: u16,
+        /// Its protocol: `all`, `ip`, `802.1Q`, ….
+        protocol: String,
     },
     /// A link's traffic-control tree: its classes, leaf qdiscs and filters.
     Tc {
@@ -207,7 +229,19 @@ impl std::fmt::Display for ErrorObject {
             Self::Fdb { dev, mac } => write!(f, "fdb {mac} on {dev}"),
             Self::Rule { priority } => write!(f, "rule {priority}"),
             Self::Nexthop { id } => write!(f, "nexthop {id}"),
-            Self::Qdisc { dev, kind } => write!(f, "qdisc {kind} on {dev}"),
+            Self::Qdisc {
+                dev,
+                parent,
+                kind: Some(kind),
+            } => write!(f, "qdisc {kind} at {parent} on {dev}"),
+            Self::Qdisc { dev, parent, .. } => write!(f, "qdisc at {parent} on {dev}"),
+            Self::TcClass { dev, classid } => write!(f, "class {classid} on {dev}"),
+            Self::TcFilter {
+                dev,
+                parent,
+                priority,
+                protocol,
+            } => write!(f, "filter at {parent} prio {priority} {protocol} on {dev}"),
             Self::Tc { dev } => write!(f, "tc on {dev}"),
             Self::WireguardDevice { name } => write!(f, "wireguard device {name}"),
             Self::WireguardPeer { dev, public_key } => write!(f, "peer {public_key} on {dev}"),
@@ -1867,6 +1901,35 @@ mod tests {
             "{err}"
         );
         assert_eq!(err.kind(), ErrorKind::NotFound);
+    }
+
+    /// #718: TC objects read as tc(8) would name them.
+    #[test]
+    fn tc_objects_read_like_tc() {
+        let qdisc = ErrorObject::Qdisc {
+            dev: "eth0".into(),
+            parent: "1:a".into(),
+            kind: Some("fq_codel".into()),
+        };
+        assert_eq!(qdisc.to_string(), "qdisc fq_codel at 1:a on eth0");
+        let slot = ErrorObject::Qdisc {
+            dev: "eth0".into(),
+            parent: "root".into(),
+            kind: None,
+        };
+        assert_eq!(slot.to_string(), "qdisc at root on eth0");
+        let class = ErrorObject::TcClass {
+            dev: "eth0".into(),
+            classid: "1:a".into(),
+        };
+        assert_eq!(class.to_string(), "class 1:a on eth0");
+        let filter = ErrorObject::TcFilter {
+            dev: "eth0".into(),
+            parent: "1:".into(),
+            priority: 100,
+            protocol: "ip".into(),
+        };
+        assert_eq!(filter.to_string(), "filter at 1: prio 100 ip on eth0");
     }
 
     /// #718: an error says which namespace its connection was in. It shows

@@ -2409,6 +2409,15 @@ All notable changes to this project will be documented in this file.
   declarative paths alike can say which rule failed without parsing a
   message.
 
+- **TC errors name their qdisc, class or filter (#718).** `ErrorObject`
+  gains `TcClass` (its id) and `TcFilter` (its parent, priority and
+  protocol, which is how the kernel tells filters apart). `Qdisc` gains its
+  `parent`, and its `kind` is an `Option`, for a delete that doesn't know
+  the kind. A declared tree's step names the class, filter or leaf it was
+  installing or removing, where it used to name only the tree's device. The
+  qdisc verbs (`conn.tc(dev).qdisc(parent).create(..)` and the rest) name
+  their slot.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
