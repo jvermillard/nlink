@@ -85,6 +85,12 @@ pub enum Step {
     /// Change a veth's peer in the namespace it lives in: its state, MTU
     /// and MAC (#680).
     ModifyVethPeer(super::VethPeerChange),
+    /// Set the namespace's VRF strict mode (#680): off before links are
+    /// created, on after.
+    SetVrfStrictMode {
+        /// On or off.
+        on: bool,
+    },
     /// Set a bridge's declared MTU again if the port changes before moved
     /// it (`br_mtu_auto_adjust`). Not counted as a change of its own.
     PinBridgeMtu {
@@ -263,6 +269,7 @@ impl Step {
                 after: n.clone(),
             },
             Self::DeleteRule(r) => Self::AddRule(r.clone()),
+            Self::SetVrfStrictMode { on } => Self::SetVrfStrictMode { on: !on },
             Self::ModifyVethPeer(c) => Self::ModifyVethPeer(super::VethPeerChange {
                 changes: invert_link_changes(&c.changes)?,
                 ..c.clone()
@@ -361,6 +368,7 @@ impl fmt::Display for Step {
             ),
             Self::RefuseRoute(conflict) => write!(f, "{conflict}"),
             Self::ModifyVethPeer(change) => write!(f, "{change}"),
+            Self::SetVrfStrictMode { on } => write!(f, "~ net.vrf.strict_mode -> {}", u8::from(*on)),
             Self::RefuseNexthop(conflict) => write!(f, "{conflict}"),
             Self::RefuseRemoval(removal) => write!(f, "{removal}"),
             Self::RefuseRecreate(recreate) => write!(f, "{recreate}"),
@@ -557,6 +565,11 @@ impl super::ConfigDiff {
             link: link.clone(),
             mtu: *mtu,
         }));
+        // Off before the creates, so a VRF can share a table; on after,
+        // once every VRF is in place (#680).
+        if self.vrf_strict_mode == Some(false) {
+            steps.push(Step::SetVrfStrictMode { on: false });
+        }
         steps.extend(self.links_to_add.iter().cloned().map(Step::CreateLink));
         for (name, changes) in &self.links_to_modify {
             steps.push(Step::ModifyLink {
@@ -573,6 +586,9 @@ impl super::ConfigDiff {
         steps.extend(self.vlans_held_down.iter().map(|vlan| Step::HoldVlanDown {
             vlan: vlan.clone(),
         }));
+        if self.vrf_strict_mode == Some(true) {
+            steps.push(Step::SetVrfStrictMode { on: true });
+        }
         // An address deleted to be added again is deleted right before the
         // add: an IPv6 address re-prefixed, which the kernel knows by the
         // address alone (#461), and an IPv4 address whose label or flags

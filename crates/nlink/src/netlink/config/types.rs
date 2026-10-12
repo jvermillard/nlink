@@ -54,6 +54,10 @@ pub struct NetworkConfig {
     /// [`owner`](Self::owner).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) owner: Option<String>,
+    /// The namespace's `net.vrf.strict_mode` (#680): `None` leaves it as it
+    /// is. See [`vrf_strict_mode`](Self::vrf_strict_mode).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) vrf_strict_mode: Option<bool>,
     /// Mistakes a builder made that it could not return, reported by
     /// [`validate`](Self::validate) — which `diff` and `apply` run — rather
     /// than turned into a silently different config (#476).
@@ -698,6 +702,23 @@ impl NetworkConfig {
                 errors.push(ValidationErrorInfo::new(format!("tc.{}", t.dev), problem));
             }
         }
+        // With strict mode on, a table is one VRF's (#680).
+        if self.vrf_strict_mode == Some(true) {
+            let mut by_table: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+            for l in &self.links {
+                if let DeclaredLinkType::Vrf { table } = l.link_type
+                    && let Some(other) = by_table.insert(table, &l.name)
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("links.{}", l.name),
+                        format!(
+                            "table {table} is also VRF {other}'s; with vrf_strict_mode on, a \
+                             table belongs to one VRF"
+                        ),
+                    ));
+                }
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -855,6 +876,20 @@ impl NetworkConfig {
     /// its own.
     pub fn owner(mut self, owner: impl Into<String>) -> Self {
         self.owner = Some(owner.into());
+        self
+    }
+
+    /// Set the namespace's VRF strict mode (#680): `net.vrf.strict_mode`,
+    /// with which a routing table belongs to one VRF at most, and a VRF
+    /// cannot be created on a table another one has.
+    ///
+    /// It is a sysctl of the namespace, not of a link, so a config sets it
+    /// for the namespace it is applied to. The apply turns it off before it
+    /// creates links, and on after, and the kernel refuses to turn it on
+    /// while two VRFs share a table: validation refuses a config that
+    /// turns it on and declares two that do.
+    pub fn vrf_strict_mode(mut self, on: bool) -> Self {
+        self.vrf_strict_mode = Some(on);
         self
     }
 
@@ -6721,6 +6756,28 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("veth_peer_mtu"), "{err}");
+    }
+
+    /// #680: VRF strict mode round-trips, and with it on two VRFs on one
+    /// table are refused, as the kernel would.
+    #[test]
+    fn vrf_strict_mode_roundtrips_and_keeps_a_table_to_one_vrf() {
+        let cfg = NetworkConfig::new()
+            .vrf_strict_mode(true)
+            .link("red", |l| l.vrf(10))
+            .link("blue", |l| l.vrf(20));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        assert!(cfg.to_json_string().unwrap().contains(r#""vrf-strict-mode":true"#));
+        let shared = |strict: bool| {
+            NetworkConfig::new()
+                .vrf_strict_mode(strict)
+                .link("red", |l| l.vrf(10))
+                .link("green", |l| l.vrf(10))
+        };
+        shared(false).validate().unwrap();
+        let err = shared(true).validate().unwrap_err().to_string();
+        assert!(err.contains("table 10 is also VRF red's"), "{err}");
     }
 
     #[test]
