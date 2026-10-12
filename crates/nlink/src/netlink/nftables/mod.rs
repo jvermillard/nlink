@@ -167,6 +167,8 @@ pub const NFTA_TABLE_NAME: u16 = 1;
 pub const NFTA_TABLE_FLAGS: u16 = 2;
 pub const NFTA_TABLE_USE: u16 = 3;
 pub const NFTA_TABLE_HANDLE: u16 = 4;
+/// `NFTA_TABLE_USERDATA` — libnftnl TLVs: the table's comment.
+pub const NFTA_TABLE_USERDATA: u16 = 6;
 
 /// `NFT_TABLE_F_DORMANT` — table is dormant (chains don't fire).
 pub const NFT_TABLE_F_DORMANT: u32 = 0x1;
@@ -190,6 +192,8 @@ pub const NFTA_CHAIN_HOOK: u16 = 4;
 pub const NFTA_CHAIN_POLICY: u16 = 5;
 pub const NFTA_CHAIN_TYPE: u16 = 7;
 pub const NFTA_CHAIN_FLAGS: u16 = 10;
+/// `NFTA_CHAIN_USERDATA` — libnftnl TLVs: the chain's comment.
+pub const NFTA_CHAIN_USERDATA: u16 = 12;
 
 // Chain hook nested attributes
 pub const NFTA_HOOK_HOOKNUM: u16 = 1;
@@ -284,6 +288,8 @@ pub const NFTA_OBJ_TYPE: u16 = 3;
 pub const NFTA_OBJ_DATA: u16 = 4;
 pub const NFTA_OBJ_USE: u16 = 5;
 pub const NFTA_OBJ_HANDLE: u16 = 6;
+/// `NFTA_OBJ_USERDATA` — libnftnl TLVs: the object's comment.
+pub const NFTA_OBJ_USERDATA: u16 = 8;
 
 // objref expression attributes.
 pub const NFTA_OBJREF_IMM_TYPE: u16 = 1;
@@ -446,6 +452,8 @@ pub const NFTA_MASQ_REG_PROTO_MAX: u16 = 3;
 // Set Attributes
 // =============================================================================
 
+/// `NFTA_SET_USERDATA` — libnftnl TLVs: key byte order, …, the set's comment.
+pub const NFTA_SET_USERDATA: u16 = 13;
 pub const NFTA_SET_TABLE: u16 = 1;
 pub const NFTA_SET_NAME: u16 = 2;
 pub const NFTA_SET_FLAGS: u16 = 3;
@@ -494,6 +502,8 @@ pub const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
 pub const NFTA_SET_ELEM_KEY: u16 = 1;
 pub const NFTA_SET_ELEM_DATA: u16 = 2;
 pub const NFTA_SET_ELEM_FLAGS: u16 = 3;
+/// `NFTA_SET_ELEM_USERDATA` — libnftnl TLVs: the element's comment.
+pub const NFTA_SET_ELEM_USERDATA: u16 = 6;
 /// `NFTA_SET_ELEM_TIMEOUT` — the element's own timeout in milliseconds
 /// (u64). Dumped only when it differs from the set's default.
 pub const NFTA_SET_ELEM_TIMEOUT: u16 = 4;

@@ -72,6 +72,7 @@ pub struct Object {
     pub(crate) name: String,
     pub(crate) family: Family,
     pub(crate) config: ObjectConfig,
+    pub(crate) comment: Option<String>,
 }
 
 impl Object {
@@ -82,7 +83,15 @@ impl Object {
             name: name.to_string(),
             family: Family::Inet,
             config,
+            comment: None,
         }
+    }
+
+    /// Give the object a comment, which `nft list` shows (#528). Written
+    /// when the object is created. Adding one longer than 127 bytes fails.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
+        self
     }
 
     /// A named counter (`counter name`).
@@ -138,6 +147,8 @@ pub struct ObjectInfo {
     pub use_count: u32,
     /// Its configuration and live state.
     pub state: ObjectState,
+    /// Its comment (#528).
+    pub comment: Option<String>,
 }
 
 impl ObjectInfo {
@@ -226,8 +237,12 @@ pub(crate) fn parse_object(data: &[u8], family: Family) -> Option<ObjectInfo> {
     let mut payload: &[u8] = &[];
     let mut handle = 0;
     let mut use_count = 0;
+    let mut comment = None;
     for (attr, value) in AttrIter::new(data) {
         match attr & 0x7FFF {
+            NFTA_OBJ_USERDATA => {
+                comment = super::userdata::comment_of(value, super::userdata::NFTNL_UDATA_COMMENT);
+            }
             NFTA_OBJ_TABLE => table = get::string(value).ok().map(str::to_string),
             NFTA_OBJ_NAME => name = get::string(value).ok().map(str::to_string),
             NFTA_OBJ_TYPE => object_type = get::u32_be(value).ok(),
@@ -249,6 +264,7 @@ pub(crate) fn parse_object(data: &[u8], family: Family) -> Option<ObjectInfo> {
         handle,
         use_count,
         state,
+        comment,
     })
 }
 

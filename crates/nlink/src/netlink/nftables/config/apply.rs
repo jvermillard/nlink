@@ -90,6 +90,9 @@ fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<
     if let Some(dev) = declared.device() {
         chain = chain.device(dev);
     }
+    if let Some(comment) = declared.comment() {
+        chain = chain.comment(comment);
+    }
     Ok(chain)
 }
 
@@ -259,11 +262,7 @@ impl NftablesDiff {
         //    Transaction::add_table_with_flags so they stay
         //    inside the atomic batch.
         for table in &self.tables_to_add {
-            if table.flags() != 0 {
-                tx = tx.add_table_with_flags(table.name(), table.family(), table.flags());
-            } else {
-                tx = tx.add_table(table.name(), table.family());
-            }
+            tx = tx.add_table_with_comment(table.name(), table.family(), table.flags(), table.comment());
         }
 
         // 4b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,

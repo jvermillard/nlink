@@ -2205,6 +2205,7 @@ mod tests {
             handle: 1,
             device: None,
             devices: Vec::new(),
+            comment: None,
         };
         fn base(c: super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder {
             c.hook(Hook::Input)
@@ -2650,6 +2651,7 @@ mod tests {
             data_type: None,
             data_len: None,
             object_type: None,
+            comment: None,
         }
     }
 
@@ -2665,6 +2667,7 @@ mod tests {
             element_mode: None,
             data_type: None,
             elements: Vec::new(),
+            comment: None,
         }
     }
 

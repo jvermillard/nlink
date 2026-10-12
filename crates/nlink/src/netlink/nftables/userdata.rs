@@ -148,9 +148,70 @@ pub(crate) fn parse_comment(userdata: &[u8]) -> Option<String> {
     None
 }
 
+/// libnftnl's comment TLV type on a table, chain, object or set element
+/// (`NFTNL_UDATA_{TABLE,CHAIN,OBJ,SET_ELEM}_COMMENT`).
+pub(crate) const NFTNL_UDATA_COMMENT: u8 = 0;
+/// `NFTNL_UDATA_SET_COMMENT`: a set's comment comes after six other set
+/// TLV types (key/data byte order, merge, typeof ×2, expr, interval).
+pub(crate) const NFTNL_UDATA_SET_COMMENT: u8 = 7;
+
+/// A comment as the libnftnl TLV of type `kind` — `[kind][len][text\0]` —
+/// that `nft list` shows as `comment "..."` (#528). An error for one with
+/// a NUL in it or longer than 127 bytes, which libnftnl would refuse.
+pub(crate) fn encode_comment(kind: u8, comment: &str) -> crate::netlink::error::Result<Vec<u8>> {
+    if comment.as_bytes().contains(&0) {
+        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+            "nftables comment {comment:?} has a NUL in it"
+        )));
+    }
+    let len = comment.len() + 1;
+    if len > NFTNL_UDATA_COMMENT_MAXLEN {
+        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+            "nftables comment is {} bytes; at most {} fit",
+            comment.len(),
+            NFTNL_UDATA_COMMENT_MAXLEN - 1
+        )));
+    }
+    let mut out = vec![kind, len as u8];
+    out.extend_from_slice(comment.as_bytes());
+    out.push(0);
+    Ok(out)
+}
+
+/// The comment TLV of type `kind` in `userdata`, its NUL removed.
+pub(crate) fn comment_of(userdata: &[u8], kind: u8) -> Option<String> {
+    let mut cursor = userdata;
+    while cursor.len() >= 2 {
+        let (ty, len) = (cursor[0], cursor[1] as usize);
+        let payload = cursor.get(2..2 + len)?;
+        if ty == kind {
+            return std::str::from_utf8(payload)
+                .ok()
+                .map(|s| s.trim_end_matches('\0').to_string());
+        }
+        cursor = &cursor[2 + len..];
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_comments_round_trip_and_refuse_what_libnftnl_would() {
+        let tlv = encode_comment(NFTNL_UDATA_SET_COMMENT, "blocked hosts").unwrap();
+        assert_eq!(&tlv[..2], [7, 14]);
+        assert_eq!(comment_of(&tlv, NFTNL_UDATA_SET_COMMENT).as_deref(), Some("blocked hosts"));
+        assert_eq!(comment_of(&tlv, NFTNL_UDATA_COMMENT), None, "another type");
+        // Behind another TLV, as a set's key byte order would be.
+        let mut both = vec![0, 4, 1, 0, 0, 0];
+        both.extend(&tlv);
+        assert_eq!(comment_of(&both, NFTNL_UDATA_SET_COMMENT).as_deref(), Some("blocked hosts"));
+        assert!(encode_comment(0, &"x".repeat(127)).is_ok());
+        assert!(encode_comment(0, &"x".repeat(128)).is_err());
+        assert!(encode_comment(0, "a\0b").is_err());
+    }
 
     #[test]
     fn encode_then_parse_round_trips() {

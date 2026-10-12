@@ -27,6 +27,8 @@ pub(crate) struct WireElement {
     pub(crate) timeout: Option<std::time::Duration>,
     /// Map data (on a range's start only).
     pub(crate) data: Option<super::types::SetElementData>,
+    /// The element's comment (on a range's start only).
+    pub(crate) comment: Option<String>,
 }
 
 /// `key + 1`, big-endian; `None` when `key` is the maximum value.
@@ -77,6 +79,7 @@ pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
         flags: 0,
         timeout: None,
         data: None,
+        comment: None,
     }];
     if let Some(end) = increment(&range.1) {
         out.push(WireElement {
@@ -85,6 +88,7 @@ pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
             flags: NFT_SET_ELEM_INTERVAL_END,
             timeout: None,
             data: None,
+            comment: None,
         });
     }
     out
@@ -284,6 +288,7 @@ mod tests {
                     flags: 0,
                     timeout: None,
                     data: None,
+                    comment: None,
                 },
                 WireElement {
                     key: 2001u16.to_be_bytes().to_vec(),
@@ -291,6 +296,7 @@ mod tests {
                     flags: NFT_SET_ELEM_INTERVAL_END,
                     timeout: None,
                     data: None,
+                    comment: None,
                 },
             ]
         );
