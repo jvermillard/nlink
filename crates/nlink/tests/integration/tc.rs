@@ -3093,8 +3093,14 @@ impl BpfPin {
         // SAFETY: the kernel just returned this fd; the pin keeps the
         // program once it closes.
         let prog = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        // Unique per run, not just per process: two CI containers running
+        // the same steps get the same PID, and bpffs may be shared between
+        // them, so one run's `remove_file` and `Drop` took the other's pin.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
         let path = std::path::PathBuf::from(format!(
-            "/sys/fs/bpf/nlink-test-{}-{tag}",
+            "/sys/fs/bpf/nlink-test-{}-{nanos}-{tag}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
