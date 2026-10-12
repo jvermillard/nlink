@@ -1533,6 +1533,39 @@ All notable changes to this project will be documented in this file.
     - Unit tests cover the backoff sequence and giving up after
       `max_attempts`.
 
+- **Gap deltas: what a resync found gone (#523, fourth part).**
+  - **The gap.** A resync replays the state as it is. That says what
+    exists, not what went away: an object deleted while the socket
+    overflowed, or while a restarting stream was down, is simply absent
+    from the snapshot. Nothing reported its removal.
+  - **`ResyncStreamExt::with_gap_deltas(key)`.**
+    - The adapter remembers every object the stream reports, keyed by
+      `key`.
+    - When a snapshot ends without one, it yields that object's removal
+      as a `Resynced(Del*)`, in key order, just before the closing
+      `ResyncEnd`.
+    - So a consumer that applies events as they come stays equal to the
+      kernel without clearing anything at `ResyncStart`.
+  - **New types.**
+    - **`GapDelta`** says how an event's removal is reported. It is
+      implemented for `NetworkEvent` and `NftablesEvent`.
+    - **`ObjectKey`** is what an event is about, as a kind and an
+      identity.
+    - **`NetworkEvent::object_key`** keys links by ifindex, addresses by
+      device and prefix, and routes by table, prefixes, TOS and metric.
+      It covers the rest too, but not actions.
+    - **`NftablesEvent::object_key`** keys tables, chains, sets,
+      flowtables and objects by family, table and name, and rules by
+      handle. It does not cover set elements or generations.
+  - **Tests.**
+    - Two root tests overflow a subscriber and then delete what the
+      stream had reported: a link through rtnetlink, a table through
+      nftables. The rtnetlink test also checks that a mirror that never
+      clears ends equal to a fresh dump.
+    - Both tests fail when the adapter yields no removals.
+    - Unit tests cover the order of the output and a snapshot cut short
+      by an error.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
