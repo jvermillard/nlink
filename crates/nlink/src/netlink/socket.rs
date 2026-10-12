@@ -2,7 +2,10 @@
 
 use std::{
     fs::File,
-    os::unix::io::{AsRawFd, RawFd},
+    os::{
+        fd::{AsFd, BorrowedFd},
+        unix::io::{AsRawFd, RawFd},
+    },
     path::Path,
     sync::atomic::{AtomicU32, Ordering},
     task::{Context, Poll},
@@ -138,18 +141,18 @@ impl NetlinkSocket {
     /// ```no_run
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use std::fs::File;
-    /// use std::os::fd::AsRawFd;
     ///
     /// use nlink::netlink::{NetlinkSocket, Protocol};
     ///
     /// let ns_file = File::open("/var/run/netns/myns")?;
-    /// let socket = NetlinkSocket::new_in_namespace(Protocol::Route, ns_file.as_raw_fd())?;
+    /// let socket = NetlinkSocket::new_in_namespace(Protocol::Route, &ns_file)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
+    pub fn new_in_namespace(protocol: Protocol, ns_fd: impl AsFd) -> Result<Self> {
         // `ns_fd` stays valid for the worker's lifetime: fds are process-wide
-        // and the caller's handle outlives the synchronous join() below.
+        // and the caller's borrow outlives the synchronous join() below.
+        let ns_fd = ns_fd.as_fd().as_raw_fd();
         // `thread::spawn` panics when no thread can be made (`pids.max`,
         // `RLIMIT_NPROC`); this returns `Result` (#510).
         let worker = std::thread::Builder::new().name("nlink-netns".into());
@@ -189,12 +192,11 @@ impl NetlinkSocket {
         }
     }
 
-    /// [`new_in_namespace`](Self::new_in_namespace) taking an I/O-safe
-    /// borrowed fd — a [`NamespaceFd`](super::namespace::NamespaceFd), a
-    /// `File`, anything `AsFd` — so the fd provably outlives the call
-    /// (#186). The `RawFd` form stays for callers that already hold one.
-    pub fn new_in_namespace_fd(protocol: Protocol, ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
-        Self::new_in_namespace(protocol, ns_fd.as_fd().as_raw_fd())
+    /// [`new_in_namespace`](Self::new_in_namespace), which takes `AsFd`
+    /// itself now (#532).
+    #[deprecated(since = "0.32.0", note = "`new_in_namespace` takes `impl AsFd` now (#532)")]
+    pub fn new_in_namespace_fd(protocol: Protocol, ns_fd: impl AsFd) -> Result<Self> {
+        Self::new_in_namespace(protocol, ns_fd)
     }
 
     /// Create a netlink socket that operates in a network namespace specified by path.
@@ -227,7 +229,7 @@ impl NetlinkSocket {
         // errors keep their errno — never a stringly InvalidMessage.
         let ns_file = File::open(ns_path.as_ref())
             .map_err(|e| super::namespace::namespace_open_error(ns_path.as_ref(), e))?;
-        let mut socket = Self::new_in_namespace(protocol, ns_file.as_raw_fd())?;
+        let mut socket = Self::new_in_namespace(protocol, &ns_file)?;
         socket.namespace_marker = super::namespace::NamespaceMarker::of(ns_path.as_ref(), &ns_file);
         Ok(socket)
     }
@@ -809,12 +811,13 @@ impl NetlinkSocket {
     /// attach is done via the `OVPN_A_PEER_SOCKET` +
     /// `OVPN_A_PEER_SOCKET_NETNSID` attributes instead — see
     /// [`Connection::<Ovpn>::attach_socket`](crate::netlink::Connection).
-    pub async fn send_with_fds(&self, msg: &[u8], fds: &[RawFd]) -> Result<()> {
+    pub async fn send_with_fds(&self, msg: &[u8], fds: &[BorrowedFd<'_>]) -> Result<()> {
         if fds.is_empty() {
             return self.send(msg).await;
         }
 
-        let (mut cmsg_buf, cmsg_space) = build_scm_rights_control(fds);
+        let fds: Vec<RawFd> = fds.iter().map(|fd| fd.as_raw_fd()).collect();
+        let (mut cmsg_buf, cmsg_space) = build_scm_rights_control(&fds);
 
         let mut would_block_count: u32 = 0;
         loop {
@@ -1204,6 +1207,12 @@ pub(crate) const RECV_MAX_CAPACITY: usize = 1024 * 1024;
 impl AsRawFd for NetlinkSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.get_ref().as_raw_fd()
+    }
+}
+
+impl AsFd for NetlinkSocket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.get_ref().as_fd()
     }
 }
 

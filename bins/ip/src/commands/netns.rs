@@ -11,8 +11,6 @@ use std::{
     process::Command,
 };
 
-use std::os::fd::AsRawFd;
-
 use clap::{Args, Subcommand};
 use nlink::{
     netlink::{
@@ -166,7 +164,7 @@ async fn list_namespaces(format: OutputFormat, opts: &OutputOptions) -> Result<(
 async fn get_namespace_id(conn: &Connection<Route>, name: &str) -> Option<i32> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
     let file = fs::File::open(&path).ok()?;
-    match conn.get_nsid(file.as_raw_fd()).await {
+    match conn.get_nsid(&file).await {
         // The kernel reports an unassigned id as u32::MAX (-1).
         Ok(id) if id != u32::MAX => Some(id as i32),
         _ => None,
@@ -484,11 +482,11 @@ async fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
     let file = fs::File::open(&path).map_err(nlink::netlink::Error::Io)?;
 
     let conn = Connection::<Route>::new()?;
-    conn.set_nsid(file.as_raw_fd(), id).await?;
+    conn.set_nsid(&file, id).await?;
 
     if id < 0 {
         // Read back the kernel-assigned id so the user sees what they got.
-        match conn.get_nsid(file.as_raw_fd()).await {
+        match conn.get_nsid(&file).await {
             Ok(assigned) if assigned != u32::MAX => {
                 println!("Assigned namespace ID {assigned} to '{name}'");
             }

@@ -694,10 +694,10 @@ pub struct VethLink {
     mtu: Option<u32>,
     address: Option<[u8; 6]>,
     peer_address: Option<[u8; 6]>,
-    peer_netns_fd: Option<i32>,
+    /// The peer's namespace, held until the link is created.
+    peer_netns_fd: Option<std::os::fd::OwnedFd>,
     peer_netns_pid: Option<u32>,
-    /// Owned namespace FD kept alive for the duration of the builder.
-    _peer_netns_owned: Option<super::namespace::NamespaceFd>,
+    error: Option<String>,
 }
 
 impl VethLink {
@@ -716,7 +716,7 @@ impl VethLink {
             peer_address: None,
             peer_netns_fd: None,
             peer_netns_pid: None,
-            _peer_netns_owned: None,
+            error: None,
         }
     }
 
@@ -738,9 +738,14 @@ impl VethLink {
         self
     }
 
-    /// Move the peer interface to a different network namespace by fd.
-    pub fn peer_netns_fd(mut self, fd: i32) -> Self {
-        self.peer_netns_fd = Some(fd);
+    /// Move the peer interface to the network namespace `fd` refers to: a
+    /// [`Netns`](super::namespace::Netns), a `File`, anything `AsFd`. The
+    /// fd is duplicated, so the caller's can be closed.
+    pub fn peer_netns_fd(mut self, fd: impl std::os::fd::AsFd) -> Self {
+        match fd.as_fd().try_clone_to_owned() {
+            Ok(fd) => self.peer_netns_fd = Some(fd),
+            Err(e) => self.error = Some(format!("duplicating the peer namespace fd: {e}")),
+        }
         self.peer_netns_pid = None;
         self
     }
@@ -768,12 +773,9 @@ impl VethLink {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn peer_netns(mut self, ns_name: &str) -> Result<Self> {
+    pub fn peer_netns(self, ns_name: &str) -> Result<Self> {
         let ns_fd = super::namespace::open(ns_name)?;
-        self.peer_netns_fd = Some(ns_fd.as_raw_fd());
-        self.peer_netns_pid = None;
-        self._peer_netns_owned = Some(ns_fd);
-        Ok(self)
+        Ok(self.peer_netns_fd(ns_fd))
     }
 }
 
@@ -793,6 +795,10 @@ impl LinkConfig for VethLink {
 
     fn peer_name(&self) -> Option<&str> {
         Some(&self.peer_name)
+    }
+
+    fn creation_error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
@@ -836,8 +842,9 @@ impl LinkConfig for VethLink {
         }
 
         // Peer namespace
-        if let Some(fd) = self.peer_netns_fd {
-            builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd as u32);
+        if let Some(fd) = &self.peer_netns_fd {
+            use std::os::fd::AsRawFd;
+            builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd.as_raw_fd() as u32);
         } else if let Some(pid) = self.peer_netns_pid {
             builder.append_attr_u32(IflaAttr::NetNsPid as u16, pid);
         }
@@ -5854,7 +5861,7 @@ impl Connection<Route> {
         // A link created in another namespace is looked up — its master,
         // its alias, a pinned MTU — there (#517).
         let elsewhere = match config.netns_fd() {
-            Some(fd) => Some(Connection::<Route>::new_in_namespace_fd(fd)?),
+            Some(fd) => Some(Connection::<Route>::new_in_namespace(fd)?),
             None => None,
         };
         let home = elsewhere.as_ref().unwrap_or(self);
@@ -6273,7 +6280,11 @@ impl Connection<Route> {
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns_fd"))]
-    pub async fn set_link_netns_fd(&self, iface: impl Into<InterfaceRef>, fd: i32) -> Result<()> {
+    pub async fn set_link_netns_fd(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        fd: impl std::os::fd::AsFd,
+    ) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_netns_fd_by_index(ifindex, fd).await
     }
@@ -6284,14 +6295,20 @@ impl Connection<Route> {
         skip_all,
         fields(method = "set_link_netns_fd_by_index")
     )]
-    pub async fn set_link_netns_fd_by_index(&self, ifindex: u32, fd: i32) -> Result<()> {
+    pub async fn set_link_netns_fd_by_index(
+        &self,
+        ifindex: u32,
+        fd: impl std::os::fd::AsFd,
+    ) -> Result<()> {
+        use std::os::fd::AsRawFd;
+
         use super::connection::ack_request;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
-        builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd as u32);
+        builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd.as_fd().as_raw_fd() as u32);
 
         self.send_ack(builder)
             .await
@@ -6320,7 +6337,7 @@ impl Connection<Route> {
     ) -> Result<()> {
         let ns_fd = super::namespace::open(ns_name)?;
         let ifindex = self.resolve_interface(&iface.into()).await?;
-        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd())
+        self.set_link_netns_fd_by_index(ifindex, &ns_fd)
             .await
     }
 
@@ -6330,7 +6347,7 @@ impl Connection<Route> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns_by_index"))]
     pub async fn set_link_netns_by_index(&self, ifindex: u32, ns_name: &str) -> Result<()> {
         let ns_fd = super::namespace::open(ns_name)?;
-        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd())
+        self.set_link_netns_fd_by_index(ifindex, &ns_fd)
             .await
     }
 }
@@ -6338,6 +6355,24 @@ impl Connection<Route> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #532: the peer's namespace fd is duplicated, so the caller's can
+    /// close before the link is created.
+    #[test]
+    fn a_veth_peer_namespace_fd_is_held_by_the_builder() {
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let (want, caller) = (file.metadata().unwrap().ino(), file.as_raw_fd());
+        let veth = VethLink::new("a", "b").peer_netns_fd(&file);
+        drop(file);
+        let held = veth.peer_netns_fd.as_ref().unwrap();
+        assert_ne!(held.as_raw_fd(), caller);
+        let held = std::fs::File::from(held.try_clone().unwrap());
+        assert_eq!(held.metadata().unwrap().ino(), want);
+        assert_eq!(veth.creation_error(), None);
+        // A pid replaces it.
+        assert!(veth.peer_netns_pid(1).peer_netns_fd.is_none());
+    }
 
     #[test]
     fn test_bond_mode_try_from() {

@@ -1133,7 +1133,6 @@ impl Snapshot {
         refs: impl IntoIterator<Item = crate::netlink::namespace::NetnsRef>,
         required: bool,
     ) -> Result<()> {
-        use std::os::fd::{AsFd, AsRawFd};
         for r in refs {
             if r.is_default() || self.netns_ids.contains_key(&r) {
                 continue;
@@ -1144,7 +1143,7 @@ impl Snapshot {
                 Err(e) => return Err(e),
             };
             // NETNSA_NSID_NOT_ASSIGNED (-1): no id, so no peer of ours there.
-            let id = conn.get_nsid(netns.as_fd().as_raw_fd()).await?;
+            let id = conn.get_nsid(&netns).await?;
             self.netns_ids.insert(r, (id != u32::MAX).then_some(id));
         }
         Ok(())

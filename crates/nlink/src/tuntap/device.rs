@@ -489,6 +489,12 @@ impl AsRawFd for TunTap {
     }
 }
 
+impl std::os::fd::AsFd for TunTap {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
+
 impl IntoRawFd for TunTap {
     fn into_raw_fd(self) -> RawFd {
         self.file.into_raw_fd()

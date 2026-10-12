@@ -4,7 +4,7 @@
 use std::{
     ffi::CString,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::ffi::OsStrExt,
     },
     path::Path,
@@ -25,20 +25,33 @@ struct ObjAttr {
     _pad: u32,
 }
 
-/// A BPF program fd: a number the caller keeps open, or one nlink opened
-/// from a pin, closed with the last clone.
+/// A BPF program fd: a number the caller keeps open (`fd <n>` in the
+/// tc(8)-syntax parsers), or one nlink holds — a duplicate of the
+/// caller's, or opened from a pin — closed with the last clone.
 #[derive(Debug, Clone)]
 pub(crate) enum ProgFd {
     Raw(RawFd),
     Owned(Arc<OwnedFd>),
+    /// Duplicating the caller's fd failed; reported when the request is
+    /// built.
+    Failed(Arc<str>),
 }
 
 impl ProgFd {
+    /// A duplicate of `fd`, so the caller's can be closed (#532).
+    pub(crate) fn dup(fd: impl AsFd) -> Self {
+        match fd.as_fd().try_clone_to_owned() {
+            Ok(fd) => Self::Owned(Arc::new(fd)),
+            Err(e) => Self::Failed(format!("bpf: duplicating the program fd: {e}").into()),
+        }
+    }
+
     /// The fd number the kernel is sent.
-    pub(crate) fn raw(&self) -> RawFd {
+    pub(crate) fn raw(&self) -> crate::Result<RawFd> {
         match self {
-            Self::Raw(fd) => *fd,
-            Self::Owned(fd) => fd.as_raw_fd(),
+            Self::Raw(fd) => Ok(*fd),
+            Self::Owned(fd) => Ok(fd.as_raw_fd()),
+            Self::Failed(e) => Err(crate::Error::InvalidMessage(e.to_string())),
         }
     }
 
@@ -80,5 +93,21 @@ mod tests {
     #[test]
     fn the_obj_attr_is_the_kernels_size_with_no_hidden_padding() {
         assert_eq!(std::mem::size_of::<ObjAttr>(), 24);
+    }
+
+    /// #532: a program fd given as `AsFd` is duplicated, so the caller's
+    /// can close before the request is sent.
+    #[test]
+    fn a_duplicate_outlives_the_callers_fd() {
+        use std::os::unix::fs::MetadataExt;
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let want = file.metadata().unwrap().ino();
+        let caller = file.as_raw_fd();
+        let fd = ProgFd::dup(&file);
+        drop(file);
+        let ProgFd::Owned(held) = &fd else { panic!("{fd:?}") };
+        assert_ne!(fd.raw().unwrap(), caller);
+        let held = std::fs::File::from(held.try_clone().unwrap());
+        assert_eq!(held.metadata().unwrap().ino(), want);
     }
 }

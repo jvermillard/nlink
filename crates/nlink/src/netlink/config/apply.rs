@@ -1444,8 +1444,7 @@ async fn create_link(
     };
     let config = match (&link.link_type, &peer_netns) {
         (DeclaredLinkType::Veth { peer, .. }, Some(netns)) => {
-            use std::os::fd::{AsFd, AsRawFd};
-            let mut c = VethLink::new(&link.name, peer).peer_netns_fd(netns.as_fd().as_raw_fd());
+            let mut c = VethLink::new(&link.name, peer).peer_netns_fd(netns);
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
             }

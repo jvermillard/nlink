@@ -60,7 +60,6 @@
 
 use std::{
     future::Future,
-    os::fd::{AsFd, AsRawFd},
     pin::Pin,
     process::{Child, Command, Output},
     sync::atomic::{AtomicU32, Ordering},
@@ -250,7 +249,7 @@ impl LabNamespace {
         remote_name: &str,
     ) -> Result<()> {
         let veth = VethLink::new(local_name, remote_name)
-            .peer_netns_fd(peer_ns.netns.as_fd().as_raw_fd());
+            .peer_netns_fd(&peer_ns.netns);
         self.route(move |conn| Box::pin(conn.add_link(veth)))
     }
 

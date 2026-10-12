@@ -239,18 +239,16 @@ async fn a_watch_on_a_named_namespace_ends_when_it_is_deleted() -> nlink::Result
 /// (EINVAL).
 #[tokio::test]
 async fn nsids_are_set_and_read() -> nlink::Result<()> {
-    use std::os::fd::{AsFd, AsRawFd};
     nlink::require_root!();
 
     let ns = TestNamespace::new("netns-nsid")?;
     let peer = TestNamespace::new("netns-nsid-peer")?;
     let conn = ns.connection()?;
     let netns = Netns::open(peer.name())?;
-    let fd = netns.as_fd().as_raw_fd();
     // NETNSA_NSID_NOT_ASSIGNED, -1: no id yet.
-    assert_eq!(conn.get_nsid(fd).await?, u32::MAX);
-    conn.set_nsid(fd, 7).await?;
-    assert_eq!(conn.get_nsid(fd).await?, 7);
+    assert_eq!(conn.get_nsid(&netns).await?, u32::MAX);
+    conn.set_nsid(&netns, 7).await?;
+    assert_eq!(conn.get_nsid(&netns).await?, 7);
     let listed = ns.exec("ip", &["netns", "list-id"])?;
     assert!(listed.contains("nsid 7 "), "{listed}");
 
