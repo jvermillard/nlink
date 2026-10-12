@@ -1131,6 +1131,238 @@ impl NatExpr {
     }
 }
 
+/// Which NAT statement a [`NatStatement`] or [`NatRegs`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NatKind {
+    /// `snat to …`: rewrite the source.
+    Snat,
+    /// `dnat to …`: rewrite the destination.
+    Dnat,
+    /// `masquerade`: source NAT to the outgoing interface's address.
+    Masquerade,
+    /// `redirect`: destination NAT to the local machine.
+    Redirect,
+}
+
+/// A NAT statement at register level (#528): which registers hold the
+/// address and port ranges. [`Rule::nat`] loads them and builds one; build
+/// it yourself only after your own `Immediate` loads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NatRegs {
+    /// The statement.
+    pub kind: NatKind,
+    /// The family a snat or dnat rewrites, `Ip` or `Ip6`; unused by the
+    /// others.
+    pub family: Family,
+    /// The registers holding the first and last address.
+    pub addr: Option<(Register, Register)>,
+    /// The registers holding the first and last port.
+    pub proto: Option<(Register, Register)>,
+    /// Flags beyond the ones the ranges imply.
+    pub flags: super::expr::NatFlags,
+}
+
+/// A NAT statement, as `nft` writes them (#528) — `snat to 10.0.0.1-10.0.0.9:
+/// 40000-40010 fully-random`, `dnat ip to :8080`, `masquerade to :1024-2048
+/// random`, `redirect to :3128` — for [`Rule::nat`].
+///
+/// ```
+/// use std::net::Ipv4Addr;
+/// use nlink::netlink::nftables::{Family, NatStatement, Rule};
+///
+/// let snat = Rule::new("nat", "post").nat(
+///     NatStatement::snat(Ipv4Addr::new(10, 0, 0, 1))
+///         .to(Ipv4Addr::new(10, 0, 0, 9))
+///         .ports(40000, 40010)
+///         .fully_random(),
+/// );
+/// let dnat_port = Rule::new("nat", "pre").nat(NatStatement::dnat_to_port(Family::Ip, 8080));
+/// let masq = Rule::new("nat", "post").nat(NatStatement::masquerade().ports(1024, 2048).random());
+/// ```
+///
+/// A combination the kernel would refuse — an address on a masquerade, a
+/// range whose ends differ in family or run backwards, a family other
+/// than `Ip`/`Ip6` — makes adding the rule fail, naming it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NatStatement {
+    /// The statement.
+    pub kind: NatKind,
+    /// The first and last address, for a snat or dnat.
+    pub addr: Option<(std::net::IpAddr, std::net::IpAddr)>,
+    /// The first and last port.
+    pub ports: Option<(u16, u16)>,
+    /// The family of a snat or dnat with no address.
+    pub family: Option<Family>,
+    /// `random`, `fully-random`, `persistent`, `netmap`.
+    pub flags: super::expr::NatFlags,
+    /// [`to`](Self::to) was called with no first address.
+    range_without_start: bool,
+}
+
+impl NatStatement {
+    fn new(kind: NatKind) -> Self {
+        Self {
+            kind,
+            addr: None,
+            ports: None,
+            family: None,
+            flags: super::expr::NatFlags::empty(),
+            range_without_start: false,
+        }
+    }
+
+    /// `snat to <addr>`.
+    pub fn snat(addr: impl Into<std::net::IpAddr>) -> Self {
+        let addr = addr.into();
+        Self {
+            addr: Some((addr, addr)),
+            ..Self::new(NatKind::Snat)
+        }
+    }
+
+    /// `dnat to <addr>`.
+    pub fn dnat(addr: impl Into<std::net::IpAddr>) -> Self {
+        let addr = addr.into();
+        Self {
+            addr: Some((addr, addr)),
+            ..Self::new(NatKind::Dnat)
+        }
+    }
+
+    /// `snat <family> to :<port>`: the source port only.
+    pub fn snat_to_port(family: Family, port: u16) -> Self {
+        Self {
+            family: Some(family),
+            ports: Some((port, port)),
+            ..Self::new(NatKind::Snat)
+        }
+    }
+
+    /// `dnat <family> to :<port>`: the destination port only.
+    pub fn dnat_to_port(family: Family, port: u16) -> Self {
+        Self {
+            family: Some(family),
+            ports: Some((port, port)),
+            ..Self::new(NatKind::Dnat)
+        }
+    }
+
+    /// `masquerade`.
+    pub fn masquerade() -> Self {
+        Self::new(NatKind::Masquerade)
+    }
+
+    /// `redirect`, to the original port unless [`port`](Self::port) says.
+    pub fn redirect() -> Self {
+        Self::new(NatKind::Redirect)
+    }
+
+    /// Make the address a range, from the first one to `last`. On a
+    /// statement with no address, adding the rule fails.
+    pub fn to(mut self, last: impl Into<std::net::IpAddr>) -> Self {
+        let last = last.into();
+        match self.addr {
+            Some((first, _)) => self.addr = Some((first, last)),
+            None => self.range_without_start = true,
+        }
+        self
+    }
+
+    /// To port `port`.
+    pub fn port(self, port: u16) -> Self {
+        self.ports(port, port)
+    }
+
+    /// To a port in `first..=last`.
+    pub fn ports(mut self, first: u16, last: u16) -> Self {
+        self.ports = Some((first, last));
+        self
+    }
+
+    /// `random`: pick the port at random.
+    pub fn random(mut self) -> Self {
+        self.flags |= super::expr::NatFlags::PROTO_RANDOM;
+        self
+    }
+
+    /// `fully-random`: pick the port fully at random.
+    pub fn fully_random(mut self) -> Self {
+        self.flags |= super::expr::NatFlags::PROTO_RANDOM_FULLY;
+        self
+    }
+
+    /// `persistent`: give a client the same address every time.
+    pub fn persistent(mut self) -> Self {
+        self.flags |= super::expr::NatFlags::PERSISTENT;
+        self
+    }
+
+    /// `netmap`: map the address range prefix to prefix, keeping the host
+    /// part (kernel 5.8+).
+    pub fn netmap(mut self) -> Self {
+        self.flags |= super::expr::NatFlags::NETMAP;
+        self
+    }
+
+    /// What the kernel would refuse, and the family a snat or dnat
+    /// rewrites.
+    fn check(&self) -> std::result::Result<Family, String> {
+        let kind = match self.kind {
+            NatKind::Snat => "snat",
+            NatKind::Dnat => "dnat",
+            NatKind::Masquerade => "masquerade",
+            NatKind::Redirect => "redirect",
+        };
+        if let Some((lo, hi)) = self.ports
+            && lo > hi
+        {
+            return Err(format!("nat: {kind} port range {lo}-{hi} runs backwards"));
+        }
+        if self.range_without_start {
+            return Err(format!("nat: {kind} has no address to make a range of"));
+        }
+        match (self.kind, self.addr) {
+            (NatKind::Masquerade | NatKind::Redirect, Some(_)) => {
+                Err(format!("nat: {kind} takes no address, only ports"))
+            }
+            (NatKind::Masquerade | NatKind::Redirect, None) => {
+                if self.flags.contains(super::expr::NatFlags::NETMAP) {
+                    return Err(format!("nat: {kind} cannot netmap"));
+                }
+                Ok(Family::Ip)
+            }
+            (_, Some((lo, hi))) => {
+                if lo.is_ipv4() != hi.is_ipv4() {
+                    return Err(format!("nat: {kind} range {lo}-{hi} mixes IPv4 and IPv6"));
+                }
+                if lo > hi {
+                    return Err(format!("nat: {kind} range {lo}-{hi} runs backwards"));
+                }
+                let family = if lo.is_ipv4() { Family::Ip } else { Family::Ip6 };
+                match self.family {
+                    Some(f) if f != family => {
+                        Err(format!("nat: {kind} to {lo} is not a {f} address"))
+                    }
+                    _ => Ok(family),
+                }
+            }
+            (_, None) => {
+                if self.flags.contains(super::expr::NatFlags::NETMAP) {
+                    return Err(format!("nat: {kind} netmap needs an address range"));
+                }
+                match self.family {
+                    Some(f @ (Family::Ip | Family::Ip6)) => Ok(f),
+                    Some(f) => Err(format!("nat: {kind} family must be ip or ip6, not {f}")),
+                    None => Err(format!("nat: {kind} needs an address or a family")),
+                }
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Table (parsed from dump)
 // =============================================================================
@@ -1865,6 +2097,53 @@ impl Rule {
     /// port into `R1`.
     pub fn dnat_v6(mut self, addr: Ipv6Addr, port: Option<u16>) -> Self {
         self.push_nat(NatType::Dnat, Family::Ip6, addr.octets().to_vec(), NatAddr::Reg, port);
+        self
+    }
+
+    /// A NAT statement with ranges and flags (#528): see [`NatStatement`].
+    /// The address range is loaded into `R0` (and `R1`, for a range), the
+    /// port range into the next registers, then the statement names them.
+    /// A statement the kernel would refuse makes adding the rule fail.
+    pub fn nat(mut self, nat: NatStatement) -> Self {
+        use super::expr::Expr;
+        let family = match nat.check() {
+            Ok(family) => family,
+            Err(e) => {
+                self.error.get_or_insert(e);
+                return self;
+            }
+        };
+        let mut free = [Register::R0, Register::R1, Register::R2, Register::R3].into_iter();
+        let mut load = |exprs: &mut Vec<Expr>, lo: Vec<u8>, hi: Vec<u8>| {
+            let first = free.next().expect("four registers hold two ranges");
+            let last = if hi == lo {
+                first
+            } else {
+                free.next().expect("four registers hold two ranges")
+            };
+            exprs.push(Expr::Immediate { dreg: first, data: lo });
+            if last != first {
+                exprs.push(Expr::Immediate { dreg: last, data: hi });
+            }
+            (first, last)
+        };
+        let octets = |a: std::net::IpAddr| match a {
+            std::net::IpAddr::V4(v4) => v4.octets().to_vec(),
+            std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        let addr = nat
+            .addr
+            .map(|(lo, hi)| load(&mut self.exprs, octets(lo), octets(hi)));
+        let proto = nat.ports.map(|(lo, hi)| {
+            load(&mut self.exprs, lo.to_be_bytes().to_vec(), hi.to_be_bytes().to_vec())
+        });
+        self.exprs.push(Expr::NatRegs(NatRegs {
+            kind: nat.kind,
+            family,
+            addr,
+            proto,
+            flags: nat.flags,
+        }));
         self
     }
 

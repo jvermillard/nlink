@@ -363,3 +363,76 @@ async fn flow_offload_rule_installs_and_reconciles() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #528: NAT with address and port ranges and flags — what nlink-lab's
+/// firewall writes as `dnat … to 10.0.1.10:8000-8999` and `masquerade
+/// random` — reconciles, and `nft` lists each statement as written.
+#[tokio::test]
+async fn nat_ranges_and_flags_reconcile_and_list_as_nft_writes_them() -> nlink::Result<()> {
+    use nlink::netlink::nftables::NatStatement;
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_nat", "nft_masq", "nft_redir");
+
+    let ns = TestNamespace::new("nft-echo-natrange")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+
+    with_timeout(async {
+        let cfg = NftablesConfig::new().table("natr", Family::Inet, |t| {
+            t.chain("post", |c| {
+                c.hook(Hook::Postrouting).priority(Priority::SrcNat).chain_type(ChainType::Nat)
+            })
+            .chain("pre", |c| {
+                c.hook(Hook::Prerouting).priority(Priority::DstNat).chain_type(ChainType::Nat)
+            })
+            .rule_keyed("post", "snat-range", |r| {
+                r.match_tcp_dport(1).nat(
+                    NatStatement::snat(ip("10.0.0.1"))
+                        .to(ip("10.0.0.9"))
+                        .ports(40000, 40010)
+                        .fully_random()
+                        .persistent(),
+                )
+            })
+            .rule_keyed("post", "snat6-range", |r| {
+                r.match_tcp_dport(2)
+                    .nat(NatStatement::snat(ip("2001:db8::1")).to(ip("2001:db8::9")))
+            })
+            .rule_keyed("post", "netmap", |r| {
+                r.match_tcp_dport(3)
+                    .nat(NatStatement::snat(ip("10.9.0.0")).to(ip("10.9.0.255")).netmap())
+            })
+            .rule_keyed("post", "masq-ports", |r| {
+                r.match_tcp_dport(4).nat(NatStatement::masquerade().ports(1024, 2048).random())
+            })
+            .rule_keyed("pre", "dnat-port", |r| {
+                r.match_tcp_dport(5).nat(NatStatement::dnat_to_port(Family::Ip, 8080))
+            })
+            .rule_keyed("pre", "dnat-range", |r| {
+                r.match_tcp_dport(6)
+                    .nat(NatStatement::dnat(ip("10.0.1.10")).ports(8000, 8999))
+            })
+            .rule_keyed("pre", "redir-range", |r| {
+                r.match_tcp_dport(7).nat(NatStatement::redirect().ports(3000, 3010))
+            })
+        });
+        assert_reconciles(&conn, &cfg).await?;
+
+        let listed = ns.exec("nft", &["list", "table", "inet", "natr"])?;
+        for want in [
+            "snat ip to 10.0.0.1-10.0.0.9:40000-40010",
+            "fully-random",
+            "persistent",
+            "snat ip6 to 2001:db8::1-2001:db8::9",
+            "netmap",
+            "masquerade to :1024-2048 random",
+            "dnat ip to :8080",
+            "dnat ip to 10.0.1.10:8000-8999",
+            "redirect to :3000-3010",
+        ] {
+            assert!(listed.contains(want), "nft does not list {want:?}:\n{listed}");
+        }
+        Ok(())
+    })
+    .await
+}
