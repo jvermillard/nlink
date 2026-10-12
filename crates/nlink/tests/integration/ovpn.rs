@@ -13,7 +13,7 @@ use nlink::netlink::{
         OvpnPeer, Ovpn,
     },
     link::OvpnLink,
-    namespace, Connection, Route,
+    Connection, Route,
 };
 
 use crate::common::TestNamespace;
@@ -21,14 +21,14 @@ use crate::common::TestNamespace;
 /// Helper — open RTNL + GENL connections inside the test namespace
 /// and create `ovpn0`. Returns the resolved ifindex.
 async fn setup_ovpn_iface(ns: &TestNamespace) -> nlink::Result<(Connection<Ovpn>, u32)> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
+    let route: Connection<Route> = nlink::Connection::new_in(ns.name())?;
     route.add_link(OvpnLink::new("ovpn0")).await?;
     let link = route
         .get_link_by_name("ovpn0")
         .await?
         .expect("ovpn0 just created");
     let ifindex = link.ifindex();
-    let ovpn: Connection<Ovpn> = namespace::connection_for_async(ns.name()).await?;
+    let ovpn: Connection<Ovpn> = nlink::Connection::new_in_async(ns.name()).await?;
     Ok((ovpn, ifindex))
 }
 
@@ -47,7 +47,7 @@ async fn ovpn_family_resolves_when_module_loaded() -> nlink::Result<()> {
     nlink::require_module!("ovpn");
 
     let ns = TestNamespace::new("ovpn-family-resolve")?;
-    let _genl: Connection<Ovpn> = namespace::connection_for_async(ns.name()).await?;
+    let _genl: Connection<Ovpn> = nlink::Connection::new_in_async(ns.name()).await?;
     Ok(())
 }
 

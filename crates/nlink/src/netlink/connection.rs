@@ -328,11 +328,39 @@ where
         })
     }
 
+    /// A connection in a network namespace (#532): an open
+    /// [`Netns`](super::namespace::Netns), a
+    /// [`NetnsRef`](super::namespace::NetnsRef), an `ip netns` name, a
+    /// path, a [`NamespaceSpec`](super::namespace::NamespaceSpec), a
+    /// borrowed namespace fd — anything
+    /// [`Into<NetnsTarget>`](super::namespace::NetnsTarget).
+    ///
+    /// The socket is made inside the namespace and works from any thread.
+    /// A stream on it ends with [`Error::NamespaceDeleted`] once a
+    /// namespace opened by name or path is deleted.
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use nlink::netlink::{Connection, Route};
+    ///
+    /// let conn = Connection::<Route>::new_in("myns")?;
+    /// let links = conn.get_links().await?;
+    /// # let _ = links;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), netns))]
+    pub fn new_in<'a>(ns: impl Into<super::namespace::NetnsTarget<'a>>) -> Result<Self> {
+        let ns = ns.into();
+        tracing::Span::current().record("netns", tracing::field::display(&ns));
+        ns.connection()
+    }
+
     /// [`new_in_namespace`](Self::new_in_namespace), which takes `AsFd`
     /// itself now (#532).
-    #[deprecated(since = "0.32.0", note = "`new_in_namespace` takes `impl AsFd` now (#532)")]
+    #[deprecated(since = "0.32.0", note = "use `Connection::new_in(fd.as_fd())` (#532)")]
     pub fn new_in_namespace_fd(ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
-        Self::new_in_namespace(ns_fd)
+        Self::new_in(ns_fd.as_fd())
     }
 
     /// Create a connection that operates in a specific network namespace.
@@ -358,6 +386,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.32.0", note = "use `Connection::new_in(fd.as_fd())` (#532)")]
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
         let ns_fd = ns_fd.as_fd();
@@ -386,16 +415,17 @@ where
     /// use nlink::netlink::{Connection, Route};
     ///
     /// // For a named namespace (created via `ip netns add myns`)
-    /// let conn = Connection::<Route>::new_in_namespace_path("/var/run/netns/myns")?;
+    /// let conn = Connection::<Route>::new_in(std::path::Path::new("/var/run/netns/myns"))?;
     ///
     /// // For a container's namespace
-    /// let conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;
+    /// let conn = Connection::<Route>::new_in(std::path::Path::new("/proc/1234/ns/net"))?;
     ///
     /// // Query interfaces in that namespace
     /// let links = conn.get_links().await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.32.0", note = "use `Connection::new_in(path)` (#532)")]
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_path = %ns_path.as_ref().display()))]
     pub fn new_in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
         let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?;
@@ -460,6 +490,26 @@ where
         let socket = NetlinkSocket::new(P::PROTOCOL)?;
         let state = P::resolve_async(&socket).await?;
         Ok(Self::from_parts(socket, state))
+    }
+
+    /// [`new_in`](Connection::new_in) for a GENL family: a connection in a
+    /// network namespace, its family id resolved there (#532).
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use nlink::netlink::{Connection, Wireguard};
+    ///
+    /// let wg = Connection::<Wireguard>::new_in_async("myns").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), netns))]
+    pub async fn new_in_async<'a>(
+        ns: impl Into<super::namespace::NetnsTarget<'a>>,
+    ) -> Result<Self> {
+        let ns = ns.into();
+        tracing::Span::current().record("netns", tracing::field::display(&ns));
+        ns.connection_async().await
     }
 }
 
@@ -763,7 +813,7 @@ impl<P: ProtocolState> Connection<P> {
     pub(crate) fn route_sibling(&self) -> Result<Connection<super::protocol::Route>> {
         use super::protocol::Route;
         match self.socket.netns_fd() {
-            Ok(ns) => Connection::<Route>::new_in_namespace(ns),
+            Ok(ns) => Connection::<Route>::new_in(std::os::fd::AsFd::as_fd(&ns)),
             Err(refused) => {
                 let here = Connection::<Route>::new()?;
                 match (self.socket.netns_cookie(), here.socket.netns_cookie()) {
@@ -1566,9 +1616,10 @@ impl Connection<Route> {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.32.0", note = "use `Connection::new_in(spec)` (#532)")]
     #[instrument(level = "info", skip_all, fields(protocol = "Route"))]
     pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
-        spec.connection()
+        Self::new_in(spec)
     }
 
     /// Subscribe to multicast groups for event notifications.

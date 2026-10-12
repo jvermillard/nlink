@@ -35,7 +35,6 @@ use nlink::Result;
 use nlink::netlink::{
     Route,
     link::DummyLink,
-    namespace,
 };
 
 use crate::common::TestNamespace;
@@ -45,7 +44,7 @@ async fn concurrent_dumps_on_shared_connection_route_correctly() -> Result<()> {
     nlink::require_root!();
 
     let ns = TestNamespace::new("seq-routing")?;
-    let conn = Arc::new(namespace::connection_for::<Route>(ns.name())?);
+    let conn = Arc::new(nlink::Connection::<Route>::new_in(ns.name())?);
 
     // Pre-create a known dummy so each dump returns at least
     // one link.
@@ -81,7 +80,7 @@ async fn concurrent_namespaces_dont_corrupt_each_other() -> Result<()> {
         handles.push(tokio::spawn(async move {
             let ns_name = format!("stress-{i}");
             let ns = TestNamespace::new(&ns_name)?;
-            let conn = namespace::connection_for::<Route>(ns.name())?;
+            let conn = nlink::Connection::<Route>::new_in(ns.name())?;
             let iface_name = format!("d{i}");
             conn.add_link(DummyLink::new(&iface_name)).await?;
             let links = conn.get_links().await?;
@@ -125,7 +124,7 @@ async fn concurrent_ack_requests_on_shared_connection_succeed() -> Result<()> {
     // consume task B's ACK, leaving B blocked until the 30s
     // operation timeout (Plan 171) fires.
     let ns = TestNamespace::new("ack-routing")?;
-    let conn = Arc::new(namespace::connection_for::<Route>(ns.name())?);
+    let conn = Arc::new(nlink::Connection::<Route>::new_in(ns.name())?);
 
     // Spawn 16 concurrent add_link calls — each creates a
     // uniquely-named dummy and waits for the kernel's ACK.

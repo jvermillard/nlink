@@ -48,7 +48,7 @@ async fn test_create_path_round_trip() -> Result<()> {
 
     // A path-created netns must be openable via the path-based connection
     // helper — the loopback interface is always present in a fresh netns.
-    let conn: Connection<Route> = namespace::connection_for_path(&ns_path)?;
+    let conn = Connection::<Route>::new_in(ns_path.as_path())?;
     let links = conn.get_links().await?;
     assert!(
         links.iter().any(|l| l.name() == Some("lo")),
@@ -120,9 +120,9 @@ async fn list_live_drops_a_stale_marker_that_list_still_reports() -> Result<()> 
         "list_live() keeps the live namespace: {live:?}"
     );
 
-    // And the I/O-safe constructor works on a real namespace fd.
+    // And a borrowed namespace fd works as a target.
     let fd = namespace::open(ns.name())?;
-    let conn = nlink::Connection::<nlink::Route>::new_in_namespace(&fd)?;
+    let conn = nlink::Connection::<nlink::Route>::new_in(std::os::fd::AsFd::as_fd(&fd))?;
     assert!(conn.get_links().await?.iter().any(|l| l.name() == Some("lo")));
     Ok(())
 }

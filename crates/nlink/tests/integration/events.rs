@@ -294,7 +294,7 @@ async fn test_ipv6_address_events() -> Result<()> {
 async fn a_resynced_mirror_equals_a_fresh_dump() -> Result<()> {
     use nlink::netlink::resync::ResyncMarker;
     use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent};
-    use nlink::netlink::{Route, namespace};
+    use nlink::netlink::Route;
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tokio_stream::StreamExt;
@@ -305,7 +305,7 @@ async fn a_resynced_mirror_equals_a_fresh_dump() -> Result<()> {
     let name = ns.name().to_string();
     let factory: ConnectionFactory<Route> = Arc::new(move || {
         let name = name.clone();
-        Box::pin(async move { namespace::connection_for::<Route>(&name) })
+        Box::pin(async move { nlink::Connection::<Route>::new_in(&name) })
     });
     let conn = ns.connection()?;
     conn.socket().set_rcvbuf(1024)?;
@@ -369,7 +369,7 @@ async fn a_resynced_mirror_equals_a_fresh_dump() -> Result<()> {
 #[tokio::test]
 async fn the_rtnetlink_snapshot_covers_what_the_stream_subscribes_to() -> Result<()> {
     use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent};
-    use nlink::netlink::{Route, namespace};
+    use nlink::netlink::Route;
     use std::sync::Arc;
     use tokio_stream::StreamExt;
     require_root!();
@@ -388,7 +388,7 @@ async fn the_rtnetlink_snapshot_covers_what_the_stream_subscribes_to() -> Result
     let name = ns.name().to_string();
     let factory: ConnectionFactory<Route> = Arc::new(move || {
         let name = name.clone();
-        Box::pin(async move { namespace::connection_for::<Route>(&name) })
+        Box::pin(async move { nlink::Connection::<Route>::new_in(&name) })
     });
     let mut stream = ns.connection()?.into_events_with_resync(factory).await?;
     let first = stream.next().await.expect("an item")?;
@@ -587,7 +587,7 @@ fn flaky_factory(
                 if n < failures {
                     return Err(nlink::Error::InvalidMessage(format!("attempt {n} fails")));
                 }
-                nlink::netlink::namespace::connection_for(&name)
+                nlink::Connection::new_in(&name)
             })
         });
     (factory, calls)

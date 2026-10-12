@@ -43,7 +43,7 @@
 //! use nlink::netlink::addr::Ipv4Address;
 //!
 //! // Create connection to namespace
-//! let conn = namespace::connection_for("myns")?;
+//! let conn = Connection::<Route>::new_in("myns")?;
 //!
 //! // Get interface index via netlink (namespace-safe)
 //! let link = conn.get_link_by_name("eth0").await?.unwrap();

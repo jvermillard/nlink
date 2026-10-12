@@ -50,7 +50,7 @@ use crate::netlink::config::{
 use crate::netlink::genl::wireguard::{
     WireguardApplyResult, WireguardConfig, WireguardConfigDiff,
 };
-use crate::netlink::namespace::NamespaceSpec;
+use crate::netlink::namespace::{NetnsRef, NetnsTarget};
 use crate::netlink::nftables::config::{NftablesConfig, NftablesDiff};
 use crate::netlink::{Nftables, Route, Wireguard};
 use crate::reconcile::{ExecOptions, ReconcileOptions};
@@ -98,7 +98,7 @@ impl Stack {
 
     /// [`Self::plan_in`] for the host's namespace.
     pub async fn plan(&self, opts: PlanOptions) -> Result<StackPlan> {
-        self.plan_in(NamespaceSpec::Default, opts).await
+        self.plan_in(NetnsRef::Default, opts).await
     }
 
     /// Diff every set layer in `ns` once (#519): what an apply of this
@@ -110,19 +110,21 @@ impl Stack {
     /// # async fn example() -> nlink::Result<()> {
     /// # let (net_cfg, fw_cfg) = (nlink::netlink::config::NetworkConfig::new(), nlink::netlink::nftables::config::NftablesConfig::new());
     /// use nlink::facade::Stack;
-    /// use nlink::netlink::NamespaceSpec;
     /// use nlink::netlink::config::PlanOptions;
+    /// use nlink::netlink::namespace::Netns;
     /// use nlink::ExecOptions;
     ///
     /// let stack = Stack::new().network(net_cfg).nftables(fw_cfg);
-    /// let ns = NamespaceSpec::Named("lab");
-    /// let plan = stack.plan_in(ns.clone(), PlanOptions::default().purge(true)).await?;
+    /// // Opened once, so the plan and the apply see the same namespace.
+    /// let lab = Netns::open("lab")?;
+    /// let plan = stack.plan_in(&lab, PlanOptions::default().purge(true)).await?;
     /// print!("{plan}");                                  // the dry run
-    /// let report = plan.apply(ns, ExecOptions::new()).await?;
+    /// let report = plan.apply(&lab, ExecOptions::new()).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn plan_in(&self, ns: NamespaceSpec<'_>, opts: PlanOptions) -> Result<StackPlan> {
+    pub async fn plan_in<'a>(&self, ns: impl Into<NetnsTarget<'a>>, opts: PlanOptions) -> Result<StackPlan> {
+        let ns: NetnsTarget<'a> = ns.into();
         let mut plan = StackPlan {
             stack: Arc::new(self.clone()),
             options: opts.clone(),
@@ -154,12 +156,13 @@ impl Stack {
     /// `EBUSY`, `EAGAIN`, an interrupted dump, and an nftables commit
     /// refused because the ruleset moved since the plan (`ERESTART`). Each
     /// attempt plans every layer again. `opts.dry_run` plans only.
-    pub async fn apply_reconcile_in(
+    pub async fn apply_reconcile_in<'a>(
         &self,
-        ns: NamespaceSpec<'_>,
+        ns: impl Into<NetnsTarget<'a>>,
         opts: ReconcileOptions,
         apply: ApplyOptions,
     ) -> Result<StackReport> {
+        let ns: NetnsTarget<'a> = ns.into();
         let mut exec = apply.exec;
         exec.dry_run |= opts.dry_run;
         let plan_options = &apply.plan;
@@ -179,23 +182,25 @@ impl Stack {
 
     /// Plan and apply every set layer in the host's namespace.
     pub async fn apply(&self) -> Result<StackReport> {
-        self.apply_in(NamespaceSpec::Default).await
+        self.apply_in(NetnsRef::Default).await
     }
 
     /// [`Self::apply`] with [`ApplyOptions`].
     pub async fn apply_with(&self, opts: ApplyOptions) -> Result<StackReport> {
-        self.apply_in_with(NamespaceSpec::Default, opts).await
+        self.apply_in_with(NetnsRef::Default, opts).await
     }
 
     /// Plan and apply every set layer in a named namespace.
+    #[deprecated(since = "0.32.0", note = "use `apply_in(ns, …)`, which takes a name (#532)")]
     pub async fn apply_in_namespace(&self, ns: &str) -> Result<StackReport> {
-        self.apply_in(NamespaceSpec::Named(ns)).await
+        self.apply_in(ns).await
     }
 
     /// Plan and apply every set layer inside any namespace specification —
     /// named, path-referenced, or a process's namespace by PID (container
     /// support, #169).
-    pub async fn apply_in(&self, ns: NamespaceSpec<'_>) -> Result<StackReport> {
+    pub async fn apply_in<'a>(&self, ns: impl Into<NetnsTarget<'a>>) -> Result<StackReport> {
+        let ns: NetnsTarget<'a> = ns.into();
         self.apply_in_with(ns, ApplyOptions::default()).await
     }
 
@@ -210,11 +215,12 @@ impl Stack {
     /// **Dry run.** With `opts.exec.dry_run` nothing is touched — no
     /// WireGuard link, no firewall commit, no keys — and the report carries
     /// the plan in [`StackReport::planned`] (#501).
-    pub async fn apply_in_with(
+    pub async fn apply_in_with<'a>(
         &self,
-        ns: NamespaceSpec<'_>,
+        ns: impl Into<NetnsTarget<'a>>,
         opts: ApplyOptions,
     ) -> Result<StackReport> {
+        let ns: NetnsTarget<'a> = ns.into();
         let plan = self.plan_in(ns.clone(), opts.plan).await?;
         plan.apply_or_keep(ns, opts.exec).await
     }
@@ -222,32 +228,34 @@ impl Stack {
     /// Diff every set layer against the host's default namespace.
     #[deprecated(since = "0.32.0", note = "use `Stack::plan` (#519)")]
     pub async fn diff(&self) -> Result<StackPlan> {
-        self.plan_in(NamespaceSpec::Default, PlanOptions::default())
+        self.plan_in(NetnsRef::Default, PlanOptions::default())
             .await
     }
 
     /// [`Self::plan`] under its pre-0.32 name.
     #[deprecated(since = "0.32.0", note = "use `Stack::plan` (#519)")]
     pub async fn diff_with(&self, opts: PlanOptions) -> Result<StackPlan> {
-        self.plan_in(NamespaceSpec::Default, opts).await
+        self.plan_in(NetnsRef::Default, opts).await
     }
 
     /// [`Self::plan_in`] for a named namespace, under its pre-0.32 name.
     #[deprecated(since = "0.32.0", note = "use `Stack::plan_in` (#519)")]
     pub async fn diff_in_namespace(&self, ns: &str) -> Result<StackPlan> {
-        self.plan_in(NamespaceSpec::Named(ns), PlanOptions::default())
+        self.plan_in(ns, PlanOptions::default())
             .await
     }
 
     /// [`Self::plan_in`] under its pre-0.32 name.
     #[deprecated(since = "0.32.0", note = "use `Stack::plan_in` (#519)")]
-    pub async fn diff_in(&self, ns: NamespaceSpec<'_>) -> Result<StackPlan> {
+    pub async fn diff_in<'a>(&self, ns: impl Into<NetnsTarget<'a>>) -> Result<StackPlan> {
+        let ns: NetnsTarget<'a> = ns.into();
         self.plan_in(ns, PlanOptions::default()).await
     }
 
     /// [`Self::plan_in`] under its pre-0.32 name.
     #[deprecated(since = "0.32.0", note = "use `Stack::plan_in` (#519)")]
-    pub async fn diff_in_with(&self, ns: NamespaceSpec<'_>, opts: PlanOptions) -> Result<StackPlan> {
+    pub async fn diff_in_with<'a>(&self, ns: impl Into<NetnsTarget<'a>>, opts: PlanOptions) -> Result<StackPlan> {
+        let ns: NetnsTarget<'a> = ns.into();
         self.plan_in(ns, opts).await
     }
 }
@@ -316,7 +324,8 @@ impl StackPlan {
     /// - An nftables commit the ruleset moved under is refused with
     ///   `ERESTART` ([`Error::is_restart`]): plan again, or use
     ///   [`Stack::apply_reconcile_in`].
-    pub async fn apply(&self, ns: NamespaceSpec<'_>, exec: ExecOptions) -> Result<StackReport> {
+    pub async fn apply<'a>(&self, ns: impl Into<NetnsTarget<'a>>, exec: ExecOptions) -> Result<StackReport> {
+        let ns: NetnsTarget<'a> = ns.into();
         let mut report = StackReport {
             attempts: 1,
             dry_run: exec.dry_run,
@@ -367,7 +376,8 @@ impl StackPlan {
     }
 
     /// [`Self::apply`], keeping the plan in a dry run's report.
-    async fn apply_or_keep(self, ns: NamespaceSpec<'_>, exec: ExecOptions) -> Result<StackReport> {
+    async fn apply_or_keep<'a>(self, ns: impl Into<NetnsTarget<'a>>, exec: ExecOptions) -> Result<StackReport> {
+        let ns: NetnsTarget<'a> = ns.into();
         let mut report = self.apply(ns, exec).await?;
         if exec.dry_run {
             report.planned = Some(self);

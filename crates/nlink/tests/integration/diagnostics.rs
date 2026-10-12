@@ -430,7 +430,7 @@ async fn test_diagnostics_skip_loopback() -> nlink::Result<()> {
 /// `eth0`, which the lab does not have.
 #[tokio::test]
 async fn a_genl_lookup_by_index_resolves_in_its_own_namespace() -> nlink::Result<()> {
-    use nlink::netlink::{Connection, Ethtool, link::DummyLink, namespace};
+    use nlink::netlink::{Connection, Ethtool, link::DummyLink};
     require_root!();
     nlink::require_module!("dummy");
 
@@ -439,7 +439,7 @@ async fn a_genl_lookup_by_index_resolves_in_its_own_namespace() -> nlink::Result
     conn.add_link(DummyLink::new("d0")).await?;
     let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
 
-    let ethtool: Connection<Ethtool> = namespace::connection_for_async(ns.name()).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
     ethtool.get_link_state(d0).await?;
     Ok(())
 }

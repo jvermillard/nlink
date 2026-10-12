@@ -76,7 +76,7 @@ fn print_overview() {
     use nlink::netlink::genl::macsec::MacsecSaBuilder;
 
     let conn: Connection<Macsec> =
-        namespace::connection_for_async("lab").await?;
+        nlink::Connection::new_in_async("lab").await?;
 
     // TX SA (encodes outgoing frames).
     conn.add_tx_sa("macsec0",
@@ -167,7 +167,7 @@ async fn run_apply() -> nlink::Result<()> {
 
 async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // 1. Dummy parent interface.
-    let route: Connection<Route> = namespace::connection_for(ns_name)?;
+    let route: Connection<Route> = nlink::Connection::new_in(ns_name)?;
     route.add_link(DummyLink::new("dummy0")).await?;
     route.set_link_up("dummy0").await?;
     println!("  Created dummy0 in namespace `{ns_name}`.");
@@ -187,7 +187,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     println!("  Created macsec0 link=dummy0 via MacsecLink and brought it up.");
 
     // 3. GENL connection for the namespace.
-    let macsec: Connection<Macsec> = namespace::connection_for_async(ns_name).await?;
+    let macsec: Connection<Macsec> = nlink::Connection::new_in_async(ns_name).await?;
     println!(
         "  Opened MACsec GENL connection (family_id={}).",
         macsec.family_id()

@@ -76,7 +76,7 @@ pub trait ProtocolState: private::Sealed {
 ///
 /// GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink) need
 /// to resolve their family ID asynchronously after the socket is created.
-/// This trait enables `namespace::connection_for_async()` to create connections
+/// This trait enables `Connection::new_in_async()` to create connections
 /// in foreign namespaces for these protocols.
 ///
 /// This trait is sealed and cannot be implemented outside this crate.

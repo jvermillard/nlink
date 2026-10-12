@@ -40,7 +40,7 @@
 //! use nlink::netlink::{Connection, Route, namespace};
 //! use nlink::netlink::neigh::Neighbor;
 //!
-//! let conn = namespace::connection_for("myns")?;
+//! let conn = Connection::<Route>::new_in("myns")?;
 //! let link = conn.get_link_by_name("eth0").await?.unwrap();
 //!
 //! conn.add_neighbor(

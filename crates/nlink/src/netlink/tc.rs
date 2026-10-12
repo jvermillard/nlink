@@ -8640,7 +8640,7 @@ impl Connection<Route> {
     /// use nlink::netlink::{Connection, Route, namespace, tc::NetemConfig};
     /// use std::time::Duration;
     ///
-    /// let conn: Connection<Route> = namespace::connection_for("myns")?;
+    /// let conn: Connection<Route> = Connection::new_in("myns")?;
     /// let link = conn
     ///     .get_link_by_name("eth0")
     ///     .await?

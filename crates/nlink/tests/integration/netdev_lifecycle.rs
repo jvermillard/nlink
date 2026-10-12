@@ -214,7 +214,7 @@ async fn removal_evicts_the_device_from_the_store() -> Result<()> {
 /// stream could not be fed in, and would never have announced it.
 #[tokio::test]
 async fn a_resync_stream_announces_devices_that_predate_the_join() -> Result<()> {
-    use nlink::netlink::{Route, namespace, resync::ConnectionFactory};
+    use nlink::netlink::{Route, resync::ConnectionFactory};
     use std::sync::Arc;
     require_root!();
     nlink::require_module!("dummy");
@@ -225,7 +225,7 @@ async fn a_resync_stream_announces_devices_that_predate_the_join() -> Result<()>
     let name = ns.name().to_string();
     let factory: ConnectionFactory<Route> = Arc::new(move || {
         let name = name.clone();
-        Box::pin(async move { namespace::connection_for::<Route>(&name) })
+        Box::pin(async move { nlink::Connection::<Route>::new_in(&name) })
     });
     let links = ns.connection()?.into_events_with_resync(factory).await?;
     let uevents = Connection::<KobjectUevent>::in_namespace(ns.name())?;

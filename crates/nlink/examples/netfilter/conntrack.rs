@@ -129,7 +129,7 @@ async fn run_apply() -> nlink::Result<()> {
 }
 
 async fn run_demo(ns_name: &str) -> nlink::Result<()> {
-    let nf: Connection<Netfilter> = namespace::connection_for(ns_name)?;
+    let nf: Connection<Netfilter> = nlink::Connection::new_in(ns_name)?;
     println!("  Opened Connection<Netfilter> in namespace `{ns_name}`.");
 
     // 1. Inject — TCP/ESTABLISHED with auto-mirrored reply tuple.

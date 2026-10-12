@@ -70,7 +70,7 @@ streams.insert("default".to_string(), host.into_events().await);
 
 // Two named namespaces (assumed to exist — `ip netns add tenant-a / tenant-b`).
 for ns in ["tenant-a", "tenant-b"] {
-    let mut conn: Connection<Route> = namespace::connection_for(ns)?;
+    let mut conn: Connection<Route> = Connection::new_in(ns)?;
     conn.subscribe(&[
         RtnetlinkGroup::Link,
         RtnetlinkGroup::Ipv4Addr,
@@ -160,7 +160,7 @@ loop {
         Some(ns_event) = async { ns_watcher.recv().await.transpose() } => {
             match ns_event? {
                 NamespaceEvent::Created { name } => {
-                    let mut conn: Connection<Route> = namespace::connection_for(&name)?;
+                    let mut conn: Connection<Route> = Connection::new_in(&name)?;
                     conn.subscribe_all()?;
                     streams.insert(name, conn.into_events().await);
                 }

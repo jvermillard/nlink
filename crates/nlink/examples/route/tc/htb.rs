@@ -166,7 +166,7 @@ async fn run_apply() -> nlink::Result<()> {
 }
 
 async fn run_demo(ns_name: &str) -> nlink::Result<()> {
-    let conn: Connection<Route> = namespace::connection_for(ns_name)?;
+    let conn: Connection<Route> = nlink::Connection::new_in(ns_name)?;
 
     conn.add_link(DummyLink::new("dummy0")).await?;
     conn.set_link_up("dummy0").await?;

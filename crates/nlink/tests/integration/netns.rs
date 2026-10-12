@@ -53,7 +53,7 @@ async fn run_and_socket_are_inside() -> nlink::Result<()> {
 
     let ns = TestNamespace::new("netns-run")?;
     let netns = Netns::open(ns.name())?;
-    let conn: Connection<Route> = netns.connection()?;
+    let conn = Connection::<Route>::new_in(&netns)?;
     conn.add_link(DummyLink::new("d0")).await?;
     conn.set_link_up("d0").await?;
     let addr = std::net::Ipv4Addr::new(10, 77, 0, 1);
@@ -106,7 +106,7 @@ async fn delete_never_hits_a_recreated_namespace() -> nlink::Result<()> {
 
     let name = format!("nlk-netns-del-{}", std::process::id());
     let first = Netns::create(&name)?;
-    let conn: Connection<Route> = first.connection()?;
+    let conn = Connection::<Route>::new_in(&first)?;
     conn.add_link(DummyLink::new("held")).await?;
 
     namespace::delete(&name)?;
@@ -142,7 +142,7 @@ async fn an_async_family_connects_inside() -> nlink::Result<()> {
 
     let ns = TestNamespace::new("netns-genl")?;
     let netns = Netns::open(ns.name())?;
-    let wg: Connection<Wireguard> = netns.connection_async().await?;
+    let wg = Connection::<Wireguard>::new_in_async(&netns).await?;
     drop(wg);
     Ok(())
 }
@@ -156,8 +156,8 @@ async fn connections_know_their_namespace_and_siblings_follow() -> nlink::Result
 
     let ns = TestNamespace::new("netns-sib")?;
     let netns = Netns::open(ns.name())?;
-    let by_handle: Connection<Route> = netns.connection()?;
-    let by_name: Connection<Route> = namespace::connection_for(ns.name())?;
+    let by_handle = Connection::<Route>::new_in(&netns)?;
+    let by_name: Connection<Route> = nlink::Connection::new_in(ns.name())?;
     for conn in [&by_handle, &by_name] {
         assert_eq!(conn.netns()?.id(), netns.id());
         let nft = conn.sibling::<Nftables>()?;
@@ -214,7 +214,7 @@ async fn a_watch_on_a_named_namespace_ends_when_it_is_deleted() -> nlink::Result
 
     let name = format!("nlk-watch-{}", std::process::id());
     let netns = Netns::create(&name)?;
-    let mut stream = nlink::facade::watch::route_changes_in_namespace(&name).await?;
+    let mut stream = nlink::facade::watch::route_changes_in(&name).await?;
     namespace::delete(&name)?;
     let ended = tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(item) = stream.next().await {
@@ -569,7 +569,7 @@ async fn delete_and_wait_tells_a_held_namespace_from_a_going_one() -> nlink::Res
     let held_name = format!("nlink-dw-held-{pid}");
     let held = Netns::create(&held_name)?;
     a.exec("ip", &["link", "add", "v0", "type", "veth", "peer", "name", "v1", "netns", &held_name])?;
-    let socket = held.connection::<Route>()?;
+    let socket = Connection::<Route>::new_in(&held)?;
     let err = held
         .delete_and_wait(Duration::from_millis(500))
         .await
@@ -615,12 +615,65 @@ async fn a_lab_namespace_is_the_namespace_it_made() -> nlink::Result<()> {
     // The lab's connection still reaches its own namespace, d0 and all.
     let conn = lab.connection()?;
     assert!(conn.get_link_by_name("d0").await?.is_some(), "the lab's d0");
-    assert!(other.connection::<Route>()?.get_link_by_name("d0").await?.is_none());
+    assert!(Connection::<Route>::new_in(&other)?.get_link_by_name("d0").await?.is_none());
     drop(conn);
 
     drop(lab);
     let still = Netns::open(&name).expect("dropping the lab left the new namespace alone");
     assert_eq!(still.id(), other.id());
     other.delete()?;
+    Ok(())
+}
+
+/// #532: one entry point, `Connection::new_in`, takes every way of naming a
+/// namespace, and each reaches the same one. So do the facade and the pool.
+#[tokio::test]
+async fn every_target_reaches_the_same_namespace() -> nlink::Result<()> {
+    use std::os::fd::AsFd;
+
+    use nlink::netlink::namespace::NetnsTarget;
+    nlink::require_root!();
+
+    let ns = TestNamespace::new("netns-target")?;
+    ns.connection()?.add_link(DummyLink::new("mark0")).await?;
+    let netns = Netns::open(ns.name())?;
+    let path = std::path::PathBuf::from(format!("/var/run/netns/{}", ns.name()));
+    let file = std::fs::File::open(&path)?;
+    let mut sleeper = ns.spawn({
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        cmd
+    })?;
+    let targets: Vec<NetnsTarget<'_>> = vec![
+        ns.name().into(),
+        ns.name().to_string().into(),
+        (&netns).into(),
+        (&ns).into(),
+        NetnsRef::Named(ns.name().to_string()).into(),
+        NetnsRef::Pid(sleeper.id()).into(),
+        path.as_path().into(),
+        file.as_fd().into(),
+        namespace::NamespaceSpec::Named(ns.name()).into(),
+    ];
+    for target in targets {
+        let conn = Connection::<Route>::new_in(target.clone())?;
+        assert_eq!(conn.netns()?.id(), netns.id(), "{target}");
+        assert!(conn.get_link_by_name("mark0").await?.is_some(), "{target}");
+        // A GENL family resolves its id there.
+        let ethtool = Connection::<nlink::netlink::Ethtool>::new_in_async(target.clone()).await?;
+        assert_eq!(ethtool.netns()?.id(), netns.id(), "{target}");
+    }
+    let here = Connection::<Route>::new_in(NetnsRef::Default)?;
+    assert!(here.get_link_by_name("mark0").await?.is_none());
+
+    // The facade and the pool take the same targets.
+    let cfg = nlink::netlink::config::NetworkConfig::new().link("mark0", |b| b.dummy());
+    assert!(nlink::facade::diff::network_in(&netns, &cfg).await?.is_empty());
+    assert!(nlink::facade::diff::network_in(ns.name(), &cfg).await?.is_empty());
+    let pool = nlink::ConnectionPool::<Route>::new_in(&netns, 1).await?;
+    assert!(pool.acquire().await?.get_link_by_name("mark0").await?.is_some());
+
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
     Ok(())
 }

@@ -10,7 +10,7 @@
 //! - Filter by state, port, address, and other criteria
 //! - Retrieve detailed socket information (memory, TCP info, etc.)
 //! - Async/await support with Tokio
-//! - Namespace support via `Connection::new_in_namespace_path()`
+//! - Namespace support via `Connection::new_in(ns)`
 //!
 //! # Example
 //!
@@ -45,11 +45,11 @@
 //! use nlink::netlink::{Connection, SockDiag, namespace};
 //!
 //! // Query sockets in a named namespace
-//! let conn: Connection<SockDiag> = namespace::connection_for("myns")?;
+//! let conn: Connection<SockDiag> = Connection::new_in("myns")?;
 //! let sockets = conn.query_tcp().await?;
 //!
 //! // Or by PID
-//! let conn: Connection<SockDiag> = namespace::connection_for_pid(1234)?;
+//! let conn: Connection<SockDiag> = Connection::new_in(namespace::NetnsRef::Pid(1234))?;
 //! # Ok(())
 //! # }
 //! ```

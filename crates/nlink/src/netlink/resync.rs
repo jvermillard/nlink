@@ -331,7 +331,7 @@ impl<P: Restartable> crate::Connection<P> {
     /// use tokio_stream::StreamExt;
     ///
     /// let factory: ConnectionFactory<Route> =
-    ///     Arc::new(|| Box::pin(async { nlink::netlink::namespace::connection_for("lab-r1") }));
+    ///     Arc::new(|| Box::pin(async { nlink::Connection::new_in("lab-r1") }));
     /// let mut events = Connection::<Route>::events_restarting(factory, Backoff::default());
     /// while let Some(item) = events.next().await {
     ///     match item {

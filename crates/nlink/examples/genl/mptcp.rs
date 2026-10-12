@@ -71,7 +71,7 @@ fn print_overview() {
     use nlink::netlink::genl::mptcp::{{MptcpEndpointBuilder, MptcpLimits}};
 
     let conn: Connection<Mptcp> =
-        namespace::connection_for_async("lab").await?;
+        nlink::Connection::new_in_async("lab").await?;
 
     conn.add_endpoint(
         MptcpEndpointBuilder::new("10.200.0.1".parse()?)
@@ -163,7 +163,7 @@ async fn run_apply() -> nlink::Result<()> {
 
 async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // Dummy interface + address inside the namespace.
-    let route: Connection<Route> = namespace::connection_for(ns_name)?;
+    let route: Connection<Route> = nlink::Connection::new_in(ns_name)?;
     route.add_link(DummyLink::new("dummy0")).await?;
     route
         .add_address_by_name("dummy0", Ipv4Addr::new(10, 200, 0, 1).into(), 24)
@@ -178,7 +178,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
         link.ifindex()
     );
 
-    let mptcp: Connection<Mptcp> = match namespace::connection_for_async(ns_name).await {
+    let mptcp: Connection<Mptcp> = match nlink::Connection::new_in_async(ns_name).await {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("\n  Failed to open MPTCP GENL in namespace: {e}");

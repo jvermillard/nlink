@@ -87,12 +87,12 @@ fn print_overview() {
     use std::net::{{Ipv4Addr, SocketAddrV4}};
 
     // rtnetlink side — create the interface.
-    let route: Connection<Route> = namespace::connection_for("lab")?;
+    let route: Connection<Route> = nlink::Connection::new_in("lab")?;
     route.add_link(WireguardLink::new("wg0")).await?;
     route.set_link_up("wg0").await?;
 
     // GENL side — set keys + peer.
-    let wg: Connection<Wireguard> = namespace::connection_for_async("lab").await?;
+    let wg: Connection<Wireguard> = nlink::Connection::new_in_async("lab").await?;
 
     wg.set_device("wg0", |dev| {{
         dev.private_key(local_private_key)
@@ -177,7 +177,7 @@ async fn run_apply() -> nlink::Result<()> {
 
 async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // rtnetlink side — create wg0 inside the namespace.
-    let route: Connection<Route> = namespace::connection_for(ns_name)?;
+    let route: Connection<Route> = nlink::Connection::new_in(ns_name)?;
 
     route
         .add_link(WireguardLink::new("wg0"))
@@ -195,7 +195,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     );
 
     // GENL side — configure via set_device + set_peer.
-    let wg: Connection<Wireguard> = namespace::connection_for_async(ns_name).await?;
+    let wg: Connection<Wireguard> = nlink::Connection::new_in_async(ns_name).await?;
     println!(
         "  Opened WireGuard GENL connection (family_id={}).",
         wg.family_id()

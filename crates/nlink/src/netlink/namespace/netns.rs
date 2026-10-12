@@ -103,7 +103,7 @@ impl fmt::Display for NetnsId {
 /// use nlink::{Connection, Route};
 ///
 /// let ns = Netns::open("myns")?;
-/// let conn: Connection<Route> = ns.connection()?;
+/// let conn = Connection::<Route>::new_in(&ns)?;
 /// let links = conn.get_links().await?;
 ///
 /// // Code that needs to be inside the namespace, on a thread of its own.
@@ -367,7 +367,7 @@ impl Netns {
     /// connections cost one thread, not a thousand. A stream on it ends
     /// with [`Error::NamespaceDeleted`] once the namespace's name is
     /// deleted, as one opened by path does.
-    pub fn connection<P: ProtocolState + Default + SyncConstructible>(
+    pub(crate) fn connection<P: ProtocolState + Default + SyncConstructible>(
         &self,
     ) -> Result<Connection<P>> {
         Ok(Connection::from_parts(
@@ -378,7 +378,7 @@ impl Netns {
 
     /// A new connection to a generic-netlink family in the namespace, its
     /// family id resolved inside it.
-    pub async fn connection_async<P: AsyncProtocolInit + AsyncConstructible>(
+    pub(crate) async fn connection_async<P: AsyncProtocolInit + AsyncConstructible>(
         &self,
     ) -> Result<Connection<P>> {
         let socket = self.netlink_socket(P::PROTOCOL)?;
@@ -570,7 +570,7 @@ impl Netns {
     /// `timeout`: something still holds it. [`pids`](Self::pids) names the
     /// processes, and the warning this logs lists them; a socket or handle
     /// of this process's — a [`Connection`] from
-    /// [`connection`](Self::connection) — holds it too. The errors of
+    /// [`Connection::new_in`] — holds it too. The errors of
     /// [`delete`](Self::delete) otherwise.
     pub async fn delete_and_wait(self, timeout: std::time::Duration) -> Result<()> {
         use tokio_stream::StreamExt;
@@ -771,6 +771,166 @@ impl fmt::Display for NetnsRef {
             Self::Path(path) => write!(f, "{}", path.display()),
             Self::Pid(pid) => write!(f, "pid {pid}"),
         }
+    }
+}
+
+/// The namespace an entry point works in (#532): what
+/// [`Connection::new_in`], the facade's `*_in` functions and
+/// [`ConnectionPoolBuilder::namespace`](crate::netlink::pool::ConnectionPoolBuilder::namespace)
+/// take, as `impl Into<NetnsTarget>`.
+///
+/// It is an open [`Netns`], or where one is: a [`NetnsRef`], an `ip netns`
+/// name, a path, a [`NamespaceSpec`], or a borrowed namespace fd.
+///
+/// ```no_run
+/// # fn example(fd: std::os::fd::BorrowedFd<'_>) -> nlink::Result<()> {
+/// use nlink::netlink::namespace::{Netns, NetnsRef};
+/// use nlink::netlink::{Connection, Route};
+///
+/// let by_name = Connection::<Route>::new_in("red")?;
+/// let red = Netns::open("red")?;
+/// let by_handle = Connection::<Route>::new_in(&red)?;
+/// let by_pid = Connection::<Route>::new_in(NetnsRef::Pid(1234))?;
+/// let by_fd = Connection::<Route>::new_in(fd)?;
+/// let here = Connection::<Route>::new_in(NetnsRef::Default)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum NetnsTarget<'a> {
+    /// A namespace already open. Its connections are made on its worker
+    /// thread.
+    Netns(&'a Netns),
+    /// Where a namespace is. It is opened when used.
+    Ref(NetnsRef),
+    /// A namespace fd, `/var/run/netns/<name>` or `/proc/<pid>/ns/net`
+    /// opened. It is duplicated when used.
+    Fd(BorrowedFd<'a>),
+}
+
+impl NetnsTarget<'_> {
+    /// `true` for [`NetnsRef::Default`]: the calling thread's namespace,
+    /// which needs nothing opened.
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Ref(r) if r.is_default())
+    }
+
+    /// Open it, as a handle of its own: `None` for the default namespace.
+    pub fn open(&self) -> Result<Option<Netns>> {
+        match self {
+            Self::Netns(netns) => netns.try_clone().map(Some),
+            Self::Ref(r) if r.is_default() => Ok(None),
+            Self::Ref(r) => r.open().map(Some),
+            Self::Fd(fd) => Netns::from_fd(fd.try_clone_to_owned().map_err(Error::Io)?).map(Some),
+        }
+    }
+
+    /// A connection in it.
+    pub(crate) fn connection<P: ProtocolState + Default + SyncConstructible>(
+        &self,
+    ) -> Result<Connection<P>> {
+        match self {
+            Self::Netns(netns) => netns.connection(),
+            _ => match self.open()? {
+                Some(netns) => netns.connection(),
+                None => Connection::<P>::new(),
+            },
+        }
+    }
+
+    /// A generic-netlink connection in it, its family resolved there.
+    pub(crate) async fn connection_async<P: AsyncProtocolInit + AsyncConstructible>(
+        &self,
+    ) -> Result<Connection<P>> {
+        match self {
+            Self::Netns(netns) => netns.connection_async().await,
+            _ => match self.open()? {
+                Some(netns) => netns.connection_async().await,
+                None => Connection::<P>::new_async().await,
+            },
+        }
+    }
+}
+
+impl fmt::Display for NetnsTarget<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Netns(netns) => f.write_str(netns.label()),
+            Self::Ref(r) => r.fmt(f),
+            Self::Fd(fd) => write!(f, "fd {}", fd.as_raw_fd()),
+        }
+    }
+}
+
+impl<'a> From<&'a Netns> for NetnsTarget<'a> {
+    fn from(netns: &'a Netns) -> Self {
+        Self::Netns(netns)
+    }
+}
+
+impl From<NetnsRef> for NetnsTarget<'_> {
+    fn from(r: NetnsRef) -> Self {
+        Self::Ref(r)
+    }
+}
+
+impl From<&NetnsRef> for NetnsTarget<'_> {
+    fn from(r: &NetnsRef) -> Self {
+        Self::Ref(r.clone())
+    }
+}
+
+/// An `ip netns` name.
+impl From<&str> for NetnsTarget<'_> {
+    fn from(name: &str) -> Self {
+        Self::Ref(NetnsRef::Named(name.to_string()))
+    }
+}
+
+/// An `ip netns` name.
+impl From<String> for NetnsTarget<'_> {
+    fn from(name: String) -> Self {
+        Self::Ref(NetnsRef::Named(name))
+    }
+}
+
+/// An `ip netns` name.
+impl From<&String> for NetnsTarget<'_> {
+    fn from(name: &String) -> Self {
+        Self::Ref(NetnsRef::Named(name.clone()))
+    }
+}
+
+/// An nsfs path.
+impl From<&Path> for NetnsTarget<'_> {
+    fn from(path: &Path) -> Self {
+        Self::Ref(NetnsRef::Path(path.to_path_buf()))
+    }
+}
+
+/// An nsfs path.
+impl From<PathBuf> for NetnsTarget<'_> {
+    fn from(path: PathBuf) -> Self {
+        Self::Ref(NetnsRef::Path(path))
+    }
+}
+
+impl From<NamespaceSpec<'_>> for NetnsTarget<'_> {
+    fn from(spec: NamespaceSpec<'_>) -> Self {
+        Self::Ref(spec.into())
+    }
+}
+
+impl From<&NamespaceSpec<'_>> for NetnsTarget<'_> {
+    fn from(spec: &NamespaceSpec<'_>) -> Self {
+        Self::Ref(spec.into())
+    }
+}
+
+impl<'a> From<BorrowedFd<'a>> for NetnsTarget<'a> {
+    fn from(fd: BorrowedFd<'a>) -> Self {
+        Self::Fd(fd)
     }
 }
 

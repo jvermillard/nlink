@@ -117,8 +117,8 @@ async fn stale_marker_is_not_found_from_every_by_name_entry_point() -> Result<()
 
     let spawn = namespace::spawn(&name, Command::new("true")).map(drop);
     let spawn_etc = namespace::spawn_with_etc(&name, Command::new("true")).map(drop);
-    let conn = namespace::connection_for::<nlink::Route>(&name).map(drop);
-    let conn_async = namespace::connection_for_async::<nlink::Wireguard>(&name)
+    let conn = nlink::Connection::<nlink::Route>::new_in(&name).map(drop);
+    let conn_async = nlink::Connection::<nlink::Wireguard>::new_in_async(&name)
         .await
         .map(drop);
     let open = namespace::open(&name).map(drop);

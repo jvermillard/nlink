@@ -26,14 +26,13 @@ use nlink::Result;
 use nlink::netlink::{
     Connection, Route,
     config::{ApplyOptions, PlanOptions, NetworkConfig},
-    namespace,
 };
 use nlink::reconcile::ReconcileOptions;
 
 use crate::common::{TestNamespace, with_timeout};
 
 fn conn_in_ns(ns: &TestNamespace) -> Result<Connection<Route>> {
-    namespace::connection_for::<Route>(ns.name())
+    nlink::Connection::<Route>::new_in(ns.name())
 }
 
 /// Plan 186 §2.1 reproducer — the headline scenario.

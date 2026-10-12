@@ -155,7 +155,7 @@ use tokio_stream::StreamExt;
 # async fn run() -> nlink::Result<()> {
 let events_conn: Connection<Route> = Connection::<Route>::new()?;
 let dump_pool: Arc<ConnectionPool<Route>> =
-    Arc::new(ConnectionPool::<Route>::for_namespace("myns", 2).await?);
+    Arc::new(ConnectionPool::<Route>::new_in("myns", 2).await?);
 
 // `subscribe` selects the multicast groups; `events()` hands back the
 // stream. (There is no `subscribe_links()` — the group list is the knob.)
@@ -213,12 +213,12 @@ use nlink::{ConnectionPool, Route};
 
 # async fn run() -> nlink::Result<()> {
 let pool: Arc<ConnectionPool<Route>> = Arc::new(
-    ConnectionPool::<Route>::for_namespace("myns", 2).await?
+    ConnectionPool::<Route>::new_in("myns", 2).await?
 );
 
 // Events connection — bound to the same netns.
 let events_conn: nlink::Connection<Route> =
-    nlink::netlink::namespace::connection_for("myns")?;
+    nlink::Connection::new_in("myns")?;
 // ... subscribe ...
 
 // Dump connection from the pool — taken fresh on each resync.

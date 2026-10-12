@@ -57,7 +57,7 @@ async fn main() -> nlink::Result<()> {
     namespace::create(&ns_name)?;
 
     let result: nlink::Result<()> = (async {
-        let conn: Connection<Route> = namespace::connection_for(&ns_name)?;
+        let conn: Connection<Route> = nlink::Connection::new_in(&ns_name)?;
 
         // Set up a dummy interface to apply the impairment to.
         conn.add_link(DummyLink::new("dummy0")).await?;
@@ -161,7 +161,7 @@ fn print_overview() {
     use nlink::netlink::tc::NetemConfig;
     use std::time::Duration;
 
-    let conn: Connection<Route> = namespace::connection_for("lab-mgmt")?;
+    let conn: Connection<Route> = nlink::Connection::new_in("lab-mgmt")?;
 
     PerPeerImpairer::new("vethA-br")
         // Close peer.
