@@ -152,6 +152,12 @@ impl RuleMessage {
         self.action() == FibRuleAction::Prohibit
     }
 
+    /// Whether the rule matches what its selectors do not (`ip rule …
+    /// not`, `FIB_RULE_INVERT`).
+    pub fn is_invert(&self) -> bool {
+        self.header.flags & crate::netlink::rule::FIB_RULE_INVERT != 0
+    }
+
     /// Get the routing table ID.
     pub fn table_id(&self) -> u32 {
         self.table

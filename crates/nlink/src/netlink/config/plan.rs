@@ -19,7 +19,7 @@
 use std::fmt;
 
 use super::{
-    DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredNeighbour, DeclaredQdisc, DeclaredRoute, LinkChanges, LinkRecreate,
+    DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredNeighbour, DeclaredQdisc, DeclaredRule, DeclaredRoute, LinkChanges, LinkRecreate,
     LinkRemoval, RouteConflict,
     diff::route_text,
     tc_tree::DeclaredTc,
@@ -136,6 +136,11 @@ pub enum Step {
     },
     /// Delete an FDB entry the previous config declared (#516).
     DeleteFdb(DeclaredFdb),
+    /// Add a rule, with the config's protocol (#516).
+    AddRule(DeclaredRule),
+    /// Delete a rule the previous config declared: the one with the
+    /// config's protocol (#516).
+    DeleteRule(DeclaredRule),
     /// Delete a qdisc the previous config declared; the kernel's default
     /// comes back (#512).
     DeleteQdisc(DeclaredQdisc),
@@ -228,6 +233,8 @@ impl Step {
                 before: None,
                 after: e.clone(),
             },
+            Self::AddRule(r) => Self::DeleteRule(r.clone()),
+            Self::DeleteRule(r) => Self::AddRule(r.clone()),
             _ => return None,
         })
     }
@@ -379,6 +386,8 @@ impl fmt::Display for Step {
                 f.write_str(&super::diff::fdb_line(after, &replaced))
             }
             Self::DeleteFdb(e) => write!(f, "- {e}"),
+            Self::AddRule(r) => write!(f, "+ {r}"),
+            Self::DeleteRule(r) => write!(f, "- {r}"),
             Self::DeleteQdisc(q) => write!(
                 f,
                 "- qdisc {} on {} ({:?})",
@@ -581,6 +590,9 @@ impl super::ConfigDiff {
                 after: route.clone(),
             });
         }
+        // A rule after the routes of the table it looks up, so traffic it
+        // steers there finds them.
+        steps.extend(self.rules_to_add.iter().cloned().map(Step::AddRule));
         steps.extend(self.qdiscs_to_remove.iter().cloned().map(Step::DeleteQdisc));
         steps.extend(self.qdiscs_to_replace.iter().cloned().map(Step::ReplaceQdisc));
         steps.extend(self.qdiscs_to_add.iter().cloned().map(Step::AddQdisc));
@@ -610,6 +622,7 @@ impl super::ConfigDiff {
         );
         steps.extend(self.neighbours_to_remove.iter().cloned().map(Step::DeleteNeighbour));
         steps.extend(self.fdb_to_remove.iter().cloned().map(Step::DeleteFdb));
+        steps.extend(self.rules_to_remove.iter().cloned().map(Step::DeleteRule));
         Plan {
             steps,
             routes_protocol: self.routes_protocol,
@@ -697,6 +710,16 @@ mod tests {
             Step::DeleteFdb(e(false)).inverse(),
             Some(Step::SetFdb { before: None, after }) if after == e(false)
         ));
+    }
+
+    /// A rule added is undone by deleting it, and the other way round (#516).
+    #[test]
+    fn rule_steps_invert() {
+        let cfg = crate::netlink::config::NetworkConfig::new().rule(100, |r| r.table(100));
+        let r = cfg.rules()[0].clone();
+        assert_eq!(Step::AddRule(r.clone()).to_string(), "+ rule 100 lookup 100");
+        assert!(matches!(Step::AddRule(r.clone()).inverse(), Some(Step::DeleteRule(d)) if d == r));
+        assert!(matches!(Step::DeleteRule(r.clone()).inverse(), Some(Step::AddRule(a)) if a == r));
     }
 
     /// The steps come in the order the apply runs them, the hidden ones

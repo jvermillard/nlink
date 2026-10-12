@@ -1859,6 +1859,132 @@ async fn fdb_entries_change_and_come_back_after_a_move_or_recreate() -> nlink::R
     Ok(())
 }
 
+/// The policy rules with protocol `boot` — the config's — in one family, as
+/// `ip -j -d rule` shows them, one line each.
+fn boot_rules(ns: &TestNamespace, family: &str) -> Result<Vec<String>, String> {
+    let all = ip_json(ns, &[family, "-d", "rule", "show"])?;
+    let field = |r: &serde_json::Value, k: &str| match &r[k] {
+        serde_json::Value::Null if r.get(k).is_some() => "yes".to_string(),
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(v) => v.clone(),
+        v => v.to_string(),
+    };
+    let mut out: Vec<String> = all
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["protocol"] == "boot")
+        .map(|r| {
+            let keys = [
+                "priority", "not", "src", "srclen", "fwmark", "fwmask", "iif", "ipproto", "dport_start",
+                "dport_end", "table", "action", "suppress_prefixlen", "iif_detached",
+            ];
+            keys.iter().map(|k| format!("{k}={}", field(r, k))).collect::<Vec<_>>().join(" ")
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// Declared policy rules A→B→C (#516), each step applied with the one
+/// before as the previous config. Step 2 changes a rule's table and
+/// another's prefix (the old ones go), drops one, adds an IPv6 one with a
+/// masked mark. Step 3 recreates the device a rule names as its input: the
+/// rule follows the name, attached again. An identical rule another tool
+/// added first — protocol `unspec`, ahead of the config's in the list — is
+/// neither taken for the config's nor removed with it. `ip -j -d rule`
+/// shows each step.
+#[tokio::test]
+async fn rules_change_and_go_with_the_previous_config() -> nlink::Result<()> {
+    use std::net::Ipv6Addr;
+    require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    let v6 = |third: u16| Ipv6Addr::new(0xfd00, 0x87, third, 0, 0, 0, 0, 0);
+    let a = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .rule(100, |r| r.from(Ipv4Addr::new(10, 87, 0, 0), 16).table(100))
+        .rule(110, |r| r.invert().fwmark(0x10).table(200))
+        .rule(120, |r| r.table(254).suppress_prefixlen(0))
+        .rule(130, |r| r.iif("d0").ipproto(6).dport(80, 89).prohibit())
+        .rule(100, move |r| r.from(v6(0), 64).table(100));
+    let b = |kind: fn(nlink::netlink::config::LinkBuilder) -> nlink::netlink::config::LinkBuilder| {
+        NetworkConfig::new()
+            .link("d0", move |l| kind(l).up())
+            .rule(100, |r| r.from(Ipv4Addr::new(10, 87, 0, 0), 16).table(101))
+            .rule(120, |r| r.table(254).suppress_prefixlen(0))
+            .rule(130, |r| r.iif("d0").ipproto(6).dport(80, 89).prohibit())
+            .rule(100, move |r| r.from(v6(1), 64).table(100))
+            .rule(140, |r| r.ipv6().fwmark_masked(0x1, 0xff).blackhole())
+    };
+    let steps = [a, b(|l| l.dummy()), b(|l| l.bridge())];
+    let line = |p: u32, rest: &str| {
+        let mut fields: std::collections::BTreeMap<&str, String> = [
+            "not", "src", "srclen", "fwmark", "fwmask", "iif", "ipproto", "dport_start", "dport_end",
+            "table", "action", "suppress_prefixlen", "iif_detached",
+        ]
+        .iter()
+        .map(|k| (*k, "-".to_string()))
+        .collect();
+        for kv in rest.split_whitespace() {
+            let (k, v) = kv.split_once('=').unwrap();
+            *fields.get_mut(k).unwrap() = v.to_string();
+        }
+        let keys = [
+            "not", "src", "srclen", "fwmark", "fwmask", "iif", "ipproto", "dport_start", "dport_end",
+            "table", "action", "suppress_prefixlen", "iif_detached",
+        ];
+        let mut s = format!("priority={p}");
+        for k in keys {
+            s.push_str(&format!(" {k}={}", fields[k]));
+        }
+        s
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let want_v4 = [
+        sorted(vec![
+            line(100, "src=10.87.0.0 srclen=16 table=100"),
+            line(110, "not=yes src=all fwmark=0x10 table=200"),
+            line(120, "src=all table=main suppress_prefixlen=0"),
+            line(130, "src=all iif=d0 ipproto=tcp dport_start=80 dport_end=89 action=prohibit"),
+        ]),
+        sorted(vec![
+            line(100, "src=10.87.0.0 srclen=16 table=101"),
+            line(120, "src=all table=main suppress_prefixlen=0"),
+            line(130, "src=all iif=d0 ipproto=tcp dport_start=80 dport_end=89 action=prohibit"),
+        ]),
+    ];
+    let want_v6 = [
+        vec![line(100, "src=fd00:87:: srclen=64 table=100")],
+        sorted(vec![
+            line(100, "src=fd00:87:1:: srclen=64 table=100"),
+            line(140, "src=all fwmark=0x1 fwmask=0xff action=blackhole"),
+        ]),
+    ];
+    let ns = TestNamespace::new("tr-rules")?;
+    // Another tool's copy of rule 100, which is not the config's.
+    ns.exec("ip", &["rule", "add", "pref", "100", "from", "10.87.0.0/16", "table", "100"])?;
+    crate::common::converge::assert_transition_with_previous(&ns, &steps, async |i, _conn| {
+        let w = i.min(1);
+        let (v4, v6) = (boot_rules(&ns, "-4")?, boot_rules(&ns, "-6")?);
+        if v4 != want_v4[w] || v6 != want_v6[w] {
+            return Err(format!("step {}:\n{v4:#?}\n{v6:#?}", i + 1));
+        }
+        let theirs = ip_json(&ns, &["-4", "-d", "rule", "show", "pref", "100"])?;
+        let kept = theirs.as_array().into_iter().flatten().any(|r| {
+            r["protocol"] == "unspec" && r["table"] == "100" && r["src"] == "10.87.0.0"
+        });
+        if !kept {
+            return Err(format!("step {}: the other tool's rule went: {theirs}", i + 1));
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A Geneve tunnel A→B→C (#516): a new remote and TTL change in place, and
 /// the link keeps its ifindex; a new VNI, which `geneve_changelink`
 /// refuses, recreates it. `ip -d link` shows each step.

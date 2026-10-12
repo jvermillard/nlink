@@ -241,6 +241,66 @@ pub async fn assert_transition<D: Declarative>(
     Ok(())
 }
 
+/// [`assert_transition`] for a `NetworkConfig` whose steps are each
+/// applied and diffed with the step before as the previous config (#512):
+/// what a step drops is removed, as a caller that keeps its last config
+/// sees it. Every step applies, diffs empty, applies with no changes and
+/// diffs empty, then `check` reads the kernel.
+pub async fn assert_transition_with_previous(
+    ns: &TestNamespace,
+    steps: &[NetworkConfig],
+    mut check: impl AsyncFnMut(usize, &Connection<Route>) -> Result<(), String>,
+) -> nlink::Result<()> {
+    let conn = ns.connection()?;
+    for (i, step) in steps.iter().enumerate() {
+        let previous = i.checked_sub(1).map(|p| std::sync::Arc::new(steps[p].clone()));
+        let plan = || {
+            let opts = PlanOptions::default();
+            match &previous {
+                Some(p) => opts.previous(p.clone()),
+                None => opts,
+            }
+        };
+        let apply = || {
+            let opts = ApplyOptions::default();
+            match &previous {
+                Some(p) => opts.with_previous(p.clone()),
+                None => opts,
+            }
+        };
+        let outcome = async {
+            let applied = step.apply_with_options(&conn, apply()).await.map_err(|e| format!("first apply failed: {e}"))?;
+            if !applied.is_success() {
+                return Err(format!("first apply reported errors: {:?}", applied.errors));
+            }
+            let diff = step.diff_with_options(&conn, plan()).await.map_err(|e| e.to_string())?;
+            if !diff.is_empty() {
+                return Err(format!("diff after apply is not empty:\n{diff}"));
+            }
+            let again = step.apply_with_options(&conn, apply()).await.map_err(|e| format!("second apply failed: {e}"))?;
+            if again.changes_made != 0 {
+                return Err(format!("second apply made {} changes: {:?}", again.changes_made, again.summary));
+            }
+            let diff = step.diff_with_options(&conn, plan()).await.map_err(|e| e.to_string())?;
+            if !diff.is_empty() {
+                return Err(format!("diff after the second apply is not empty:\n{diff}"));
+            }
+            Ok(())
+        };
+        let outcome = match tokio::time::timeout(STEP_TIMEOUT, outcome).await {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => Err("timed out".to_string()),
+        };
+        if let Err(why) = outcome {
+            panic!("step {} did not converge: {why}", i + 1);
+        }
+        if let Err(why) = check(i, &conn).await {
+            panic!("check after step {} failed: {why}", i + 1);
+        }
+    }
+    Ok(())
+}
+
 /// `ip -j <args>` inside `ns`, parsed.
 ///
 /// An independent reader: a diff converging only shows that the diff and

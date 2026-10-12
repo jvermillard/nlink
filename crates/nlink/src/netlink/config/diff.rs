@@ -11,13 +11,13 @@ use std::{
 use super::kind::{self, KindPlan, KindUpdate, LinkRecreate};
 use super::types::{
     DeclaredAddress, DeclaredFdb, DeclaredLink, DeclaredLinkType, DeclaredNeighbour, DeclaredQdisc,
-    DeclaredRoute,
+    DeclaredRoute, DeclaredRule, RuleAction,
     DeclaredRouteType, LinkState, MasterSpec, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
     connection::Connection,
     error::Result,
-    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, RuleMessage, TcMessage},
     protocol::Route,
     tc_spec::QdiscSpec,
     types::{addr::Scope, route::RouteType},
@@ -73,8 +73,8 @@ pub struct PlanOptions {
     /// - **Links and qdiscs are never purged** — deleting
     ///   interfaces is too destructive to infer; use the imperative
     ///   `Connection::del_link` / `del_qdisc` for those.
-    /// - **Neighbours and FDB entries are never purged** (#516): one the
-    ///   previous config declared goes through [`Self::previous`].
+    /// - **Neighbours, FDB entries and rules are never purged** (#516): one
+    ///   the previous config declared goes through [`Self::previous`].
     pub purge: bool,
 
     /// Extra route tables to purge `static`/`boot` routes from, on
@@ -306,6 +306,13 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) fdb_replaced: Vec<(DeclaredFdb, DeclaredFdb)>,
 
+    /// Rules to add (#516): none with the config's protocol matches them.
+    pub rules_to_add: Vec<DeclaredRule>,
+    /// Rules the previous config declared and this one does not, still in
+    /// the kernel with the config's protocol (#516). Only with
+    /// [`PlanOptions::previous`].
+    pub rules_to_remove: Vec<DeclaredRule>,
+
     /// Routes to remove.
     ///
     /// Always: a route a declared route *supersedes* — same destination,
@@ -454,6 +461,8 @@ impl ConfigDiff {
             && self.neighbours_to_remove.is_empty()
             && self.fdb_to_set.is_empty()
             && self.fdb_to_remove.is_empty()
+            && self.rules_to_add.is_empty()
+            && self.rules_to_remove.is_empty()
             && self.tc.is_empty()
     }
 
@@ -477,6 +486,8 @@ impl ConfigDiff {
             + self.neighbours_to_remove.len()
             + self.fdb_to_set.len()
             + self.fdb_to_remove.len()
+            + self.rules_to_add.len()
+            + self.rules_to_remove.len()
             + self.tc.iter().map(|t| t.len()).sum::<usize>()
     }
 
@@ -580,6 +591,9 @@ impl ConfigDiff {
         for e in &self.fdb_to_set {
             lines.push(fdb_line(e, &self.fdb_replaced));
         }
+        for r in &self.rules_to_add {
+            lines.push(format!("+ {r}"));
+        }
 
         // Purge removals (only present under `PlanOptions::purge`).
         for addr in &self.addresses_to_remove {
@@ -608,6 +622,9 @@ impl ConfigDiff {
         }
         for e in &self.fdb_to_remove {
             lines.push(format!("- {e}"));
+        }
+        for r in &self.rules_to_remove {
+            lines.push(format!("- {r}"));
         }
 
         if lines.is_empty() {
@@ -1001,6 +1018,10 @@ pub struct Snapshot {
     /// [`read`](Self::read), and by `read_for` when its config or the
     /// previous one declares one.
     fdb: Vec<NeighborMessage>,
+    /// Every policy routing rule, both families (#516): read by
+    /// [`read`](Self::read), and by `read_for` when its config or the
+    /// previous one declares one.
+    rules: Vec<RuleMessage>,
 }
 
 impl Snapshot {
@@ -1021,6 +1042,7 @@ impl Snapshot {
         snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
         snapshot.read_neighbours(conn).await?;
         snapshot.fdb = conn.get_bridge_neighbors().await?;
+        snapshot.rules = conn.get_rules().await?;
         Ok(snapshot)
     }
 
@@ -1084,6 +1106,9 @@ impl Snapshot {
         if !config.fdb.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.fdb.is_empty()) {
             snapshot.fdb = conn.get_bridge_neighbors().await?;
         }
+        if !config.rules.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.rules.is_empty()) {
+            snapshot.rules = conn.get_rules().await?;
+        }
         Ok(snapshot)
     }
 
@@ -1099,6 +1124,7 @@ impl Snapshot {
             neighbours: Vec::new(),
             proxies: Vec::new(),
             fdb: Vec::new(),
+            rules: Vec::new(),
         })
     }
 
@@ -1276,6 +1302,9 @@ pub(crate) fn diff_snapshot(
         .collect();
     diff_fdb(config, snapshot, &link_by_name, &moved, opts, &mut diff);
 
+    // Rules (#516): by name, so no link change touches them.
+    diff_rules(config, snapshot, opts, &mut diff);
+
     // TC trees (#514), against what the recreates leave: a recreated link
     // has none. The apply diffs each again after the qdisc step.
     let names = super::tc_tree::ifindexes(&current_links);
@@ -1421,6 +1450,73 @@ fn diff_fdb(
         }
         if let Some((have, true)) = live(prev) {
             diff.fdb_to_remove.push(have);
+        }
+    }
+}
+
+/// A kernel rule as a declaration, if it is one a declaration can be: one
+/// with only the selectors and actions [`DeclaredRule`] has.
+pub(crate) fn rule_from_live(r: &RuleMessage) -> Option<DeclaredRule> {
+    use crate::netlink::types::rule::FibRuleAction as A;
+    let action = match r.action() {
+        A::ToTbl => RuleAction::Table(r.table_id()),
+        A::Blackhole => RuleAction::Blackhole,
+        A::Unreachable => RuleAction::Unreachable,
+        A::Prohibit => RuleAction::Prohibit,
+        _ => return None,
+    };
+    if r.goto().is_some() || r.tun_id().is_some() || r.uid_range().is_some() || r.l3mdev().is_some() {
+        return None;
+    }
+    let prefix = |addr: Option<IpAddr>, len: u8| addr.map(|a| (a, len));
+    Some(DeclaredRule {
+        priority: r.priority(),
+        ipv6: r.is_ipv6(),
+        from: prefix(r.source(), r.src_len()),
+        to: prefix(r.destination(), r.dst_len()),
+        iif: r.iifname().map(str::to_string),
+        oif: r.oifname().map(str::to_string),
+        fwmark: r.fwmark(),
+        // The kernel reports the all-ones mask a mark gets by default.
+        fwmask: r.fwmask().filter(|m| *m != u32::MAX),
+        ipproto: r.ip_proto(),
+        sport: r.sport_range().map(|p| (p.start, p.end)),
+        dport: r.dport_range().map(|p| (p.start, p.end)),
+        invert: r.is_invert(),
+        // The kernel reports -1 for "not set" (`ip rule` shows none).
+        suppress_prefixlen: r.suppress_prefixlen().filter(|l| *l != u32::MAX),
+        action,
+    })
+}
+
+/// The declared rules against the kernel's (#516). Only a rule with the
+/// config's protocol is the config's: one another tool added — `ip rule
+/// add` leaves it `unspec` — is another rule to the kernel, however alike.
+fn diff_rules(config: &NetworkConfig, snapshot: &Snapshot, opts: &PlanOptions, diff: &mut ConfigDiff) {
+    let ours = u8::from(config.routes_protocol());
+    let live: Vec<DeclaredRule> = snapshot
+        .rules
+        .iter()
+        .filter(|r| r.protocol() == Some(ours))
+        .filter_map(rule_from_live)
+        .collect();
+    // A declared rule with a mask of all ones is the one without.
+    let normal = |r: &DeclaredRule| {
+        let mut r = r.clone();
+        if r.fwmask == Some(u32::MAX) {
+            r.fwmask = None;
+        }
+        r.ipv6 = r.is_ipv6();
+        r
+    };
+    for r in &config.rules {
+        if !live.contains(&normal(r)) {
+            diff.rules_to_add.push(r.clone());
+        }
+    }
+    for prev in opts.previous.iter().flat_map(|p| p.rules.iter()) {
+        if !config.rules.iter().any(|r| normal(r) == normal(prev)) && live.contains(&normal(prev)) {
+            diff.rules_to_remove.push(prev.clone());
         }
     }
 }
@@ -3298,6 +3394,8 @@ mod tests {
                 "routes-refused",
                 "routes-to-add",
                 "routes-to-remove",
+                "rules-to-add",
+                "rules-to-remove",
             ]
         );
         assert_eq!(
