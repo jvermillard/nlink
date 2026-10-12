@@ -132,6 +132,7 @@ impl construction::SyncConstructible for FibLookup {}
 impl construction::SyncConstructible for SELinux {}
 impl construction::SyncConstructible for Audit {}
 impl construction::SyncConstructible for Nftables {}
+impl construction::SyncConstructible for Nflog {}
 
 // GENL protocols — must be constructed via `new_async()` so the
 // family ID is resolved before first use.
@@ -262,6 +263,17 @@ pub struct Netfilter;
 impl private::Sealed for Netfilter {}
 
 impl ProtocolState for Netfilter {
+    const PROTOCOL: Protocol = Protocol::Netfilter;
+}
+
+/// NFLOG (`nfnetlink_log`) protocol state: the packets `log group N`
+/// rules send (#528). See [`nflog`](super::nflog).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Nflog;
+
+impl private::Sealed for Nflog {}
+
+impl ProtocolState for Nflog {
     const PROTOCOL: Protocol = Protocol::Netfilter;
 }
 
