@@ -1892,6 +1892,8 @@ pub struct Chain {
     pub(crate) policy: Option<Policy>,
     pub(crate) device: Option<String>,
     pub(crate) comment: Option<String>,
+    /// Tag it as the declarative apply's own (#527).
+    pub(crate) owned: bool,
 }
 
 impl Chain {
@@ -1920,6 +1922,7 @@ impl Chain {
             policy: None,
             device: None,
             comment: None,
+            owned: false,
         })
     }
 
@@ -2009,6 +2012,9 @@ pub struct ChainInfo {
     pub handle: u64,
     /// Its comment (#528).
     pub comment: Option<String>,
+    /// Created by nlink's declarative apply: it carries nlink's ownership
+    /// tag (#527).
+    pub managed: bool,
 }
 
 // =============================================================================
@@ -4115,6 +4121,8 @@ pub struct Set {
     pub(crate) gc_interval: Option<std::time::Duration>,
     pub(crate) data_type: Option<SetDataType>,
     pub(crate) comment: Option<String>,
+    /// Tag it as the declarative apply's own (#527).
+    pub(crate) owned: bool,
 }
 
 impl Set {
@@ -4131,6 +4139,7 @@ impl Set {
             gc_interval: None,
             data_type: None,
             comment: None,
+            owned: false,
         }
     }
 
@@ -4708,6 +4717,9 @@ pub struct SetInfo {
     pub object_type: Option<u32>,
     /// Its comment (#528).
     pub comment: Option<String>,
+    /// Created by nlink's declarative apply: it carries nlink's
+    /// ownership tag (#527).
+    pub managed: bool,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,

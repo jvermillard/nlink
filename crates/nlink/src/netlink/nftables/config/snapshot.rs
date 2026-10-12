@@ -131,6 +131,7 @@ impl RulesetSnapshot {
                         .or(base.then(|| super::super::types::Policy::Accept.to_u32())),
                     handle: next(),
                     comment: chain.comment().map(str::to_string),
+                    managed: true,
                 });
             }
             for flowtable in table.flowtables() {
@@ -163,6 +164,7 @@ impl RulesetSnapshot {
                         ObjectConfig::Limit(l) => ObjectState::Limit(l.clone()),
                     },
                     comment: None,
+                    managed: true,
                 });
             }
             for set in table.sets() {
@@ -215,6 +217,7 @@ fn set_info(set: &DeclaredSet, table: &str, family: Family, handle: u64) -> SetI
             _ => None,
         }),
         comment: set.comment.clone(),
+        managed: true,
     }
 }
 
@@ -376,6 +379,54 @@ mod tests {
         let back = lab(22, true).diff_against(&lab(2222, false), &options).unwrap();
         assert_eq!(back.sets_to_add.len(), 1, "{back}");
         assert_eq!(back.rules_to_replace.len(), 1, "{back}");
+    }
+
+    /// #527: in a shared table the diff deletes only the undeclared chains,
+    /// sets and objects nlink's apply made; an owned table loses all of
+    /// them.
+    #[test]
+    fn a_shared_table_keeps_what_nlink_did_not_make() {
+        use crate::netlink::nftables::config::TableMode;
+        let options = NftDiffOptions::default();
+        let declared = |mode| {
+            NftablesConfig::new().table("f", Family::Inet, move |t| t.mode(mode).chain("input", |c| c))
+        };
+        let held = NftablesConfig::new().table("f", Family::Inet, |t| {
+            t.chain("input", |c| c)
+                .chain("ours", |c| c)
+                .chain("theirs", |c| c)
+                .set("our_set", |s| s.key_type(SetKeyType::Ipv4Addr))
+                .set("their_set", |s| s.key_type(SetKeyType::Ipv4Addr))
+                .object("our_counter", ObjectConfig::Counter)
+                .object("their_counter", ObjectConfig::Counter)
+        });
+        let mut snapshot = RulesetSnapshot::from_config(&held);
+        // What another tool added carries no ownership tag.
+        for c in snapshot.chains.iter_mut().filter(|c| c.name == "theirs") {
+            c.managed = false;
+        }
+        for s in snapshot.sets.iter_mut().filter(|s| s.name == "their_set") {
+            s.managed = false;
+        }
+        for o in snapshot.objects.iter_mut().filter(|o| o.name == "their_counter") {
+            o.managed = false;
+        }
+
+        let shared = declared(TableMode::Shared).diff_snapshot(&snapshot, &options).unwrap();
+        let names = |d: &crate::netlink::nftables::config::NftablesDiff| {
+            let mut n: Vec<String> = d.chains_to_delete.iter().map(|(_, _, c)| c.clone()).collect();
+            n.extend(d.sets_to_delete.iter().map(|(_, _, s)| s.clone()));
+            n.extend(d.objects_to_delete.iter().map(|(_, _, o, _)| o.clone()));
+            n.sort();
+            n
+        };
+        assert_eq!(names(&shared), ["our_counter", "our_set", "ours"], "{shared}");
+        let owned = declared(TableMode::Owned).diff_snapshot(&snapshot, &options).unwrap();
+        assert_eq!(
+            names(&owned),
+            ["our_counter", "our_set", "ours", "their_counter", "their_set", "theirs"],
+            "{owned}"
+        );
     }
 
     /// A snapshot that did not read a set's elements makes the diff fail,

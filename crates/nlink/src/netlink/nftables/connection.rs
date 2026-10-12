@@ -375,7 +375,7 @@ impl Connection<Nftables> {
         if let Some(policy) = chain.policy {
             builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
         }
-        append_comment(&mut builder, NFTA_CHAIN_USERDATA, NFTNL_UDATA_COMMENT, chain.comment.as_deref())?;
+        append_userdata(&mut builder, NFTA_CHAIN_USERDATA, NFTNL_UDATA_COMMENT, chain.comment.as_deref(), chain.owned)?;
 
         self.nft_request_ack(builder).await
     }
@@ -623,7 +623,7 @@ impl Connection<Nftables> {
         append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
-        append_comment(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref())?;
+        append_userdata(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref(), set.owned)?;
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
 
@@ -1531,12 +1531,14 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
         device: None,
         devices: Vec::new(),
         comment: None,
+        managed: false,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
             NFTA_CHAIN_USERDATA => {
                 chain.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_COMMENT);
+                chain.managed = super::userdata::is_owned(payload);
             }
             NFTA_CHAIN_TABLE => {
                 chain.table = attr_str(payload).unwrap_or_default();
@@ -1652,12 +1654,14 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         data_len: None,
         object_type: None,
         comment: None,
+        managed: false,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
             NFTA_SET_USERDATA => {
                 set.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_SET_COMMENT);
+                set.managed = super::userdata::is_owned(payload);
             }
             NFTA_SET_DATA_TYPE if payload.len() >= 4 => {
                 set.data_type = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
@@ -1963,9 +1967,13 @@ impl Transaction {
         if let Some(policy) = chain.policy {
             builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
         }
-        if let Err(e) =
-            append_comment(&mut builder, NFTA_CHAIN_USERDATA, NFTNL_UDATA_COMMENT, chain.comment.as_deref())
-        {
+        if let Err(e) = append_userdata(
+            &mut builder,
+            NFTA_CHAIN_USERDATA,
+            NFTNL_UDATA_COMMENT,
+            chain.comment.as_deref(),
+            chain.owned,
+        ) {
             self.defer(e);
         }
 
@@ -2276,8 +2284,13 @@ impl Transaction {
         append_set_timeouts(&mut builder, &set);
         // A comment is a set's from its creation; an update leaves it.
         if flags & NLM_F_EXCL != 0
-            && let Err(e) =
-                append_comment(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref())
+            && let Err(e) = append_userdata(
+                &mut builder,
+                NFTA_SET_USERDATA,
+                NFTNL_UDATA_SET_COMMENT,
+                set.comment.as_deref(),
+                set.owned,
+            )
         {
             self.defer(e);
         }
@@ -2453,7 +2466,22 @@ fn append_object(builder: &mut MessageBuilder, object: &Object) -> Result<()> {
         object.family,
     );
     super::object::append_object_data(builder, &object.config);
-    append_comment(builder, NFTA_OBJ_USERDATA, NFTNL_UDATA_COMMENT, object.comment.as_deref())
+    append_userdata(builder, NFTA_OBJ_USERDATA, NFTNL_UDATA_COMMENT, object.comment.as_deref(), object.owned)
+}
+
+/// A chain's, set's or object's userdata: its comment, of libnftnl TLV
+/// type `kind`, and nlink's ownership tag if `owned` (#527).
+fn append_userdata(
+    builder: &mut MessageBuilder,
+    attr: u16,
+    kind: u8,
+    comment: Option<&str>,
+    owned: bool,
+) -> Result<()> {
+    if let Some(userdata) = super::userdata::encode_object_userdata(kind, comment, owned)? {
+        builder.append_attr(attr, &userdata);
+    }
+    Ok(())
 }
 
 /// A comment as the userdata attribute `attr`, of libnftnl TLV type
