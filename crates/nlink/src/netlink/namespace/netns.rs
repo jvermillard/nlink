@@ -524,6 +524,160 @@ impl Netns {
                 .map_or_else(|| PathBuf::from(&*self.label), |m| m.path().to_path_buf()),
         }
     }
+
+    /// The namespace's sysctls (#520): `/proc/sys`, read and written on
+    /// the handle's worker thread, inside the namespace.
+    ///
+    /// ```no_run
+    /// # fn example() -> nlink::Result<()> {
+    /// use nlink::netlink::namespace::Netns;
+    ///
+    /// let ns = Netns::open("lab-r1")?;
+    /// ns.sysctl().set("net.ipv4.ip_forward", "1")?;
+    /// assert_eq!(ns.sysctl().get("net.ipv4.ip_forward")?, "1");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sysctl(&self) -> Sysctl<'_> {
+        Sysctl { netns: self }
+    }
+
+    /// The processes with a thread in the namespace (#520), sorted: what
+    /// keeps it alive besides sockets and handles. A thread that entered
+    /// it counts, so this process is listed while a
+    /// [`run`](Self::run) or a handle's worker thread is inside. Processes
+    /// whose `/proc` entries the caller may not read are left out.
+    pub fn pids(&self) -> Result<Vec<u32>> {
+        pids_in(self.id)
+    }
+
+    /// Delete the namespace's name, as [`delete`](Self::delete) does, and
+    /// wait until the kernel is destroying the namespace (#520), which
+    /// tells a namespace that is going from one something still holds.
+    ///
+    /// The kernel destroys a namespace once nothing holds it — no process,
+    /// no socket, no other handle — and asynchronously even then. This
+    /// waits for the `RTM_DELNSID` it sends as the destruction begins, in
+    /// the calling thread's namespace, giving the namespace an id there
+    /// first if it has none. Past that point nothing can bring the
+    /// namespace back; its interfaces go in the same kernel work, just
+    /// after, so a veth's far end in another namespace can outlive the
+    /// return by a moment.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] (`is_timeout()`) when the namespace outlives
+    /// `timeout`: something still holds it. [`pids`](Self::pids) names the
+    /// processes, and the warning this logs lists them; a socket or handle
+    /// of this process's — a [`Connection`] from
+    /// [`connection`](Self::connection) — holds it too. The errors of
+    /// [`delete`](Self::delete) otherwise.
+    pub async fn delete_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        use tokio_stream::StreamExt;
+
+        use crate::netlink::{NetworkEvent, Route, RtnetlinkGroup};
+
+        let here = Connection::<Route>::new()?;
+        let fd = self.fd.as_raw_fd();
+        let nsid = match here.get_nsid(fd).await? {
+            NSID_NOT_ASSIGNED => {
+                here.set_nsid(fd, -1).await?;
+                here.get_nsid(fd).await?
+            }
+            nsid => nsid,
+        };
+        here.subscribe(&[RtnetlinkGroup::NsId])?;
+        let mut events = here.events().await;
+
+        let (id, label) = (self.id, self.label.clone());
+        self.delete()?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match tokio::time::timeout_at(deadline, events.next()).await {
+                Ok(Some(Ok(NetworkEvent::DelNsId(m)))) if m.nsid() == Some(nsid) => return Ok(()),
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(e))) => return Err(e),
+                Ok(None) => {
+                    return Err(Error::InvalidMessage(format!(
+                        "namespace {label}: the nsid event stream ended"
+                    )));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        namespace = %label,
+                        ?timeout,
+                        pids = ?pids_in(id).unwrap_or_default(),
+                        "namespace deleted but not destroyed: something still holds it"
+                    );
+                    return Err(Error::Timeout);
+                }
+            }
+        }
+    }
+}
+
+/// `NETNSA_NSID_NOT_ASSIGNED` (-1), as `get_nsid` reads it.
+const NSID_NOT_ASSIGNED: u32 = u32::MAX;
+
+/// The processes with a thread in namespace `id`.
+fn pids_in(id: NetnsId) -> Result<Vec<u32>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let in_ns = |path: PathBuf| {
+        std::fs::metadata(path).is_ok_and(|m| m.dev() == id.dev && m.ino() == id.ino)
+    };
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc").map_err(Error::Io)?.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let tasks = std::fs::read_dir(entry.path().join("task"));
+        if tasks
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|task| in_ns(task.path().join("ns/net")))
+        {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    Ok(pids)
+}
+
+/// A namespace's sysctls, from [`Netns::sysctl`]. Keys are dotted
+/// (`net.ipv4.ip_forward`) or slashed, as in
+/// [`sysctl::get`](crate::netlink::sysctl::get); every error names the key.
+#[derive(Debug, Clone, Copy)]
+pub struct Sysctl<'a> {
+    netns: &'a Netns,
+}
+
+impl Sysctl<'_> {
+    /// Read `key`.
+    pub fn get(&self, key: &str) -> Result<String> {
+        let key = key.to_string();
+        self.netns.on_worker(move || crate::netlink::sysctl::get(&key))?
+    }
+
+    /// Write `value` to `key`. Needs `CAP_NET_ADMIN` over the namespace.
+    pub fn set(&self, key: &str, value: &str) -> Result<()> {
+        let (key, value) = (key.to_string(), value.to_string());
+        self.netns.on_worker(move || crate::netlink::sysctl::set(&key, &value))?
+    }
+
+    /// Write each `(key, value)` in order, stopping at the first error.
+    pub fn set_many(&self, entries: &[(&str, &str)]) -> Result<()> {
+        let entries: Vec<(String, String)> = entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        self.netns.on_worker(move || {
+            entries
+                .iter()
+                .try_for_each(|(k, v)| crate::netlink::sysctl::set(k, v))
+        })?
+    }
 }
 
 impl AsFd for Netns {
