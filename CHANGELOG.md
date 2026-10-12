@@ -1384,6 +1384,26 @@ All notable changes to this project will be documented in this file.
   - **Tests.** Root tests cover the tag's life, and a stale marker
     reclaimed next to a live namespace left alone.
 
+- **`nlink::blocking::Connection<P>`, for code that cannot `.await`
+  (#533).**
+  - **How it works.** A worker thread owns a current-thread runtime and
+    the async connection. Each call sends its work there and waits on a
+    channel.
+  - **Where it is safe.** It never starts a runtime on the calling
+    thread, so it is safe in plain synchronous code, and in a `Drop` that
+    runs inside a tokio runtime, where `Runtime::block_on` panics.
+  - **API.**
+    - `new()`, and `in_netns(NetnsRef)` for a namespace.
+    - `run(|conn| Box::pin(async move { … }))` for any async work.
+    - Methods of its own for the common Route dumps (links, addresses,
+      routes, qdiscs) and the `del_*_if_exists` deletes (link, address,
+      qdisc, route).
+    - For nftables: `list_tables`, `list_rules` (with their counters)
+      and `del_table_if_exists`.
+  - **Tests.** Root tests cover a link deleted from a `Drop` inside a
+    tokio runtime, calls with no runtime at all, and the nftables
+    helpers.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
