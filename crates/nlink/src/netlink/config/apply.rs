@@ -463,6 +463,7 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
         Step::RaiseMtuFirst { link: name, .. } => link(name),
         Step::CreateLink(l) => link(&l.name),
         Step::ModifyLink { name, .. } => link(name),
+        Step::ModifyVethPeer(c) => link(&c.peer),
         Step::PinBridgeMtu { bridge, .. } => link(bridge),
         Step::HoldVlanDown { vlan } => link(vlan),
         Step::AddAddress(a) | Step::ChangeAddress(a) | Step::DeleteAddress { address: a, .. } => {
@@ -507,6 +508,9 @@ fn step_operation(step: &Step) -> String {
         Step::CreateLink(link) => format!("create link {}", link.name),
         Step::ModifyLink { name, changes, .. } => {
             format!("modify link {} ({})", name, changes.summary())
+        }
+        Step::ModifyVethPeer(c) => {
+            format!("modify veth peer {} in {} ({})", c.peer, c.netns, c.changes.summary())
         }
         Step::PinBridgeMtu { bridge, mtu } => format!("restore bridge {bridge} mtu={mtu}"),
         Step::HoldVlanDown { vlan } => format!("take VLAN {vlan} down"),
@@ -780,6 +784,15 @@ async fn run_step(
         } => {
             modify_link(conn, name, changes, *mtu_already_set).await?;
             Outcome::Changed(format!("Modified link {} ({})", name, changes.summary()), 1)
+        }
+        // Through a connection in the peer's namespace (#680).
+        Step::ModifyVethPeer(c) => {
+            let there = Connection::<Route>::new_in(&c.netns)?;
+            modify_link(&there, &c.peer, &c.changes, false).await?;
+            Outcome::Changed(
+                format!("Modified veth peer {} in {} ({})", c.peer, c.netns, c.changes.summary()),
+                1,
+            )
         }
         // `br_mtu_auto_adjust()` sets a bridge to its smallest port's MTU
         // when a port joins or leaves, unless the MTU was set through
@@ -1609,13 +1622,28 @@ async fn create_link(
         _ => None,
     };
     let config = match (&link.link_type, &peer_netns) {
-        (DeclaredLinkType::Veth { peer, .. }, Some(netns)) => {
+        (
+            DeclaredLinkType::Veth {
+                peer,
+                peer_address,
+                peer_mtu,
+                ..
+            },
+            Some(netns),
+        ) => {
             let mut c = VethLink::new(&link.name, peer).peer_netns_fd(netns);
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
             }
             if let Some(addr) = link.address {
                 c = c.address(addr);
+            }
+            // The peer's own settings, there (#680).
+            if let Some(mtu) = peer_mtu {
+                c = c.peer_mtu(*mtu);
+            }
+            if let Some(addr) = peer_address {
+                c = c.peer_address(*addr);
             }
             Some(Box::new(c) as Box<dyn crate::netlink::link::LinkConfig>)
         }
@@ -1659,6 +1687,20 @@ async fn create_link(
             conn.set_link_down(&link.name).await?;
         }
         _ => {}
+    }
+    // A peer is created down, and comes up only once the pair exists
+    // (`veth_open` refuses a veth with no peer, #517): bring it up there
+    // (#680).
+    if let (
+        DeclaredLinkType::Veth {
+            peer,
+            peer_state: super::types::LinkState::Up,
+            ..
+        },
+        Some(netns),
+    ) = (&link.link_type, &peer_netns)
+    {
+        netns.connection::<Route>()?.set_link_up(peer.as_str()).await?;
     }
 
     Ok(())

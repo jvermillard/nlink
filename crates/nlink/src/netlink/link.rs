@@ -694,6 +694,7 @@ pub struct VethLink {
     mtu: Option<u32>,
     address: Option<[u8; 6]>,
     peer_address: Option<[u8; 6]>,
+    peer_mtu: Option<u32>,
     /// The peer's namespace, held until the link is created.
     peer_netns_fd: Option<std::os::fd::OwnedFd>,
     peer_netns_pid: Option<u32>,
@@ -714,6 +715,7 @@ impl VethLink {
             mtu: None,
             address: None,
             peer_address: None,
+            peer_mtu: None,
             peer_netns_fd: None,
             peer_netns_pid: None,
             error: None,
@@ -735,6 +737,13 @@ impl VethLink {
     /// Set the MAC address for the peer interface.
     pub fn peer_address(mut self, addr: [u8; 6]) -> Self {
         self.peer_address = Some(addr);
+        self
+    }
+
+    /// Set the peer's MTU, where it differs from this end's
+    /// ([`mtu`](Self::mtu) sets both).
+    pub fn peer_mtu(mut self, mtu: u32) -> Self {
+        self.peer_mtu = Some(mtu);
         self
     }
 
@@ -831,8 +840,8 @@ impl LinkConfig for VethLink {
         // Peer name
         builder.append_attr_str(IflaAttr::Ifname as u16, &self.peer_name);
 
-        // Peer MTU
-        if let Some(mtu) = self.mtu {
+        // Peer MTU: its own, else this end's.
+        if let Some(mtu) = self.peer_mtu.or(self.mtu) {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
         }
 

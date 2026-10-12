@@ -202,6 +202,37 @@ impl PlanOptions {
     }
 }
 
+/// A veth peer's declared settings, changed in the namespace it lives in
+/// (#680): no declaration in this config can name it there.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct VethPeerChange {
+    /// The veth whose peer it is.
+    pub link: String,
+    /// The peer.
+    pub peer: String,
+    /// The namespace it lives in.
+    pub netns: crate::netlink::namespace::NetnsRef,
+    /// What changes: its state, MTU and MAC.
+    pub changes: LinkChanges,
+}
+
+impl std::fmt::Display for VethPeerChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "~ veth peer {} of {} in {} ({})",
+            self.peer,
+            self.link,
+            self.netns,
+            self.changes.summary()
+        )
+    }
+}
+
 /// Difference between desired and current network state.
 ///
 /// `#[non_exhaustive]` since 0.24 (#165): new `*_to_add` /
@@ -225,6 +256,9 @@ pub struct ConfigDiff {
     pub links_to_add: Vec<DeclaredLink>,
     /// Links to modify (name, changes).
     pub links_to_modify: Vec<(String, LinkChanges)>,
+    /// Veth peers to change in the namespace they live in (#680): their
+    /// declared MAC, MTU and state.
+    pub veth_peers_to_modify: Vec<VethPeerChange>,
 
     /// Links the config declares without a kind — so it does not create
     /// them — that do not exist, and that no veth or netkit pair in this
@@ -467,6 +501,7 @@ impl ConfigDiff {
         self.links_to_recreate.is_empty()
             && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
+            && self.veth_peers_to_modify.is_empty()
             && self.links_missing.is_empty()
             && self.links_to_remove.is_empty()
             && self.addresses_to_add.is_empty()
@@ -495,6 +530,7 @@ impl ConfigDiff {
         self.links_to_recreate.len()
             + self.links_to_add.len()
             + self.links_to_modify.len()
+            + self.veth_peers_to_modify.len()
             + self.links_missing.len()
             + self.links_to_remove.len()
             + self.addresses_to_add.len()
@@ -544,6 +580,9 @@ impl ConfigDiff {
         }
         for (name, changes) in &self.links_to_modify {
             lines.push(format!("~ link {} ({})", name, changes.summary()));
+        }
+        for peer in &self.veth_peers_to_modify {
+            lines.push(peer.to_string());
         }
         for name in &self.links_missing {
             lines.push(format!(
@@ -1094,6 +1133,11 @@ pub struct Snapshot {
     /// [`read`](Self::read), the ones a config names for `read_for`. A
     /// namespace with no id has no peer of ours in it.
     netns_ids: HashMap<crate::netlink::namespace::NetnsRef, Option<u32>>,
+    /// The links of each namespace a veth peer's declared settings are
+    /// compared in (#680): every named namespace with an id here for
+    /// [`read`](Self::read), since a peer of ours makes one; the ones a
+    /// config sets a peer in for `read_for`.
+    peer_links: HashMap<crate::netlink::namespace::NetnsRef, Vec<LinkMessage>>,
 }
 
 impl Snapshot {
@@ -1121,7 +1165,36 @@ impl Snapshot {
             .map(crate::netlink::namespace::NetnsRef::Named)
             .collect();
         snapshot.read_netns_ids(conn, named, false).await?;
+        let linked: Vec<crate::netlink::namespace::NetnsRef> = snapshot
+            .netns_ids
+            .iter()
+            .filter(|(_, id)| id.is_some())
+            .map(|(r, _)| r.clone())
+            .collect();
+        snapshot.read_peer_links(linked, false).await?;
         Ok(snapshot)
+    }
+
+    /// The links of each of `refs` (#680), read through a connection
+    /// there. With `required` off, one that will not open is left out.
+    async fn read_peer_links(
+        &mut self,
+        refs: impl IntoIterator<Item = crate::netlink::namespace::NetnsRef>,
+        required: bool,
+    ) -> Result<()> {
+        for r in refs {
+            if r.is_default() || self.peer_links.contains_key(&r) {
+                continue;
+            }
+            let netns = match r.open() {
+                Ok(netns) => netns,
+                Err(_) if !required => continue,
+                Err(e) => return Err(e),
+            };
+            let links = netns.connection::<Route>()?.get_links().await?;
+            self.peer_links.insert(r, links);
+        }
+        Ok(())
     }
 
     /// The id each of `refs` has here (#516). With `required` off, one
@@ -1221,6 +1294,13 @@ impl Snapshot {
         let peer_namespaces: Vec<crate::netlink::namespace::NetnsRef> =
             config.links.iter().filter_map(|l| l.peer_netns().cloned()).collect();
         snapshot.read_netns_ids(conn, peer_namespaces, true).await?;
+        let set_peers: Vec<crate::netlink::namespace::NetnsRef> = config
+            .links
+            .iter()
+            .filter(|l| l.sets_veth_peer())
+            .filter_map(|l| l.peer_netns().cloned())
+            .collect();
+        snapshot.read_peer_links(set_peers, true).await?;
         Ok(snapshot)
     }
 
@@ -1238,6 +1318,7 @@ impl Snapshot {
             fdb: Vec::new(),
             rules: Vec::new(),
             netns_ids: HashMap::new(),
+            peer_links: HashMap::new(),
             nexthops: Vec::new(),
         })
     }
@@ -1365,6 +1446,71 @@ pub(crate) fn diff_snapshot(
     // back to a name (Plan 207b H2).
     let flushing = diff_links(config, &link_by_name, &ifindex_to_name, &plan, &mut diff);
     diff_port_vlans(config, &link_by_name, &snapshot.bridge_vlans, &mut diff);
+
+    // A veth peer's declared settings, in the namespace it lives in (#680).
+    // A veth this apply creates, or creates again, gets them at create.
+    for declared in config.links.iter().filter(|l| l.sets_veth_peer()) {
+        let DeclaredLinkType::Veth {
+            peer,
+            peer_netns: Some(netns),
+            peer_address,
+            peer_mtu,
+            peer_state,
+        } = &declared.link_type
+        else {
+            continue;
+        };
+        if netns.is_default()
+            || diff.links_to_add.iter().any(|l| l.name == declared.name)
+            || !link_by_name.contains_key(declared.name.as_str())
+        {
+            continue;
+        }
+        let Some(links) = snapshot.peer_links.get(netns) else {
+            return Err(crate::Error::invalid_message(format!(
+                "this snapshot did not read namespace {netns}, where {}'s peer's settings are \
+                 declared: NetworkConfig::diff reads it",
+                declared.name
+            )));
+        };
+        // Not there: the peer-namespace check recreates the veth.
+        let Some(live) = links.iter().find(|l| l.name() == Some(peer.as_str())) else {
+            continue;
+        };
+        // What it was, so the plan can put it back (`Step::inverse`).
+        let mut changes = LinkChanges {
+            was: Some(LinkWas {
+                up: live.is_up(),
+                mtu: live.mtu,
+                address: live.address().and_then(|a| <[u8; 6]>::try_from(a).ok()),
+                ..LinkWas::default()
+            }),
+            ..LinkChanges::default()
+        };
+        match peer_state {
+            LinkState::Up if !live.is_up() => changes.set_up = true,
+            LinkState::Down if live.is_up() => changes.set_down = true,
+            _ => {}
+        }
+        if let Some(mtu) = peer_mtu
+            && live.mtu != Some(*mtu)
+        {
+            changes.set_mtu = Some(*mtu);
+        }
+        if let Some(mac) = peer_address
+            && live.address().is_none_or(|have| have != mac)
+        {
+            changes.set_address = Some(*mac);
+        }
+        if !changes.is_empty() {
+            diff.veth_peers_to_modify.push(VethPeerChange {
+                link: declared.name.clone(),
+                peer: peer.clone(),
+                netns: netns.clone(),
+                changes,
+            });
+        }
+    }
 
     // The links this apply flushes: the ones its link changes take down or
     // move across an L3 master, the ports a recreated bond or VRF releases
@@ -1908,6 +2054,7 @@ fn diff_links<'a>(
             DeclaredLinkType::Veth {
                 peer,
                 peer_netns: None | Some(crate::netlink::namespace::NetnsRef::Default),
+                ..
             }
             | DeclaredLinkType::Netkit { peer, .. } => Some(peer.as_str()),
             _ => None,
@@ -3723,6 +3870,7 @@ mod tests {
                 "routes-to-remove",
                 "rules-to-add",
                 "rules-to-remove",
+                "veth-peers-to-modify",
             ]
         );
         assert_eq!(

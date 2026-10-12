@@ -82,6 +82,9 @@ pub enum Step {
         /// The MTU was set by an earlier [`Self::RaiseMtuFirst`].
         mtu_already_set: bool,
     },
+    /// Change a veth's peer in the namespace it lives in: its state, MTU
+    /// and MAC (#680).
+    ModifyVethPeer(super::VethPeerChange),
     /// Set a bridge's declared MTU again if the port changes before moved
     /// it (`br_mtu_auto_adjust`). Not counted as a change of its own.
     PinBridgeMtu {
@@ -260,6 +263,10 @@ impl Step {
                 after: n.clone(),
             },
             Self::DeleteRule(r) => Self::AddRule(r.clone()),
+            Self::ModifyVethPeer(c) => Self::ModifyVethPeer(super::VethPeerChange {
+                changes: invert_link_changes(&c.changes)?,
+                ..c.clone()
+            }),
             _ => return None,
         })
     }
@@ -353,6 +360,7 @@ impl fmt::Display for Step {
                 "! link {name} (missing: it does not exist, and the config does not create it)"
             ),
             Self::RefuseRoute(conflict) => write!(f, "{conflict}"),
+            Self::ModifyVethPeer(change) => write!(f, "{change}"),
             Self::RefuseNexthop(conflict) => write!(f, "{conflict}"),
             Self::RefuseRemoval(removal) => write!(f, "{removal}"),
             Self::RefuseRecreate(recreate) => write!(f, "{recreate}"),
@@ -557,6 +565,7 @@ impl super::ConfigDiff {
                 mtu_already_set: self.mtus_first.iter().any(|(n, _)| n == name),
             });
         }
+        steps.extend(self.veth_peers_to_modify.iter().cloned().map(Step::ModifyVethPeer));
         steps.extend(self.bridge_mtus.iter().map(|(bridge, mtu)| Step::PinBridgeMtu {
             bridge: bridge.clone(),
             mtu: *mtu,
