@@ -708,6 +708,34 @@ impl<P: ProtocolState> Connection<P> {
         self.socket.set_strict_checking(on)
     }
 
+    /// Receive the events of every namespace that has an id in this
+    /// connection's (`NETLINK_LISTEN_ALL_NSID`, kernel 4.6+; #523), not
+    /// only its own. Which one each came from is
+    /// [`EventMeta::nsid`](super::EventMeta::nsid), through a stream's
+    /// `with_meta()`; without it they are indistinguishable. A namespace
+    /// gets an id with [`set_nsid`](Connection::<Route>::set_nsid) or
+    /// `ip netns set`. Needs `CAP_NET_BROADCAST` over each namespace.
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.listen_all_nsid(true)?;
+    /// conn.subscribe(&[RtnetlinkGroup::Link])?;
+    /// let mut events = conn.events().await.with_meta();
+    /// while let Some((meta, event)) = events.next().await.transpose()? {
+    ///     println!("nsid {:?}: {event:?}", meta.nsid);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "listen_all_nsid"))]
+    pub fn listen_all_nsid(&self, on: bool) -> Result<()> {
+        self.socket.set_listen_all_nsid(on)
+    }
+
     /// Toggle extended-ack reception (`NETLINK_EXT_ACK`, kernel
     /// 4.12+). **Enabled by default** during socket construction —
     /// disabling is rarely useful in practice. Exposed for parity
