@@ -836,25 +836,39 @@ mod nlmsgerr_tests {
 
     /// #526: an errno is read against the request it refused. ESRCH to a
     /// route delete and EADDRNOTAVAIL to an address delete mean "not
-    /// there"; to anything else they do not.
+    /// there"; to anything else they do not. #722: only on rtnetlink, where
+    /// those type numbers mean those requests.
     #[test]
     fn an_errno_is_read_against_its_request() {
-        use crate::netlink::ErrorKind;
+        use crate::netlink::{ErrorKind, Protocol};
         let refusal = |request_type: u16, errno: i32| {
             let mut req = request();
             req[4..6].copy_from_slice(&request_type.to_ne_bytes());
             let payload = error_payload(-errno, &req, false, &[]);
             NlMsgError::from_bytes(&payload).unwrap().to_error(0, &payload)
         };
-        let gone_route = refusal(NlMsgType::RTM_DELROUTE, libc::ESRCH);
+        let gone_route = refusal(NlMsgType::RTM_DELROUTE, libc::ESRCH).in_protocol(Protocol::Route);
         assert!(gone_route.is_not_found(), "{gone_route}");
         assert_eq!(gone_route.kind(), ErrorKind::NotFound);
         assert_eq!(gone_route.request_type(), Some(NlMsgType::RTM_DELROUTE));
-        let gone_addr = refusal(NlMsgType::RTM_DELADDR, libc::EADDRNOTAVAIL);
+        assert_eq!(gone_route.protocol(), Some(Protocol::Route));
+        let gone_addr =
+            refusal(NlMsgType::RTM_DELADDR, libc::EADDRNOTAVAIL).in_protocol(Protocol::Route);
         assert!(gone_addr.is_not_found(), "{gone_addr}");
-        let other = refusal(NlMsgType::RTM_NEWROUTE, libc::ESRCH);
+        let other = refusal(NlMsgType::RTM_NEWROUTE, libc::ESRCH).in_protocol(Protocol::Route);
         assert!(!other.is_not_found(), "ESRCH to an add is not \"not there\"");
         assert_eq!(other.kind(), ErrorKind::Other);
+
+        // Type 25 is XFRM_MSG_UPDPOLICY on xfrm, and can be a family id on
+        // generic netlink; 21 is XFRM_MSG_GETPOLICY.
+        for protocol in [Protocol::Xfrm, Protocol::Generic] {
+            let e = refusal(25, libc::ESRCH).in_protocol(protocol);
+            assert!(!e.is_not_found(), "{protocol:?}: {e}");
+            let e = refusal(21, libc::EADDRNOTAVAIL).in_protocol(protocol);
+            assert!(!e.is_not_found(), "{protocol:?}: {e}");
+        }
+        // Where the socket was not known, nothing is assumed.
+        assert!(!refusal(NlMsgType::RTM_DELROUTE, libc::ESRCH).is_not_found());
     }
 
     /// #530: a positive value in an ACK is that value, not an errno; a

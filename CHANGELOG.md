@@ -591,6 +591,21 @@ All notable changes to this project will be documented in this file.
     `RTM_DELADDR` are not-found, and `ESRCH` to `RTM_NEWROUTE` is not.
     With the errno read alone, the test fails.
 
+- **`kind()` read a request type without its protocol (#722).** #719
+  classifies `ESRCH` to a route delete and `EADDRNOTAVAIL` to an address
+  delete as `NotFound`, keyed on the refused request's `nlmsg_type`. Type
+  numbers mean something only within a protocol: 25 is also
+  `XFRM_MSG_UPDPOLICY`, 21 is `XFRM_MSG_GETPOLICY`, and a generic-netlink
+  family can have either id. Any of those refusals answered
+  `is_not_found()`.
+  - A kernel error now records the protocol it came back on
+    (`ErrorDetail::Kernel::protocol`, `Error::protocol()`). The
+    connection's request, ACK and dump paths and `Batch` fill it in.
+  - The two pairs apply on rtnetlink only.
+  - **Test.** A unit test refuses type 25 with `ESRCH` and type 21 with
+    `EADDRNOTAVAIL` over xfrm and generic netlink; neither is
+    `NotFound`. Without the protocol check, the test fails.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
