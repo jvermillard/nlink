@@ -563,3 +563,108 @@ async fn an_event_says_who_caused_it() -> Result<()> {
     assert_eq!((meta.portid, meta.seq), (0, 0));
     Ok(())
 }
+
+/// A factory for `ns` that fails its first `failures` calls.
+fn flaky_factory(
+    ns: &TestNamespace,
+    failures: u32,
+) -> (
+    nlink::netlink::resync::ConnectionFactory<nlink::netlink::Route>,
+    std::sync::Arc<std::sync::atomic::AtomicU32>,
+) {
+    use std::sync::atomic::Ordering;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counted = calls.clone();
+    let name = ns.name().to_string();
+    let factory: nlink::netlink::resync::ConnectionFactory<nlink::netlink::Route> =
+        std::sync::Arc::new(move || {
+            let n = counted.fetch_add(1, Ordering::SeqCst);
+            let name = name.clone();
+            Box::pin(async move {
+                if n < failures {
+                    return Err(nlink::Error::InvalidMessage(format!("attempt {n} fails")));
+                }
+                nlink::netlink::namespace::connection_for(&name)
+            })
+        });
+    (factory, calls)
+}
+
+/// #523: a restarting stream reports each failure and tries again, and
+/// once a connection comes up it starts as a resync stream does — the
+/// initial snapshot, then live events.
+#[tokio::test]
+async fn a_restarting_stream_starts_again_after_failures() -> Result<()> {
+    use nlink::netlink::Connection;
+    use nlink::netlink::resync::{Backoff, ResyncedEvent};
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("restart")?;
+    let (factory, calls) = flaky_factory(&ns, 2);
+    let backoff = Backoff::new(Duration::from_millis(10), Duration::from_millis(50));
+    let mut stream = Connection::events_restarting(factory, backoff);
+
+    let mut next = async || {
+        tokio::time::timeout(WITHIN, stream.next())
+            .await
+            .expect("an item")
+            .expect("the stream goes on")
+    };
+    for n in 0..2 {
+        let err = next().await.expect_err("the factory fails");
+        assert!(err.to_string().contains(&format!("attempt {n}")), "{err}");
+    }
+    assert!(next().await?.is_initial_sync_start());
+    while !next().await?.is_resync_end() {}
+
+    ns.connection()?.add_link(DummyLink::new("d0")).await?;
+    loop {
+        if let ResyncedEvent::Event(NetworkEvent::NewLink(l)) = next().await?
+            && l.name() == Some("d0")
+        {
+            break;
+        }
+    }
+    // Two failures, the stream's connection, and the snapshot's.
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    Ok(())
+}
+
+/// #523: no restart brings back a deleted namespace, so the restarting
+/// stream ends with `NamespaceDeleted` instead of retrying forever.
+#[tokio::test]
+async fn a_restarting_stream_ends_when_its_namespace_is_deleted() -> Result<()> {
+    use nlink::netlink::Connection;
+    use nlink::netlink::namespace;
+    use nlink::netlink::resync::Backoff;
+    use tokio_stream::StreamExt;
+    require_root!();
+
+    let ns = TestNamespace::new("restart-del")?;
+    let (factory, _) = flaky_factory(&ns, 0);
+    let backoff = Backoff::new(Duration::from_millis(10), Duration::from_millis(50));
+    let mut stream = Connection::events_restarting(factory, backoff);
+    let first = stream.next().await.expect("an item")?;
+    assert!(first.is_initial_sync_start(), "{first:?}");
+    while !stream.next().await.expect("an item")?.is_resync_end() {}
+
+    namespace::delete(ns.name())?;
+    let end = tokio::time::Instant::now() + WITHIN;
+    let err = loop {
+        match tokio::time::timeout_at(end, stream.next()).await {
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(e))) => break e,
+            Ok(None) => panic!("the stream ended without an error"),
+            Err(_) => panic!("nothing within {WITHIN:?} of the deletion"),
+        }
+    };
+    assert!(err.is_namespace_deleted(), "{err}");
+    let after = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
+    assert!(
+        matches!(after, Ok(None)),
+        "the stream should end, not restart: {after:?}"
+    );
+    Ok(())
+}
