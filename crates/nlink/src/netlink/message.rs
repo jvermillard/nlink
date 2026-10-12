@@ -869,6 +869,20 @@ mod nlmsgerr_tests {
         }
         // Where the socket was not known, nothing is assumed.
         assert!(!refusal(NlMsgType::RTM_DELROUTE, libc::ESRCH).is_not_found());
+
+        // #718: xfrm answers a request for an SA it does not have with
+        // ESRCH. 17, 18 and 26 are its DELSA, GETSA and UPDSA, and on
+        // rtnetlink RTM_DELLINK, RTM_GETLINK and RTM_SETLINK, where ESRCH
+        // means nothing of the kind.
+        use crate::netlink::xfrm::{XFRM_MSG_DELSA, XFRM_MSG_GETSA, XFRM_MSG_UPDSA};
+        for ty in [XFRM_MSG_DELSA, XFRM_MSG_GETSA, XFRM_MSG_UPDSA] {
+            let sa = refusal(ty, libc::ESRCH).in_protocol(Protocol::Xfrm);
+            assert!(sa.is_not_found(), "xfrm {ty}: {sa}");
+            let link = refusal(ty, libc::ESRCH).in_protocol(Protocol::Route);
+            assert!(!link.is_not_found(), "rtnetlink {ty}: {link}");
+        }
+        let policy = refusal(25, libc::ESRCH).in_protocol(Protocol::Xfrm);
+        assert!(!policy.is_not_found(), "ESRCH to a policy update: {policy}");
     }
 
     /// #530: a positive value in an ACK is that value, not an errno; a

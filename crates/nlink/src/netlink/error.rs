@@ -1365,6 +1365,19 @@ impl Error {
                 protocol: Some(crate::netlink::Protocol::Route),
                 ..
             } => ErrorKind::NotFound,
+            // xfrm answers a request for an SA it does not have with ESRCH
+            // (`xfrm_user_state_lookup`, `xfrm_state_update`), #718.
+            ErrorDetail::Kernel {
+                errno: libc::ESRCH,
+                request_type:
+                    Some(
+                        crate::netlink::xfrm::XFRM_MSG_DELSA
+                        | crate::netlink::xfrm::XFRM_MSG_GETSA
+                        | crate::netlink::xfrm::XFRM_MSG_UPDSA,
+                    ),
+                protocol: Some(crate::netlink::Protocol::Xfrm),
+                ..
+            } => ErrorKind::NotFound,
             _ => self.errno().map_or(ErrorKind::Other, ErrorKind::from_errno),
         }
     }

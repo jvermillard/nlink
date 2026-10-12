@@ -52,15 +52,15 @@ const NLM_F_REPLACE: u16 = 0x100;
 
 // XFRM message types (from linux/xfrm.h enum, counted from XFRM_MSG_BASE = 0x10 = 16)
 const XFRM_MSG_NEWSA: u16 = 16;
-const XFRM_MSG_DELSA: u16 = 17;
-const XFRM_MSG_GETSA: u16 = 18;
+pub(crate) const XFRM_MSG_DELSA: u16 = 17;
+pub(crate) const XFRM_MSG_GETSA: u16 = 18;
 const XFRM_MSG_NEWPOLICY: u16 = 19;
 const XFRM_MSG_DELPOLICY: u16 = 20;
 const XFRM_MSG_GETPOLICY: u16 = 21;
 // Plan 221: UPDPOLICY=25 (was missing; nlink had value 25 mis-assigned to FLUSHSA),
 // UPDSA=26 (was missing). Needed for the corrected update_sp / update_sa dispatch.
 const XFRM_MSG_UPDPOLICY: u16 = 25;
-const XFRM_MSG_UPDSA: u16 = 26;
+pub(crate) const XFRM_MSG_UPDSA: u16 = 26;
 // Plan 221: FLUSHSA was hardcoded to 25 (which is UPDPOLICY); flush_sa() was sending
 // XFRM_MSG_UPDPOLICY with an 8-byte xfrm_usersa_flush body the kernel expected to be a
 // 168-byte xfrm_userpolicy_info. Corrected to the kernel UAPI value 28.
@@ -1544,6 +1544,25 @@ impl Connection<Xfrm> {
         self.send_ack(b).await
     }
 
+    /// Delete a Security Association if it exists (#718). `Ok(true)` when
+    /// one was deleted, `Ok(false)` when none matched. The kernel answers
+    /// that with `ESRCH`, which [`Error::is_not_found`](crate::Error::is_not_found) reads as such for
+    /// an xfrm SA request.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_sa_if_exists"))]
+    pub async fn del_sa_if_exists(
+        &self,
+        src: IpAddr,
+        dst: IpAddr,
+        spi: u32,
+        proto: IpsecProtocol,
+    ) -> Result<bool> {
+        match self.del_sa(src, dst, spi, proto).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Replace an existing Security Association in place — same
     /// wire shape as [`Self::add_sa`] but with
     /// `NLM_F_CREATE | NLM_F_REPLACE`. The kernel matches on the
@@ -1667,6 +1686,18 @@ impl Connection<Xfrm> {
         };
         b.append_bytes(id.as_bytes());
         self.send_ack(b).await
+    }
+
+    /// Delete a Security Policy if it exists (#718). `Ok(true)` when one
+    /// was deleted, `Ok(false)` when none matched: the kernel answers that
+    /// with `ENOENT`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_sp_if_exists"))]
+    pub async fn del_sp_if_exists(&self, sel: XfrmSelector, direction: PolicyDirection) -> Result<bool> {
+        match self.del_sp(sel, direction).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Flush every Security Policy in the kernel's database.

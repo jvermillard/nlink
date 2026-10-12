@@ -2726,6 +2726,18 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_rule"))
     }
 
+    /// Delete a routing rule if it exists (#718). `Ok(true)` when one was
+    /// deleted, `Ok(false)` when none matched: the kernel answers that
+    /// with `ENOENT`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule_if_exists"))]
+    pub async fn del_rule_if_exists(&self, rule: super::rule::RuleBuilder) -> Result<bool> {
+        match self.del_rule(rule).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete a rule by priority: the first at it, whatever it does. Until
     /// 0.32 only a rule looking the main table up was found (#667).
     ///

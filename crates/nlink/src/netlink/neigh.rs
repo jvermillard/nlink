@@ -467,6 +467,18 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_neighbor"))
     }
 
+    /// Delete a neighbour entry if it exists (#718). `Ok(true)` when one
+    /// was deleted, `Ok(false)` when there was none, which also covers a
+    /// missing interface. The kernel answers a missing entry with `ENOENT`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_neighbor_if_exists"))]
+    pub async fn del_neighbor_if_exists<N: NeighborConfig>(&self, config: N) -> Result<bool> {
+        match self.del_neighbor(config).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Add an IPv4 neighbor entry by interface index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
