@@ -281,6 +281,7 @@ pub struct WgPeerBuilder {
     endpoint: Option<SocketAddr>,
     persistent_keepalive: Option<u16>,
     allowed_ips: Vec<AllowedIp>,
+    removed_allowed_ips: Vec<AllowedIp>,
     flags: u32,
 }
 
@@ -299,6 +300,7 @@ impl std::fmt::Debug for WgPeerBuilder {
             .field("endpoint", &self.endpoint)
             .field("persistent_keepalive", &self.persistent_keepalive)
             .field("allowed_ips", &self.allowed_ips)
+            .field("removed_allowed_ips", &self.removed_allowed_ips)
             .field("flags", &self.flags)
             .finish()
     }
@@ -313,8 +315,40 @@ impl WgPeerBuilder {
             endpoint: None,
             persistent_keepalive: None,
             allowed_ips: Vec::new(),
+            removed_allowed_ips: Vec::new(),
             flags: 0,
         }
+    }
+
+    /// Remove one allowed-IP prefix from the peer, leaving the others —
+    /// `WGALLOWEDIP_F_REMOVE_ME`, kernel 6.16+ (#529). An older kernel
+    /// refuses the message (`EINVAL`); see
+    /// [`allowed_ip_removal_supported`](crate::netlink::Connection::allowed_ip_removal_supported).
+    /// Unverified on a kernel that has it: this one is 6.12.
+    pub fn remove_allowed_ip(mut self, ip: AllowedIp) -> Self {
+        self.removed_allowed_ips.push(ip);
+        self
+    }
+
+    /// The prefixes to remove.
+    pub fn get_removed_allowed_ips(&self) -> &[AllowedIp] {
+        &self.removed_allowed_ips
+    }
+
+    /// Change the peer only if the device has it (`WGPEER_F_UPDATE_ONLY`).
+    pub fn update_only(mut self) -> Self {
+        self.flags |= WgPeerFlags::UpdateOnly as u32;
+        self
+    }
+
+    /// Every allowed-IP entry the message carries: the additions, then
+    /// the removals (`true`).
+    pub(crate) fn allowed_ip_entries(&self) -> Vec<(AllowedIp, bool)> {
+        self.allowed_ips
+            .iter()
+            .map(|ip| (*ip, false))
+            .chain(self.removed_allowed_ips.iter().map(|ip| (*ip, true)))
+            .collect()
     }
 
     /// Set the preshared key.

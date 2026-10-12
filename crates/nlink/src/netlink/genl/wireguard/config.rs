@@ -574,6 +574,7 @@ impl WireguardConfig {
             endpoint: Some(endpoint),
             persistent_keepalive,
             allowed_ips,
+            endpoint_policy: EndpointPolicy::default(),
         };
         let device = DeclaredWgDevice {
             ifname: ifname.into(),
@@ -710,6 +711,7 @@ fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
                         endpoint: None,
                         persistent_keepalive: None,
                         allowed_ips: Vec::new(),
+                        endpoint_policy: EndpointPolicy::default(),
                     });
                 }
                 other => {
@@ -839,6 +841,16 @@ fn parse_fwmark(s: &str) -> Result<u32> {
 
 /// Allowed IPs as the kernel's trie holds them: each masked to its prefix
 /// length, each prefix once, in a canonical order.
+/// A host prefix the peer holds neither as declared nor as removed: one
+/// it does not hold, for the removal probe.
+fn absent_prefix(declared: &[AllowedIp], removed: &[AllowedIp]) -> AllowedIp {
+    let held = |ip: &AllowedIp| declared.iter().chain(removed).any(|h| h.addr == ip.addr && h.cidr == ip.cidr);
+    (0..=u8::MAX)
+        .map(|i| AllowedIp::v4(std::net::Ipv4Addr::new(255, 255, 255, 255 - i), 32))
+        .find(|ip| !held(ip))
+        .unwrap_or(AllowedIp::v4(std::net::Ipv4Addr::BROADCAST, 32))
+}
+
 fn allowed_ip_set(ips: &[AllowedIp]) -> std::collections::BTreeSet<(IpAddr, u8)> {
     ips.iter()
         .map(|ip| {
@@ -1105,6 +1117,24 @@ pub struct DeclaredWgPeer {
     )]
     pub persistent_keepalive: Option<Duration>,
     pub allowed_ips: Vec<AllowedIp>,
+    /// Whether the endpoint is kept to, or set once (#529).
+    pub endpoint_policy: EndpointPolicy,
+}
+
+/// How a declared peer's endpoint is kept to (#529).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum EndpointPolicy {
+    /// The endpoint is the declared one: a peer that roamed is put back.
+    #[default]
+    Enforce,
+    /// The endpoint is set when the peer is added, and then left to the
+    /// peer: one that roamed — its handshakes now come from elsewhere —
+    /// keeps where it went.
+    InitialOnly,
 }
 
 impl std::fmt::Debug for DeclaredWgPeer {
@@ -1143,7 +1173,9 @@ impl DeclaredWgPeer {
                 changes.preshared_key_set = true;
             }
         }
+        // A peer that may roam keeps the endpoint it moved to (#529).
         if let Some(ep) = self.endpoint
+            && self.endpoint_policy == EndpointPolicy::Enforce
             && current.endpoint != Some(ep)
         {
             changes.endpoint_set = true;
@@ -1161,8 +1193,12 @@ impl DeclaredWgPeer {
         // dumps as `10.0.0.0/24` and a prefix declared twice dumps once.
         // Comparing the declaration as written rewrote such a peer on
         // every apply (#TBD).
-        if allowed_ip_set(&self.allowed_ips) != allowed_ip_set(&current.allowed_ips) {
+        let (want, have) = (allowed_ip_set(&self.allowed_ips), allowed_ip_set(&current.allowed_ips));
+        if want != have {
             changes.allowed_ips_set = true;
+            let as_ip = |&(addr, cidr): &(IpAddr, u8)| AllowedIp { addr, cidr };
+            changes.allowed_ips_added = want.difference(&have).map(as_ip).collect();
+            changes.allowed_ips_removed = have.difference(&want).map(as_ip).collect();
         }
 
         changes
@@ -1193,6 +1229,7 @@ impl DeclaredWgPeer {
         &self,
         mut b: WgPeerBuilder,
         changes: &PeerChanges,
+        removal_supported: bool,
     ) -> WgPeerBuilder {
         if changes.preshared_key_set
             && let Some(psk) = self.preshared_key
@@ -1212,10 +1249,21 @@ impl DeclaredWgPeer {
             b = b.persistent_keepalive(keepalive_secs(ka));
         }
         if changes.allowed_ips_set {
-            for ip in &self.allowed_ips {
-                b = b.allowed_ip(*ip);
+            if changes.allowed_ips_removed.is_empty() || removal_supported {
+                // Only what changed: replacing the whole list briefly
+                // drops traffic to the prefixes that did not (#529).
+                for ip in &changes.allowed_ips_added {
+                    b = b.allowed_ip(*ip);
+                }
+                for ip in &changes.allowed_ips_removed {
+                    b = b.remove_allowed_ip(*ip);
+                }
+            } else {
+                for ip in &self.allowed_ips {
+                    b = b.allowed_ip(*ip);
+                }
+                b = b.replace_allowed_ips();
             }
-            b = b.replace_allowed_ips();
         }
         b
     }
@@ -1230,6 +1278,7 @@ pub struct DeclaredWgPeerBuilder {
     endpoint: Option<SocketAddr>,
     persistent_keepalive: Option<Duration>,
     allowed_ips: Vec<AllowedIp>,
+    endpoint_policy: EndpointPolicy,
 }
 
 impl std::fmt::Debug for DeclaredWgPeerBuilder {
@@ -1259,7 +1308,15 @@ impl DeclaredWgPeerBuilder {
             endpoint: None,
             persistent_keepalive: None,
             allowed_ips: Vec::new(),
+            endpoint_policy: EndpointPolicy::Enforce,
         }
+    }
+
+    /// Keep to the declared endpoint, or set it once and let the peer roam
+    /// (#529): see [`EndpointPolicy`].
+    pub fn endpoint_policy(mut self, policy: EndpointPolicy) -> Self {
+        self.endpoint_policy = policy;
+        self
     }
 
     pub fn preshared_key(mut self, key: [u8; WG_KEY_LEN]) -> Self {
@@ -1293,6 +1350,7 @@ impl DeclaredWgPeerBuilder {
             endpoint: self.endpoint,
             persistent_keepalive: self.persistent_keepalive,
             allowed_ips: self.allowed_ips,
+            endpoint_policy: self.endpoint_policy,
         }
     }
 }
@@ -1460,8 +1518,15 @@ impl WireguardConfigDiff {
                             "wireguard apply: diff references undeclared peer for `{ifname}`"
                         ))
                     })?;
+                // Removing single prefixes needs 6.16; asked once (#529).
+                let removal_supported = if peer_changes.allowed_ips_removed.is_empty() {
+                    false
+                } else {
+                    let absent = absent_prefix(&declared_peer.allowed_ips, &peer_changes.allowed_ips_removed);
+                    conn.allowed_ip_removal_supported(ifname, *pk, absent).await?
+                };
                 conn.set_peer_by_name(ifname, *pk, |b| {
-                    declared_peer.apply_changes_to_builder(b, peer_changes)
+                    declared_peer.apply_changes_to_builder(b, peer_changes, removal_supported)
                 })
                 .await?;
                 result.peer_writes += 1;
@@ -1661,6 +1726,10 @@ pub struct PeerChanges {
     pub endpoint_set: bool,
     pub persistent_keepalive_set: bool,
     pub allowed_ips_set: bool,
+    /// The prefixes declared that the peer does not hold (#529).
+    pub allowed_ips_added: Vec<AllowedIp>,
+    /// The prefixes the peer holds that are no longer declared (#529).
+    pub allowed_ips_removed: Vec<AllowedIp>,
 }
 
 impl PeerChanges {
@@ -2062,6 +2131,59 @@ mod tests {
         );
     }
 
+    /// #529: the diff names the prefixes that come and go, and the update
+    /// sends only those where the kernel removes single prefixes — else
+    /// the whole list, replaced; with nothing to remove, only additions.
+    #[test]
+    fn an_allowed_ip_update_sends_what_changed() {
+        use crate::netlink::genl::wireguard::types::WgPeerFlags;
+        let net = |n| AllowedIp::v4(Ipv4Addr::new(10, n, 0, 0), 24);
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .peer(key(0xbb), |p| p.allowed_ip(net(0)).allowed_ip(net(2)))
+            .build();
+        let mut curr = empty_device("wg0");
+        let mut peer = WgPeer::new(key(0xbb));
+        peer.allowed_ips = vec![net(0), net(1)];
+        curr.peers.push(peer);
+        let changes = declared.diff_against(&curr);
+        let (_, pc) = &changes.peers_to_modify[0];
+        assert_eq!((pc.allowed_ips_added.clone(), pc.allowed_ips_removed.clone()), (vec![net(2)], vec![net(1)]));
+
+        let declared_peer = &declared.peers[0];
+        let replace = WgPeerFlags::ReplaceAllowedIps as u32;
+        let new = declared_peer.apply_changes_to_builder(WgPeerBuilder::new(key(0xbb)), pc, true);
+        assert_eq!(new.get_allowed_ips(), [net(2)]);
+        assert_eq!(new.get_removed_allowed_ips(), [net(1)]);
+        assert_eq!(new.get_flags() & replace, 0);
+        let old = declared_peer.apply_changes_to_builder(WgPeerBuilder::new(key(0xbb)), pc, false);
+        assert_eq!(old.get_allowed_ips(), [net(0), net(2)]);
+        assert!(old.get_removed_allowed_ips().is_empty());
+        assert_eq!(old.get_flags() & replace, replace);
+
+        let mut grows = pc.clone();
+        grows.allowed_ips_removed.clear();
+        let added = declared_peer.apply_changes_to_builder(WgPeerBuilder::new(key(0xbb)), &grows, false);
+        assert_eq!(added.get_allowed_ips(), [net(2)]);
+        assert_eq!(added.get_flags() & replace, 0, "nothing to remove: nothing to replace");
+    }
+
+    /// #529: an `InitialOnly` endpoint does not snap a roamed peer back.
+    #[test]
+    fn an_initial_only_endpoint_is_not_enforced() {
+        let at = |last| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(2, 2, 2, last)), 51820);
+        let declared = |policy| {
+            DeclaredWgDeviceBuilder::new("wg0".into())
+                .peer(key(0xbb), move |p| p.endpoint(at(2)).endpoint_policy(policy))
+                .build()
+        };
+        let mut curr = empty_device("wg0");
+        let mut peer = WgPeer::new(key(0xbb));
+        peer.endpoint = Some(at(9));
+        curr.peers.push(peer);
+        assert!(declared(EndpointPolicy::InitialOnly).diff_against(&curr).peers_to_modify.is_empty());
+        assert!(declared(EndpointPolicy::Enforce).diff_against(&curr).peers_to_modify[0].1.endpoint_set);
+    }
+
     #[test]
     fn diff_peer_allowed_ips_order_independent() {
         // Declaring 10.0.0.0/24 + 10.0.1.0/24 vs kernel
@@ -2370,6 +2492,7 @@ mod tests {
             endpoint: Some(SocketAddr::from(([203, 0, 113, 1], 51820))),
             persistent_keepalive: Some(Duration::from_secs(25)),
             allowed_ips: vec![AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24)],
+            endpoint_policy: EndpointPolicy::default(),
         };
         let changes = DeviceChanges {
             private_key_set: true,
@@ -2435,6 +2558,7 @@ mod tests {
             endpoint: None,
             persistent_keepalive: Some(Duration::from_millis(500)),
             allowed_ips: vec![],
+            endpoint_policy: EndpointPolicy::default(),
         };
         let json = serde_json::to_value(&peer).expect("serialize");
         assert_eq!(json["persistent-keepalive-secs"], 1);

@@ -36,3 +36,7 @@ ETHTOOL_A_HEADER_PHY_INDEX
 # Linux 6.11 / 6.13.
 ETH_SS_STATS_PHY
 ETH_SS_TS_FLAGS
+
+# WireGuard per-prefix allowed-IP removal, kernel 6.16 (#529).
+WGALLOWEDIP_A_FLAGS
+WGALLOWEDIP_F_REMOVE_ME

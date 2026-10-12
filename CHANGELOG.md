@@ -2042,6 +2042,43 @@ All notable changes to this project will be documented in this file.
     - **Red run.** With the mode ignored, the shared diff deletes `nft`'s
       items and the test fails.
 
+- **WireGuard: per-prefix allowed-IP removal and a roaming endpoint policy
+  (#529).**
+  - **Only what changed.** An allowed-IP edit used to replace a peer's
+    whole list (`WGPEER_F_REPLACE_ALLOWEDIPS`), which briefly drops traffic
+    to the prefixes that did not change.
+    - `PeerChanges` now names `allowed_ips_added` and
+      `allowed_ips_removed`.
+    - With nothing to remove, the update adds only the new prefixes.
+    - With something to remove, it removes each one alone
+      (`WgPeerBuilder::remove_allowed_ip`, `WGALLOWEDIP_F_REMOVE_ME`) on a
+      kernel that supports that, 6.16 and later.
+    - On an older kernel it replaces the list, as before.
+  - **The probe.** `Connection::<Wireguard>::allowed_ip_removal_supported`
+    asks once per connection, with a message that changes nothing either
+    way. It removes, update-only, a prefix the peer does not hold.
+    - A kernel without the flag refuses it (`EINVAL`), because its strict
+      parse of the allowed-IP nest knows no attribute 4. That was checked
+      on 6.12.
+    - **Unverified:** the 6.16 path, where the probe succeeds and single
+      removals are sent, has not run on a live kernel. Unit tests pin its
+      bytes.
+  - **Roaming.** `EndpointPolicy::InitialOnly`, set through the peer
+    builder's `endpoint_policy`, sets a peer's endpoint when it is added
+    and then leaves a peer that roamed where it went. `Enforce`, the
+    default, puts it back.
+  - **Tests.**
+    - **Probe and edits.** On 6.12 a root test checks that the probe says
+      no and changes nothing. An edit that drops one prefix and adds
+      another ends as declared. An addition-only edit sends only the
+      addition.
+    - **Roaming.** A second root test roams a peer by hand: `InitialOnly`
+      leaves it there, and `Enforce` wants it back.
+    - **Unit.** Unit tests cover the diff, the builder in each mode, and
+      the remove flag's encoding.
+    - **CI.** These tests create WireGuard devices, so they need host root
+      and skip in the rootless lane.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
