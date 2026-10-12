@@ -606,7 +606,7 @@ pub fn enter(name: &str) -> Result<NamespaceGuard> {
 pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
     // Save the current namespace
     let original = File::open("/proc/thread-self/ns/net")
-        .map_err(|e| Error::invalid_message(format!("cannot open current namespace: {}", e)))?;
+        .map_err(|e| Error::from(e).with_context("open the current namespace"))?;
 
     // Open and enter the target namespace
     let target =
@@ -967,7 +967,7 @@ pub fn create_with(name: &str, opts: CreateOptions) -> Result<()> {
     let path = named_path(name)?;
     if opts.reclaim_stale && path.exists() && !is_namespace_path(&path) {
         std::fs::remove_file(&path)
-            .map_err(|e| Error::invalid_message(format!("cannot remove stale marker {}: {e}", path.display())))?;
+            .map_err(|e| Error::from(e).with_context(format!("remove stale marker {}", path.display())))?;
     }
     let tag = match &opts.owner {
         Some(owner) => Some(write_owner_tag(name, owner)?),
@@ -989,13 +989,13 @@ pub fn create_with(name: &str, opts: CreateOptions) -> Result<()> {
 fn write_owner_tag(name: &str, owner: &str) -> Result<PathBuf> {
     let tag = owner_tag_path(name)?;
     std::fs::create_dir_all(OWNER_TAG_DIR)
-        .map_err(|e| Error::invalid_message(format!("cannot create {OWNER_TAG_DIR}: {e}")))?;
+        .map_err(|e| Error::from(e).with_context(format!("create {OWNER_TAG_DIR}")))?;
     let tmp = tag.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, owner)
         .and_then(|()| std::fs::rename(&tmp, &tag))
         .map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            Error::invalid_message(format!("cannot write owner tag {}: {e}", tag.display()))
+            Error::from(e).with_context(format!("write owner tag {}", tag.display()))
         })?;
     Ok(tag)
 }
@@ -1123,7 +1123,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
         Some(parent) if !parent.exists() => {
             let topmost = topmost_missing_ancestor(parent);
             std::fs::create_dir_all(parent).map_err(|e| {
-                Error::invalid_message(format!("cannot create {}: {}", parent.display(), e))
+                Error::from(e).with_context(format!("create {}", parent.display()))
             })?;
             Some((parent.to_path_buf(), topmost))
         }
@@ -1149,11 +1149,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 already_exists_error(&ns_path)
             } else {
-                Error::invalid_message(format!(
-                    "cannot create namespace file '{}': {}",
-                    ns_path.display(),
-                    e
-                ))
+                Error::from(e).with_context(format!("create namespace file {}", ns_path.display()))
             }
         })?;
 
@@ -1208,8 +1204,8 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
             // an empty netns marker.
             let _ = std::fs::remove_file(&ns_path);
             rollback_dirs(&created_dirs);
-            Err(Error::invalid_message(format!(
-                "namespace '{}' worker thread panicked during create",
+            Err(Error::internal(format!(
+                "namespace {}: the worker thread panicked during create",
                 ns_path.display()
             )))
         }
@@ -1226,7 +1222,7 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
     // thread's namespace, breaking subsequent namespace operations.
     let original_ns = File::open("/proc/thread-self/ns/net").map_err(|e| {
         let _ = std::fs::remove_file(ns_path);
-        Error::invalid_message(format!("cannot save current namespace: {}", e))
+        Error::from(e).with_context("save the current namespace")
     })?;
 
     // Create a new network namespace
@@ -1279,10 +1275,8 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
             unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
         }
         let _ = std::fs::remove_file(ns_path);
-        return Err(Error::invalid_message(format!(
-            "namespace '{}' failed to restore original namespace: {}",
-            name, restore_err
-        )));
+        return Err(Error::from(restore_err)
+            .with_context(format!("namespace {name}: restore the original namespace")));
     }
 
     Ok(())
@@ -1371,8 +1365,9 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
     }
 
     // Remove the file
-    std::fs::remove_file(ns_path)
-        .map_err(|e| Error::invalid_message(format!("cannot remove namespace file: {}", e)))?;
+    std::fs::remove_file(ns_path).map_err(|e| {
+        Error::from(e).with_context(format!("remove namespace file {}", ns_path.display()))
+    })?;
 
     Ok(())
 }
@@ -1536,9 +1531,7 @@ where
 
     match thread_result {
         Ok(result) => result,
-        Err(_panic) => Err(Error::invalid_message(
-            "namespace worker thread panicked".to_string(),
-        )),
+        Err(_panic) => Err(Error::internal("namespace worker thread panicked")),
     }
 }
 

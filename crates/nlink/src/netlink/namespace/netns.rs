@@ -318,7 +318,7 @@ impl Netns {
                 })
                 .map_err(Error::from)?;
             worker.join().unwrap_or_else(|_| {
-                Err(Error::invalid_message(format!(
+                Err(Error::internal(format!(
                     "namespace {}: the closure panicked",
                     self.label
                 )))
@@ -455,14 +455,14 @@ impl Netns {
         });
         if worker.as_ref().is_some_and(|w| w.send(job).is_err()) {
             *worker = None;
-            return Err(Error::invalid_message(format!(
+            return Err(Error::internal(format!(
                 "namespace {}: the worker thread has gone",
                 self.label
             )));
         }
         drop(worker);
         rx.recv().map_err(|_| {
-            Error::invalid_message(format!("namespace {}: the job panicked", self.label))
+            Error::internal(format!("namespace {}: the job panicked", self.label))
         })
     }
 
@@ -492,7 +492,7 @@ impl Netns {
             })
             .map_err(Error::from)?;
         ready_rx.recv().map_err(|_| {
-            Error::invalid_message(format!("namespace {}: the worker thread died", self.label))
+            Error::internal(format!("namespace {}: the worker thread died", self.label))
         })??;
         Ok(jobs)
     }
@@ -597,7 +597,7 @@ impl Netns {
                 Ok(Some(Ok(_))) => {}
                 Ok(Some(Err(e))) => return Err(e),
                 Ok(None) => {
-                    return Err(Error::invalid_message(format!(
+                    return Err(Error::internal(format!(
                         "namespace {label}: the nsid event stream ended"
                     )));
                 }

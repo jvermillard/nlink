@@ -441,6 +441,12 @@ pub enum ErrorDetail {
         timeout: std::time::Duration,
     },
 
+    /// nlink's own machinery failed: a worker thread it runs namespace
+    /// work on panicked or went away (#526). Not the caller's input and
+    /// not the kernel's answer; its kind is [`ErrorKind::Other`].
+    #[error("internal error: {0}")]
+    Internal(String),
+
     /// The connection pool was dropped while an `acquire()` was
     /// pending, or while waiting to send a connection back to it.
     ///
@@ -908,6 +914,11 @@ impl Error {
         ErrorDetail::EventStreamActive.into()
     }
 
+    /// nlink's own machinery failed ([`ErrorDetail::Internal`]).
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        ErrorDetail::Internal(message.into()).into()
+    }
+
     /// What kind of failure this is (#526). One answer per error; see
     /// [`ErrorKind`].
     ///
@@ -955,6 +966,7 @@ impl Error {
             | ErrorDetail::Interface(_)
             | ErrorDetail::AddressParse(_)
             | ErrorDetail::RouteParse(_) => ErrorKind::Invalid,
+            ErrorDetail::Internal(_) => ErrorKind::Other,
             _ => self.errno().map_or(ErrorKind::Other, ErrorKind::from_errno),
         }
     }
@@ -1477,6 +1489,7 @@ mod tests {
         );
         assert_eq!(Error::not_supported("x").kind(), ErrorKind::NotSupported);
         assert_eq!(Error::invalid_message("x").kind(), ErrorKind::Invalid);
+        assert_eq!(Error::internal("worker panicked").kind(), ErrorKind::Other);
         assert_eq!(
             Error::validation_error("links.d0", "bad").kind(),
             ErrorKind::Validation

@@ -551,6 +551,31 @@ All notable changes to this project will be documented in this file.
     initial user namespace, so it skips in the rootless CI lane.
     `cls_bpf` and `act_bpf` join the CI module lists.
 
+- **I/O and batch failures keep their errno (#526).**
+  - **Namespaces.** The namespace code reported a failed file operation
+    as an "invalid message" with the I/O error printed inside it, so
+    `is_busy()`, `is_permission_denied()` and the rest answered false for
+    it. The affected operations:
+    - removing a namespace file or a stale marker;
+    - saving, opening or restoring the current namespace;
+    - creating a namespace file, its directory or an owner tag;
+    - writing a spawned command's cgroup.
+
+    Each is now the I/O error, with what was being done as its context:
+    `remove namespace file /var/run/netns/red: I/O error: Device or resource
+    busy`.
+  - **Batches.** `Batch::execute_all` returned a string of the first
+    failed operation's error. It now returns that error, with `batch
+    operation N` as its context, so `is_already_exists()` and the rest
+    answer.
+  - **Worker threads.** A namespace worker thread that panicked or went
+    away was also an "invalid message". It is `ErrorDetail::Internal` now,
+    kind `Other`.
+  - **Test.** A root test adds an existing link through `execute_all` and
+    checks `is_already_exists()`. Before, the error was `invalid message:
+    batch operation failed: kernel error: File exists (errno 17)`, and the
+    test failed.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
