@@ -1259,6 +1259,9 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 u.changes.extend(changes);
             }
         }
+        DeclaredLinkType::Vti6(p) => compare_vti6(p, &data, names, &mut d),
+        DeclaredLinkType::Erspan(p) => compare_erspan("erspan", p, &data, names, &mut d),
+        DeclaredLinkType::Ip6erspan(p) => compare_erspan("ip6erspan", p, &data, names, &mut d),
         // `xfrmi_change` refuses a new underlay (EINVAL), so that
         // recreates; the if_id changes in place, sent with the underlay it
         // has (checked on 6.12).
@@ -2641,6 +2644,176 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             .is_none_or(|l| !plan.gone.contains(&l.ifindex()))
     });
     plan
+}
+
+/// Record a whole-set update: the first change line carries the attributes,
+/// the rest are notes. With no attributes left (everything back to the
+/// kernel's defaults) an empty one stands in, as for ip6gre.
+fn update_all(d: &mut KindDiff, kind: &'static str, attrs: Vec<KindAttr>, changes: Vec<String>) {
+    let mut changes = changes.into_iter();
+    let Some(first) = changes.next() else {
+        return;
+    };
+    let mut attrs = attrs.into_iter();
+    match attrs.next() {
+        Some(attr) => d.update(kind, attr, first),
+        None => d.update(kind, KindAttr::Bytes(0, Vec::new()), first),
+    }
+    let u = d.update.as_mut().expect("set above");
+    u.attrs.extend(attrs);
+    u.changes.extend(changes);
+}
+
+/// A vti6's declared parameters against the live link's (#680).
+/// `vti6_netlink_parms` rebuilds the configuration from the request, so a
+/// change sends them all. Its key has no flag: 0 is none.
+fn compare_vti6(
+    p: &super::types::Ip6tnlParams,
+    data: &InfoData<'_>,
+    names: &HashMap<u32, &str>,
+    d: &mut KindDiff,
+) {
+    // IFLA_VTI_*.
+    const LINK: u16 = 1;
+    const IKEY: u16 = 2;
+    const OKEY: u16 = 3;
+    const LOCAL: u16 = 4;
+    const REMOTE: u16 = 5;
+    let addr = |t| data.ipv6(t).filter(|a| !a.is_unspecified());
+    let have_key = data.u32_be(IKEY).filter(|k| *k != 0);
+    let have_dev = data.u32(LINK).filter(|i| *i != 0).and_then(|i| names.get(&i).copied());
+    let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+    let mut changes = Vec::new();
+    let mut note = |what: &str, have: String, want: String| {
+        if have != want {
+            changes.push(format!("vti6 {what} {have} -> {want}"));
+        }
+    };
+    note("local", show(addr(LOCAL).map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
+    note("remote", show(addr(REMOTE).map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
+    note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+    note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
+    if changes.is_empty() {
+        return;
+    }
+    let mut attrs = Vec::new();
+    if let Some(a) = p.local {
+        attrs.push(KindAttr::Bytes(LOCAL, a.octets().to_vec()));
+    }
+    if let Some(a) = p.remote {
+        attrs.push(KindAttr::Bytes(REMOTE, a.octets().to_vec()));
+    }
+    if let Some(k) = p.key {
+        attrs.push(KindAttr::Bytes(IKEY, k.to_be_bytes().to_vec()));
+        attrs.push(KindAttr::Bytes(OKEY, k.to_be_bytes().to_vec()));
+    }
+    if let Some(dev) = &p.underlay_dev {
+        attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
+    }
+    update_all(d, "vti6", attrs, changes);
+}
+
+/// An erspan's or ip6erspan's declared parameters against the live link's
+/// (#680). `ipgre_netlink_parms`/`ip6gre_netlink_parms` rebuild the
+/// configuration from the request, so a change sends them all, with the
+/// `GRE_SEQ | GRE_KEY` flags `erspan_validate` requires.
+fn compare_erspan(
+    kind: &'static str,
+    p: &super::types::ErspanParams,
+    data: &InfoData<'_>,
+    names: &HashMap<u32, &str>,
+    d: &mut KindDiff,
+) {
+    use crate::netlink::link::{ErspanDirection, ErspanVersion};
+    // IFLA_GRE_*.
+    const LINK: u16 = 1;
+    const IFLAGS: u16 = 2;
+    const OFLAGS: u16 = 3;
+    const IKEY: u16 = 4;
+    const OKEY: u16 = 5;
+    const LOCAL: u16 = 6;
+    const REMOTE: u16 = 7;
+    const TTL: u16 = 8;
+    const ERSPAN_INDEX: u16 = 21;
+    const ERSPAN_VER: u16 = 22;
+    const ERSPAN_DIR: u16 = 23;
+    const ERSPAN_HWID: u16 = 24;
+    const FLAGS: u16 = 0x1000 | 0x2000;
+    let v6 = kind == "ip6erspan";
+    let addr = |t| -> Option<std::net::IpAddr> {
+        if v6 {
+            data.ipv6(t).filter(|a| !a.is_unspecified()).map(Into::into)
+        } else {
+            data.ipv4(t).filter(|a| !a.is_unspecified()).map(Into::into)
+        }
+    };
+    let have_dev = data.u32(LINK).filter(|i| *i != 0).and_then(|i| names.get(&i).copied());
+    let have_version = match data.u8(ERSPAN_VER) {
+        Some(1) => Some(ErspanVersion::V1 {
+            index: data.u32(ERSPAN_INDEX).unwrap_or(0),
+        }),
+        Some(2) => Some(ErspanVersion::V2 {
+            direction: if data.u8(ERSPAN_DIR) == Some(1) {
+                ErspanDirection::Egress
+            } else {
+                ErspanDirection::Ingress
+            },
+            hwid: data.u16_ne(ERSPAN_HWID).and_then(|h| u8::try_from(h).ok()).unwrap_or(0),
+        }),
+        _ => None,
+    };
+    let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+    let mut changes = Vec::new();
+    let mut note = |what: &str, have: String, want: String| {
+        if have != want {
+            changes.push(format!("{kind} {what} {have} -> {want}"));
+        }
+    };
+    note("local", show(addr(LOCAL).map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
+    note("remote", show(addr(REMOTE).map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
+    if let Some(want) = p.ttl {
+        note("ttl", show(data.u8(TTL).map(|v| v.to_string())), want.to_string());
+    }
+    note("session", show(data.u32_be(IKEY).map(|k| k.to_string())), p.session.to_string());
+    note("version", show(have_version.map(|v| format!("{v:?}"))), format!("{:?}", p.version));
+    note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
+    if changes.is_empty() {
+        return;
+    }
+    let ip = |a: std::net::IpAddr| match a {
+        std::net::IpAddr::V4(a) => a.octets().to_vec(),
+        std::net::IpAddr::V6(a) => a.octets().to_vec(),
+    };
+    let mut attrs = vec![
+        KindAttr::Bytes(IFLAGS, FLAGS.to_be_bytes().to_vec()),
+        KindAttr::Bytes(OFLAGS, FLAGS.to_be_bytes().to_vec()),
+        KindAttr::Bytes(IKEY, u32::from(p.session).to_be_bytes().to_vec()),
+        KindAttr::Bytes(OKEY, u32::from(p.session).to_be_bytes().to_vec()),
+    ];
+    match p.version {
+        ErspanVersion::V1 { index } => {
+            attrs.push(KindAttr::U8(ERSPAN_VER, 1));
+            attrs.push(KindAttr::U32(ERSPAN_INDEX, index));
+        }
+        ErspanVersion::V2 { direction, hwid } => {
+            attrs.push(KindAttr::U8(ERSPAN_VER, 2));
+            attrs.push(KindAttr::U8(ERSPAN_DIR, direction as u8));
+            attrs.push(KindAttr::U16(ERSPAN_HWID, u16::from(hwid)));
+        }
+    }
+    if let Some(a) = p.local {
+        attrs.push(KindAttr::Bytes(LOCAL, ip(a)));
+    }
+    if let Some(a) = p.remote {
+        attrs.push(KindAttr::Bytes(REMOTE, ip(a)));
+    }
+    if let Some(t) = p.ttl {
+        attrs.push(KindAttr::U8(TTL, t));
+    }
+    if let Some(dev) = &p.underlay_dev {
+        attrs.push(KindAttr::Ifindex(LINK, dev.clone()));
+    }
+    update_all(d, kind, attrs, changes);
 }
 
 /// Where an IPv4 tunnel family keeps each parameter in `IFLA_INFO_DATA`.

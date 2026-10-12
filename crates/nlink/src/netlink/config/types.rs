@@ -429,7 +429,7 @@ impl NetworkConfig {
             // The kernel gives every namespace a fallback device per tunnel
             // module, which nothing can configure (`ip_tunnel_changelink`
             // refuses it, EINVAL).
-            const FALLBACK: [(&str, &str); 8] = [
+            const FALLBACK: [(&str, &str); 9] = [
                 ("gre0", "gre"),
                 ("gretap0", "gretap"),
                 ("erspan0", "erspan"),
@@ -438,6 +438,7 @@ impl NetworkConfig {
                 ("ip_vti0", "vti"),
                 ("ip6tnl0", "ip6tnl"),
                 ("ip6gre0", "ip6gre"),
+                ("ip6_vti0", "vti6"),
             ];
             if let Some((_, kind)) = FALLBACK
                 .iter()
@@ -481,6 +482,57 @@ impl NetworkConfig {
                     if p.mode != crate::netlink::link::Ip6tnlMode::default() =>
                 {
                     errors.push(ValidationErrorInfo::new(at(), "a GRE tunnel has no mode; ip6tnl has"));
+                }
+                // `vti6_locate`: the ends, the underlay and the key (#680).
+                DeclaredLinkType::Vti6(p)
+                    if p.local.is_none() && p.remote.is_none() && p.underlay_dev.is_none() && p.key.is_none() =>
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        "a vti6 tunnel with no end, underlay device or key is the fallback ip6_vti0's, \
+                         and the kernel refuses it",
+                    ));
+                }
+                DeclaredLinkType::Vti6(p)
+                    if p.mode != crate::netlink::link::Ip6tnlMode::default()
+                        || p.hoplimit.is_some()
+                        || p.encap_limit.is_some() =>
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        at(),
+                        "a vti6 tunnel has no mode, hop limit or encapsulation limit; ip6tnl has",
+                    ));
+                }
+                DeclaredLinkType::Erspan(p) | DeclaredLinkType::Ip6erspan(p) => {
+                    let v6 = matches!(l.link_type, DeclaredLinkType::Ip6erspan(_));
+                    let kind = if v6 { "ip6erspan" } else { "erspan" };
+                    if [p.local, p.remote].into_iter().flatten().any(|a| a.is_ipv6() != v6) {
+                        let family = if v6 { "IPv6" } else { "IPv4" };
+                        errors.push(ValidationErrorInfo::new(at(), format!("an {kind} tunnel's ends are {family}")));
+                    }
+                    // `erspan_validate`: the session id is 10 bits; the
+                    // index 20, the hardware id 6 (`ipgre_netlink_parms`).
+                    if p.session > 0x3ff {
+                        errors.push(ValidationErrorInfo::new(
+                            at(),
+                            format!("an ERSPAN session id is 10 bits, up to 1023, not {}", p.session),
+                        ));
+                    }
+                    match p.version {
+                        crate::netlink::link::ErspanVersion::V1 { index } if index > 0xf_ffff => {
+                            errors.push(ValidationErrorInfo::new(
+                                at(),
+                                format!("an ERSPAN type II index is 20 bits, up to 1048575, not {index}"),
+                            ));
+                        }
+                        crate::netlink::link::ErspanVersion::V2 { hwid, .. } if hwid > 0x3f => {
+                            errors.push(ValidationErrorInfo::new(
+                                at(),
+                                format!("an ERSPAN type III hardware id is 6 bits, up to 63, not {hwid}"),
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
                 DeclaredLinkType::Xfrm { if_id: 0, .. } => {
                     errors.push(ValidationErrorInfo::new(at(), "an xfrm interface's if_id is not 0"));
@@ -1613,6 +1665,7 @@ impl DeclaredLink {
             | DeclaredLinkType::Vti(_)
             | DeclaredLinkType::Ip6tnl(_)
             | DeclaredLinkType::Ip6gre(_)
+            | DeclaredLinkType::Vti6(_)
             | DeclaredLinkType::Xfrm { .. }
             | DeclaredLinkType::Bareudp { .. } => Some(
                 "a MAC address is declared, but an L3 tunnel has no hardware address (gretap has one)",
@@ -1828,6 +1881,14 @@ pub enum DeclaredLinkType {
     Ip6gre(Ip6tnlParams),
     /// GRE over IPv6 carrying Ethernet (#516); its `mode` is unused.
     Ip6gretap(Ip6tnlParams),
+    /// IPsec virtual tunnel interface over IPv6 (#680); its `mode`, hop
+    /// limit and encapsulation limit are unused.
+    Vti6(Ip6tnlParams),
+    /// ERSPAN tunnel over IPv4 (#680): a gretap that wraps what it mirrors
+    /// in an ERSPAN header.
+    Erspan(ErspanParams),
+    /// ERSPAN tunnel over IPv6 (#680).
+    Ip6erspan(ErspanParams),
     /// XFRM (IPsec) interface (#516): routed traffic meets the IPsec
     /// policies with its `if_id`. The if_id changes in place; a new
     /// underlay, which `xfrmi_changelink` refuses, recreates it.
@@ -1946,6 +2007,9 @@ impl DeclaredLinkType {
             Self::Ip6tnl(_) => Some("ip6tnl"),
             Self::Ip6gre(_) => Some("ip6gre"),
             Self::Ip6gretap(_) => Some("ip6gretap"),
+            Self::Vti6(_) => Some("vti6"),
+            Self::Erspan(_) => Some("erspan"),
+            Self::Ip6erspan(_) => Some("ip6erspan"),
             Self::Xfrm { .. } => Some("xfrm"),
             Self::Geneve { .. } => Some("geneve"),
             Self::Bareudp { .. } => Some("bareudp"),
@@ -2058,6 +2122,36 @@ pub struct Ip6tnlParams {
     /// The GRE key, both ways: an ip6gre's or ip6gretap's only.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub key: Option<u32>,
+    /// The device the tunnel's packets leave through.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub underlay_dev: Option<String>,
+}
+
+/// An ERSPAN tunnel's parameters (#680): an `erspan`'s ends are IPv4, an
+/// `ip6erspan`'s IPv6. Each one unset is the kernel's default and is not
+/// compared; a change sends them all, since `erspan_changelink` rebuilds
+/// the configuration from the request.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ErspanParams {
+    /// The session id, the GRE key both ways: 10 bits, up to 1023.
+    pub session: u16,
+    /// The ERSPAN header: type II with its index, or type III with its
+    /// direction and hardware id.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub version: crate::netlink::link::ErspanVersion,
+    /// The local end.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub local: Option<IpAddr>,
+    /// The remote end.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub remote: Option<IpAddr>,
+    /// The outer TTL, or hop limit.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub ttl: Option<u8>,
     /// The device the tunnel's packets leave through.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub underlay_dev: Option<String>,
@@ -2416,15 +2510,18 @@ impl LinkBuilder {
         self
     }
 
-    /// A tunnel's key, both ways (gre, gretap, vti, ip6gre, ip6gretap).
+    /// A tunnel's key, both ways (gre, gretap, vti, ip6gre, ip6gretap,
+    /// vti6). An ERSPAN tunnel's key is its session id.
     pub fn tunnel_key(mut self, key: u32) -> Self {
-        if let DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) = &mut self.link_type {
+        if let DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) | DeclaredLinkType::Vti6(p) =
+            &mut self.link_type
+        {
             p.key = Some(key);
         } else if matches!(
             self.link_type,
             DeclaredLinkType::Ipip(_) | DeclaredLinkType::Sit(_) | DeclaredLinkType::Ip6tnl(_)
         ) {
-            self.wrong_kind("tunnel_key", "gre, gretap, vti, ip6gre or ip6gretap");
+            self.wrong_kind("tunnel_key", "gre, gretap, vti, ip6gre, ip6gretap or vti6");
         } else if let Some(p) = self.tunnel_params("tunnel_key") {
             p.key = Some(key);
         }
@@ -2432,10 +2529,15 @@ impl LinkBuilder {
     }
 
     /// The device a tunnel's packets leave through: a gre, gretap, ipip,
-    /// sit, vti, ip6tnl, ip6gre, ip6gretap or xfrm link's.
+    /// sit, vti, ip6tnl, ip6gre, ip6gretap, vti6, erspan, ip6erspan or xfrm
+    /// link's.
     pub fn tunnel_underlay_dev(mut self, dev: &str) -> Self {
         match &mut self.link_type {
-            DeclaredLinkType::Ip6tnl(p) | DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) => {
+            DeclaredLinkType::Ip6tnl(p)
+            | DeclaredLinkType::Ip6gre(p)
+            | DeclaredLinkType::Ip6gretap(p)
+            | DeclaredLinkType::Vti6(p) => p.underlay_dev = Some(dev.to_string()),
+            DeclaredLinkType::Erspan(p) | DeclaredLinkType::Ip6erspan(p) => {
                 p.underlay_dev = Some(dev.to_string())
             }
             DeclaredLinkType::Xfrm { underlay_dev, .. } => *underlay_dev = Some(dev.to_string()),
@@ -2456,10 +2558,11 @@ impl LinkBuilder {
 
     fn ip6tnl_params(mut self, setter: &str, set: impl FnOnce(&mut Ip6tnlParams)) -> Self {
         match &mut self.link_type {
-            DeclaredLinkType::Ip6tnl(p) | DeclaredLinkType::Ip6gre(p) | DeclaredLinkType::Ip6gretap(p) => {
-                set(p)
-            }
-            _ => self.wrong_kind(setter, "ip6tnl, ip6gre or ip6gretap"),
+            DeclaredLinkType::Ip6tnl(p)
+            | DeclaredLinkType::Ip6gre(p)
+            | DeclaredLinkType::Ip6gretap(p)
+            | DeclaredLinkType::Vti6(p) => set(p),
+            _ => self.wrong_kind(setter, "ip6tnl, ip6gre, ip6gretap or vti6"),
         }
         self
     }
@@ -2475,6 +2578,65 @@ impl LinkBuilder {
     pub fn ip6gretap(mut self) -> Self {
         self.link_type = DeclaredLinkType::Ip6gretap(Ip6tnlParams::default());
         self
+    }
+
+    /// Create an IPsec virtual tunnel interface over IPv6 (#680); set its
+    /// ends with [`ip6tnl_local`](Self::ip6tnl_local) and
+    /// [`ip6tnl_remote`](Self::ip6tnl_remote), its key with
+    /// [`tunnel_key`](Self::tunnel_key).
+    pub fn vti6(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Vti6(Ip6tnlParams::default());
+        self
+    }
+
+    /// Create an ERSPAN tunnel over IPv4 with this session id (#680); set
+    /// it with the `erspan_*` setters.
+    pub fn erspan(mut self, session: u16) -> Self {
+        self.link_type = DeclaredLinkType::Erspan(ErspanParams {
+            session,
+            ..ErspanParams::default()
+        });
+        self
+    }
+
+    /// Create an ERSPAN tunnel over IPv6 with this session id (#680).
+    pub fn ip6erspan(mut self, session: u16) -> Self {
+        self.link_type = DeclaredLinkType::Ip6erspan(ErspanParams {
+            session,
+            ..ErspanParams::default()
+        });
+        self
+    }
+
+    fn erspan_params(mut self, setter: &str, set: impl FnOnce(&mut ErspanParams)) -> Self {
+        match &mut self.link_type {
+            DeclaredLinkType::Erspan(p) | DeclaredLinkType::Ip6erspan(p) => set(p),
+            _ => self.wrong_kind(setter, "erspan or ip6erspan"),
+        }
+        self
+    }
+
+    /// An ERSPAN tunnel's local end: IPv4 for erspan, IPv6 for ip6erspan.
+    pub fn erspan_local(self, local: impl Into<IpAddr>) -> Self {
+        let local = local.into();
+        self.erspan_params("erspan_local", |p| p.local = Some(local))
+    }
+
+    /// An ERSPAN tunnel's remote end.
+    pub fn erspan_remote(self, remote: impl Into<IpAddr>) -> Self {
+        let remote = remote.into();
+        self.erspan_params("erspan_remote", |p| p.remote = Some(remote))
+    }
+
+    /// An ERSPAN tunnel's outer TTL, or hop limit.
+    pub fn erspan_ttl(self, ttl: u8) -> Self {
+        self.erspan_params("erspan_ttl", |p| p.ttl = Some(ttl))
+    }
+
+    /// An ERSPAN tunnel's header version: type II and an index, or type
+    /// III and a direction and hardware id.
+    pub fn erspan_version(self, version: crate::netlink::link::ErspanVersion) -> Self {
+        self.erspan_params("erspan_version", |p| p.version = version)
     }
 
     /// An ip6tnl tunnel's local end.
@@ -6734,7 +6896,7 @@ mod serde_roundtrip_tests {
                 NetworkConfig::new().link("t61", |l| {
                     l.ip6tnl().ip6tnl_remote(Ipv6Addr::LOCALHOST).tunnel_key(1)
                 }),
-                "`.tunnel_key()` sets a gre, gretap, vti, ip6gre or ip6gretap parameter",
+                "`.tunnel_key()` sets a gre, gretap, vti, ip6gre, ip6gretap or vti6 parameter",
             ),
             (
                 NetworkConfig::new().link("g61", |l| {
@@ -6742,6 +6904,73 @@ mod serde_roundtrip_tests {
                 }),
                 "a GRE tunnel has no mode",
             ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+    }
+
+    /// #680: vti6, erspan and ip6erspan declare, round-trip and validate.
+    #[test]
+    fn vti6_and_erspan_roundtrip_and_validate() {
+        use crate::netlink::link::{ErspanDirection, ErspanVersion};
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let v2 = ErspanVersion::V2 {
+            direction: ErspanDirection::Egress,
+            hwid: 7,
+        };
+        let cfg = NetworkConfig::new()
+            .link("v61", |l| l.vti6().ip6tnl_remote(Ipv6Addr::LOCALHOST).tunnel_key(5))
+            .link("es1", |l| {
+                l.erspan(100)
+                    .erspan_local(Ipv4Addr::new(10, 0, 0, 1))
+                    .erspan_version(ErspanVersion::V1 { index: 123 })
+            })
+            .link("es6", |l| l.ip6erspan(9).erspan_remote(Ipv6Addr::LOCALHOST).erspan_version(v2));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""vti6":{"remote":"::1","mode":"any","key":5}"#,
+            r#""erspan":{"session":100,"version":{"v1":{"index":123}},"local":"10.0.0.1"}"#,
+            r#""ip6erspan":{"session":9,"version":{"v2":{"direction":"egress","hwid":7}},"remote":"::1"}"#,
+        ] {
+            assert!(json.contains(want), "{want} missing: {json}");
+        }
+        for (cfg, says) in [
+            (NetworkConfig::new().link("v61", |l| l.vti6()), "fallback ip6_vti0's"),
+            (
+                NetworkConfig::new().link("ip6_vti0", |l| l.vti6().tunnel_key(1)),
+                "the kernel's fallback vti6 device",
+            ),
+            (
+                NetworkConfig::new().link("v61", |l| l.vti6().tunnel_key(1).ip6tnl_hoplimit(3)),
+                "a vti6 tunnel has no mode, hop limit or encapsulation limit",
+            ),
+            (
+                NetworkConfig::new().link("es1", |l| l.erspan(1).erspan_remote(Ipv6Addr::LOCALHOST)),
+                "an erspan tunnel's ends are IPv4",
+            ),
+            (
+                NetworkConfig::new().link("es6", |l| l.ip6erspan(1).erspan_local(Ipv4Addr::LOCALHOST)),
+                "an ip6erspan tunnel's ends are IPv6",
+            ),
+            (NetworkConfig::new().link("es1", |l| l.erspan(1024)), "10 bits, up to 1023"),
+            (
+                NetworkConfig::new()
+                    .link("es1", |l| l.erspan(1).erspan_version(ErspanVersion::V1 { index: 1 << 20 })),
+                "20 bits",
+            ),
+            (
+                NetworkConfig::new().link("es1", |l| {
+                    l.erspan(1).erspan_version(ErspanVersion::V2 {
+                        direction: ErspanDirection::Ingress,
+                        hwid: 64,
+                    })
+                }),
+                "6 bits, up to 63",
+            ),
+            (NetworkConfig::new().link("d0", |l| l.dummy().erspan_ttl(3)), "erspan or ip6erspan"),
         ] {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(says), "{says}: {err}");
