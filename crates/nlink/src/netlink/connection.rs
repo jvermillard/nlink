@@ -968,6 +968,32 @@ impl<P: ProtocolState> Connection<P> {
         self.with_timeout(self.send_ack_inner(builder)).await
     }
 
+    /// Send `builder` and wait for its ACK, returning the value some
+    /// generic-netlink families put there (#530): `mac80211_hwsim`
+    /// answers `NEW_RADIO` with the new radio's id where an ACK has 0. Only
+    /// a negative value is an error.
+    pub(crate) async fn send_ack_value(&self, mut builder: MessageBuilder) -> Result<i32> {
+        builder.check_size()?;
+        let seq = self.socket.next_seq();
+        let mut session = self.recv_session(seq).await?;
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        self.socket.send(&builder.finish()).await?;
+        self.with_timeout(async {
+            loop {
+                let data = session.recv_with_timeout(self).await?;
+                for message in MessageIter::new(&data) {
+                    let (header, payload) = message?;
+                    if header.nlmsg_seq != seq || !header.is_error() {
+                        continue;
+                    }
+                    return NlMsgError::from_bytes(payload)?.ack_value(header.nlmsg_flags, payload);
+                }
+            }
+        })
+        .await
+    }
+
     /// Send a dump request and collect all responses.
     ///
     /// The configured timeout applies **per received frame**, not to

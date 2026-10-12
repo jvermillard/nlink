@@ -76,6 +76,14 @@ pub const NL80211_CMD_GET_POWER_SAVE: u8 = 62;
 pub const NL80211_CMD_NEW_WIPHY: u8 = 3;
 pub const NL80211_CMD_DEL_WIPHY: u8 = 4;
 pub const NL80211_CMD_NEW_INTERFACE: u8 = 7;
+/// Change an interface's type (#530).
+pub const NL80211_CMD_SET_INTERFACE: u8 = 6;
+/// Join a mesh (#530).
+pub const NL80211_CMD_JOIN_MESH: u8 = 68;
+/// Leave a mesh (#530).
+pub const NL80211_CMD_LEAVE_MESH: u8 = 69;
+/// A mesh id, up to 32 bytes.
+pub const NL80211_ATTR_MESH_ID: u16 = 24;
 pub const NL80211_CMD_DEL_INTERFACE: u8 = 8;
 pub const NL80211_CMD_NEW_STATION: u8 = 19;
 pub const NL80211_CMD_REG_CHANGE: u8 = 36;

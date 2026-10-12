@@ -50,6 +50,7 @@ pub use header::{GENL_HDRLEN, GenlMsgHdr};
 pub mod devlink;
 pub mod dpll;
 pub mod ethtool;
+pub mod hwsim;
 pub mod macsec;
 pub mod mptcp;
 pub mod net_shaper;

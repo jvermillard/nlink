@@ -2079,6 +2079,35 @@ All notable changes to this project will be documented in this file.
     - **CI.** These tests create WireGuard devices, so they need host root
       and skip in the rootless lane.
 
+- **Simulated Wi-Fi radios and mesh, over netlink (#530).** **Unverified
+  on a live kernel:** the machine this was written on has no wireless
+  stack. Unit tests pin every command and attribute byte against the
+  kernel's headers and the driver's.
+  - **`Connection<Hwsim>`** (`genl::hwsim`), for the `MAC80211_HWSIM`
+    family, creates and deletes radios at run time instead of fixing the
+    host's count with `modprobe mac80211_hwsim radios=N`.
+    - `new_radio(NewRadio)` returns the radio's id. Setters: name,
+      channels, regulatory hint, permanent address, `no_vif`,
+      `use_chanctx`, `destroy_on_close`, P2P device.
+    - `del_radio`, `del_radio_by_name`, `get_radio` and `get_radios`.
+    - A radio belongs to the namespace of the socket that made it. Its
+      wiphy carries its name: `Connection::<Nl80211>::get_phy_by_name`,
+      also new, finds it.
+    - The driver's header is not in the UAPI, so the UAPI audit cannot
+      check these numbers; a unit test pins them.
+  - **An ACK can carry a value.** `NEW_RADIO` answers with the radio's id
+    in the ACK's error field, where an ACK has 0. nlink read any nonzero
+    value there as an errno, so radio 3 would have come back as `ESRCH`.
+    The new path reads only a negative value as an error. No existing
+    request is affected.
+  - **nl80211 interfaces and mesh:**
+    - `set_interface_type`;
+    - `new_interface(wiphy, name, type)`, which returns the new ifindex;
+    - `del_interface`;
+    - `join_mesh(iface, mesh_id, freq_mhz)` and `leave_mesh`.
+
+    Each takes an interface name, and each has a `_by_index` variant.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

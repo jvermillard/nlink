@@ -526,6 +526,17 @@ impl NlMsgError {
         Error::from_errno_ext_ack(self.error, ext.describe(), ext.offset)
     }
 
+    /// This ACK's value, for the generic-netlink families that put one
+    /// where an ACK has 0 — `mac80211_hwsim` answers `NEW_RADIO` with the
+    /// new radio's id (#530). Only a negative value is an error.
+    pub(crate) fn ack_value(&self, flags: u16, payload: &[u8]) -> Result<i32> {
+        if self.error < 0 {
+            return Err(self.to_error(flags, payload));
+        }
+        self.warn_if_ack_warns(flags, payload);
+        Ok(self.error)
+    }
+
     /// Log the warning a successful ACK carries, if any.
     ///
     /// The kernel reports what it did but would rather not have —
@@ -533,7 +544,7 @@ impl NlMsgError {
     /// an `NLMSGERR_ATTR_MSG` on the ACK. `tc(8)` prints it; nlink used to
     /// drop it.
     pub(crate) fn warn_if_ack_warns(&self, flags: u16, payload: &[u8]) {
-        if !self.is_ack() || flags & NLM_F_ACK_TLVS == 0 {
+        if self.error < 0 || flags & NLM_F_ACK_TLVS == 0 {
             return;
         }
         if let Some(warning) = self.ext_ack(flags, payload).describe() {
@@ -821,6 +832,19 @@ mod nlmsgerr_tests {
             described.as_deref(),
             Some("integer out of range; policy: value in 1..=4096")
         );
+    }
+
+    /// #530: a positive value in an ACK is that value, not an errno; a
+    /// negative one is still the error.
+    #[test]
+    fn an_ack_can_carry_a_value() {
+        let value = error_payload(3, &request(), false, &[]);
+        assert_eq!(NlMsgError::from_bytes(&value).unwrap().ack_value(0, &value).unwrap(), 3);
+        let ack = error_payload(0, &request(), false, &[]);
+        assert_eq!(NlMsgError::from_bytes(&ack).unwrap().ack_value(0, &ack).unwrap(), 0);
+        let error = error_payload(-19, &request(), false, &[]);
+        let err = NlMsgError::from_bytes(&error).unwrap().ack_value(0, &error).unwrap_err();
+        assert!(err.is_no_device(), "{err}");
     }
 
     /// A successful ACK can carry a warning; it is parsed like an error's
