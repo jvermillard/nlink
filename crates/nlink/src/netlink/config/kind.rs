@@ -2006,17 +2006,28 @@ fn undeclarable_on(
     }
 }
 
+/// The kernel state [`plan`] reads.
+pub(crate) struct Live<'a> {
+    pub(crate) links: &'a [LinkMessage],
+    pub(crate) addresses: &'a [AddressMessage],
+    pub(crate) routes: &'a [RouteMessage],
+    pub(crate) qdiscs: &'a [TcMessage],
+    pub(crate) extras: &'a LinkExtras,
+    /// The id here of each namespace a veth peer is declared in (#516).
+    pub(crate) netns_ids: &'a HashMap<crate::netlink::namespace::NetnsRef, Option<u32>>,
+}
+
 /// Compare every declared link's kind parameters with the live links, and
 /// work out what a recreate takes with it.
-pub(crate) fn plan(
-    config: &NetworkConfig,
-    opts: &PlanOptions,
-    links: &[LinkMessage],
-    addresses: &[AddressMessage],
-    routes: &[RouteMessage],
-    qdiscs: &[TcMessage],
-    extras: &LinkExtras,
-) -> KindPlan {
+pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -> KindPlan {
+    let Live {
+        links,
+        addresses,
+        routes,
+        qdiscs,
+        extras,
+        netns_ids,
+    } = live;
     let mut plan = KindPlan::default();
     let names: HashMap<u32, &str> = links
         .iter()
@@ -2073,7 +2084,18 @@ pub(crate) fn plan(
         let Some(live) = by_name.get(link.name.as_str()) else {
             continue;
         };
-        let d = compare(link, live, &names);
+        let mut d = compare(link, live, &names);
+        // A veth peer kept in a declared namespace (#516).
+        if live.kind() == Some("veth")
+            && let Some(want) = link.peer_netns()
+        {
+            let want_id = if want.is_default() { None } else { netns_ids.get(want).copied().flatten() };
+            let have = live.link_netnsid.and_then(|id| u32::try_from(id).ok());
+            if have != want_id || (!want.is_default() && want_id.is_none()) {
+                let here = |id: Option<u32>| id.map_or("here".to_string(), |id| format!("in namespace id {id}"));
+                d.recreate.push(format!("veth peer {} -> in {want}", here(have)));
+            }
+        }
         if !d.recreate.is_empty() || !d.refuse.is_empty() {
             let mut reasons = d.refuse.clone();
             reasons.extend(d.recreate.iter().cloned());
@@ -2186,7 +2208,11 @@ pub(crate) fn plan(
             // A veth's (or vxcan's) peer in another namespace is not in the
             // closure — nothing here can declare it — and the kernel
             // deletes it with the link all the same (#471).
+            // A veth whose peer's namespace the config declares is put back
+            // there whole (#516).
+            let peer_declared = declared.get(name).is_some_and(|d| d.peer_netns().is_some());
             if matches!(l.kind(), Some("veth" | "vxcan"))
+                && !peer_declared
                 && let Some(netnsid) = l.link_netnsid
             {
                 blocked_by.push(Blocker::ForeignNetnsPeer {

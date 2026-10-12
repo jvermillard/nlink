@@ -446,7 +446,7 @@ impl NetworkConfig {
                 _ => {}
             }
             match &l.link_type {
-                DeclaredLinkType::Veth { peer } | DeclaredLinkType::Netkit { peer, .. } => {
+                DeclaredLinkType::Veth { peer, .. } | DeclaredLinkType::Netkit { peer, .. } => {
                     if let Err(e) = crate::util::ifname::validate(peer) {
                         errors.push(ValidationErrorInfo::new(
                             format!("links.{}", l.name),
@@ -1464,6 +1464,14 @@ impl DeclaredLink {
         }
     }
 
+    /// The namespace a veth's peer is declared in (#516).
+    pub(crate) fn peer_netns(&self) -> Option<&crate::netlink::namespace::NetnsRef> {
+        match &self.link_type {
+            DeclaredLinkType::Veth { peer_netns, .. } => peer_netns.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Get the interface name.
     pub fn name(&self) -> &str {
         &self.name
@@ -1592,7 +1600,17 @@ pub enum DeclaredLinkType {
     /// Dummy interface.
     Dummy,
     /// Veth pair with peer name.
-    Veth { peer: String },
+    Veth {
+        peer: String,
+        /// The namespace the peer lives in (#516). Unset, the apply creates
+        /// the peer here and leaves it wherever it is moved — a CNI moving
+        /// it into a container is not undone. Set, the peer is kept there:
+        /// one elsewhere, here included, is recreated in it.
+        /// [`NetnsRef::Default`](crate::netlink::namespace::NetnsRef::Default)
+        /// is this namespace.
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        peer_netns: Option<crate::netlink::namespace::NetnsRef>,
+    },
     /// Bridge interface.
     Bridge,
     /// VLAN interface. Plan 190 §2.2 added `protocol`.
@@ -2002,7 +2020,30 @@ impl LinkBuilder {
     pub fn veth(mut self, peer: &str) -> Self {
         self.link_type = DeclaredLinkType::Veth {
             peer: peer.to_string(),
+            peer_netns: None,
         };
+        self
+    }
+
+    /// The namespace a veth's peer lives in (#516): created there, and
+    /// kept there. Without it the peer is created here and left wherever
+    /// it is moved.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use nlink::netlink::namespace::NetnsRef;
+    ///
+    /// let config = NetworkConfig::new().link("veth0", |l| {
+    ///     l.veth("eth0").veth_peer_netns(NetnsRef::Named("tenant-a".into()))
+    /// });
+    /// config.validate().unwrap();
+    /// ```
+    pub fn veth_peer_netns(mut self, netns: crate::netlink::namespace::NetnsRef) -> Self {
+        if let DeclaredLinkType::Veth { peer_netns, .. } = &mut self.link_type {
+            *peer_netns = Some(netns);
+        } else {
+            self.wrong_kind("veth_peer_netns", "veth");
+        }
         self
     }
 
@@ -5879,6 +5920,25 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("end-station or SCB"), "{err}");
+    }
+
+    #[test]
+    fn a_veth_peer_namespace_roundtrips() {
+        use crate::netlink::namespace::NetnsRef;
+        let cfg = NetworkConfig::new()
+            .link("v0", |l| l.veth("p0").veth_peer_netns(NetnsRef::Named("blue".into())))
+            .link("v1", |l| l.veth("p1"));
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#"{"veth":{"peer":"p0","peer_netns":{"named":"blue"}}}"#), "{json}");
+        assert!(json.contains(r#"{"veth":{"peer":"p1"}}"#), "{json}");
+        let err = NetworkConfig::new()
+            .link("d0", |l| l.dummy().veth_peer_netns(NetnsRef::Default))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("veth_peer_netns"), "{err}");
     }
 
     #[test]
