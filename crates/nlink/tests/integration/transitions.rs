@@ -441,10 +441,10 @@ async fn qdisc_fields_change_in_place() -> nlink::Result<()> {
         case(
             "fq-codel",
             vec![
-                q(|q| q.fq_codel().limit(1000).flows(512).quantum(1514)),
+                q(|q| q.fq_codel().limit(nlink::Packets::new(1000)).flows(512).quantum(1514)),
                 q(|q| {
                     q.fq_codel()
-                        .limit(2000)
+                        .limit(nlink::Packets::new(2000))
                         .flows(1024)
                         .quantum(3028)
                         .target(Duration::from_millis(10))

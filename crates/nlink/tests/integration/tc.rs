@@ -723,7 +723,7 @@ async fn test_add_fq_codel_qdisc() -> Result<()> {
     let fqcodel = FqCodelConfig::new()
         .target(Duration::from_micros(5000)) // 5ms
         .interval(Duration::from_micros(100000)) // 100ms
-        .limit(10240)
+        .limit(nlink::Packets::new(10240))
         .build();
     conn.add_qdisc("dummy0", fqcodel).await?;
 
@@ -864,7 +864,7 @@ async fn replace_qdisc_handles_whatever_is_in_the_slot() -> Result<()> {
 
     // fq_codel with flows, replaced twice: the second is a change, which
     // must not carry `flows`.
-    let fq = |limit| FqCodelConfig::new().flows(1024).limit(limit);
+    let fq = |limit| FqCodelConfig::new().flows(1024).limit(nlink::Packets::new(limit));
     conn.replace_qdisc_by_index(ifindex, fq(1000)).await?;
     conn.replace_qdisc_by_index(ifindex, fq(2000)).await?;
     let opts = |q: Option<TcMessage>| match q.and_then(|q| q.options()) {
@@ -885,7 +885,7 @@ async fn replace_qdisc_handles_whatever_is_in_the_slot() -> Result<()> {
     // sfq has no change operation.
     conn.replace_qdisc_by_index(ifindex, SfqConfig::new())
         .await?;
-    conn.replace_qdisc_by_index(ifindex, SfqConfig::new().limit(100))
+    conn.replace_qdisc_by_index(ifindex, SfqConfig::new().limit(nlink::Packets::new(100)))
         .await?;
 
     // htb at 1:, then prio at 1:.
@@ -1002,7 +1002,7 @@ async fn replace_qdisc_recreates_flow_queues_under_load() -> Result<()> {
     conn.replace_qdisc_full(pair.a_if, class, leaf, SfqConfig::new())
         .await?;
     queue_traffic().await?;
-    conn.replace_qdisc_full(pair.a_if, class, leaf, SfqConfig::new().limit(100))
+    conn.replace_qdisc_full(pair.a_if, class, leaf, SfqConfig::new().limit(nlink::Packets::new(100)))
         .await?;
     match leaf_options().await? {
         Some(QdiscOptions::Sfq(o)) => assert_eq!(o.limit, 100),

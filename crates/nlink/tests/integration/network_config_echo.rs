@@ -2723,7 +2723,7 @@ async fn netem_knobs_added_and_removed_converge() -> nlink::Result<()> {
         ("loss", |q| q.loss_pct(Percent::new(1.0))),
         ("duplicate", |q| q.duplicate_pct(Percent::new(1.0))),
         ("corrupt", |q| q.corrupt_pct(Percent::new(1.0))),
-        ("limit", |q| q.limit(500)),
+        ("limit", |q| q.limit(nlink::Packets::new(500))),
         ("rate", |q| q.rate(Rate::mbit(10))),
         ("loss-correlation", |q| {
             q.loss_pct(Percent::new(1.0))
@@ -2801,8 +2801,8 @@ async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
         .check(|ns| fq_codel_ecn_is(ns, false)),
         case("sfq", vec![base().qdisc("d0", |q| q.sfq())]),
         // sfq_change caps limit at maxdepth * maxflows (127 * 128).
-        case("sfq-limit-20000", vec![base().qdisc("d0", |q| q.sfq().limit(20000))]),
-        case("sfq-limit-200", vec![base().qdisc("d0", |q| q.sfq().limit(200))]),
+        case("sfq-limit-20000", vec![base().qdisc("d0", |q| q.sfq().limit(nlink::Packets::new(20000)))]),
+        case("sfq-limit-200", vec![base().qdisc("d0", |q| q.sfq().limit(nlink::Packets::new(200)))]),
         case(
             "sfq-perturb-quantum",
             vec![base().qdisc("d0", |q| {

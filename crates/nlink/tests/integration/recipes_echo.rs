@@ -722,7 +722,7 @@ async fn per_peer_impairer_shapes_converge() -> nlink::Result<()> {
         ("corrupt", |n| n.corrupt(Percent::new(1.0))),
         ("reorder", |n| n.reorder(Percent::new(5.0))),
         ("rate", |n| n.rate(Rate::mbit(10))),
-        ("limit", |n| n.limit(500)),
+        ("limit", |n| n.limit(nlink::Packets::new(500))),
         ("loss-model", |n| {
             n.loss_model(NetemLossModel::gilbert_elliot(Percent::new(1.0)).r(Percent::new(30.0)))
         }),

@@ -235,6 +235,7 @@ pub trait QdiscConfig: Send + Sync {
 /// # use nlink::Percent;
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::NetemConfig;
+/// use nlink::Packets;
 /// use std::time::Duration;
 ///
 /// // Simulate a lossy satellite link
@@ -242,7 +243,7 @@ pub trait QdiscConfig: Send + Sync {
 ///     .delay(Duration::from_millis(500))
 ///     .jitter(Duration::from_millis(50))
 ///     .loss(Percent::new(0.1))  // 0.1% packet loss
-///     .limit(10000)
+///     .limit(Packets::new(10000))
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
@@ -285,7 +286,7 @@ pub struct NetemConfig {
     /// Rate limit.
     pub rate: Option<crate::util::Rate>,
     /// Queue limit in packets.
-    pub limit: u32,
+    pub limit: crate::util::Packets,
     /// A Markov loss model (`loss state …` / `loss gemodel …`) in place
     /// of random [`loss`](Self::loss). Added in 0.29 (#368).
     pub loss_model: Option<NetemLossModel>,
@@ -323,7 +324,7 @@ pub struct NetemSlot {
     /// The longest time between slots; each is uniformly between the two.
     pub max_delay: Duration,
     /// The most packets one slot releases; unlimited when `None`.
-    pub max_packets: Option<u32>,
+    pub max_packets: Option<crate::util::Packets>,
     /// The most bytes one slot releases; unlimited when `None`.
     pub max_bytes: Option<u32>,
 }
@@ -341,7 +342,7 @@ impl NetemSlot {
     }
 
     /// Release at most `n` packets per slot.
-    pub fn packets(mut self, n: u32) -> Self {
+    pub fn packets(mut self, n: crate::util::Packets) -> Self {
         self.max_packets = Some(n);
         self
     }
@@ -449,7 +450,7 @@ impl NetemConfig {
     /// Create a new netem configuration builder.
     pub fn new() -> Self {
         Self {
-            limit: 1000, // Default limit
+            limit: crate::util::Packets::new(1000), // Default limit
             ..Default::default()
         }
     }
@@ -619,7 +620,7 @@ impl NetemConfig {
     }
 
     /// Set the queue limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = packets;
         self
     }
@@ -912,7 +913,7 @@ impl NetemConfig {
                             ))
                         })?;
                         slot = if sub == "packets" {
-                            slot.packets(n)
+                            slot.packets(crate::util::Packets::new(n))
                         } else {
                             slot.bytes(n)
                         };
@@ -967,7 +968,7 @@ impl From<&super::tc_options::NetemOptions> for NetemConfig {
         cfg.rate_packet_overhead = o.packet_overhead;
         cfg.rate_cell_size = o.cell_size;
         cfg.rate_cell_overhead = o.cell_overhead;
-        cfg.limit = o.limit;
+        cfg.limit = crate::util::Packets::new(o.limit);
         cfg.ecn = o.ecn;
         cfg.slot = o
             .slot
@@ -976,7 +977,7 @@ impl From<&super::tc_options::NetemOptions> for NetemConfig {
             .map(|s| NetemSlot {
                 min_delay: nanos(s.min_delay_ns),
                 max_delay: nanos(s.max_delay_ns),
-                max_packets: limit(s.max_packets),
+                max_packets: limit(s.max_packets).map(crate::util::Packets::new),
                 max_bytes: limit(s.max_bytes),
             });
         cfg.seed = o.seed;
@@ -1096,7 +1097,7 @@ impl QdiscConfig for NetemConfig {
 
         // Build TcNetemQopt
         let mut qopt = TcNetemQopt::new();
-        qopt.limit = self.limit;
+        qopt.limit = self.limit.as_u32();
 
         // `latency`/`jitter` are psched ticks (64 ns), not µs (#493). The
         // LATENCY64/JITTER64 attributes below override them on 4.15+; a
@@ -1203,7 +1204,7 @@ impl QdiscConfig for NetemConfig {
                 max_delay: i64::try_from(s.max_delay.as_nanos()).unwrap_or(i64::MAX),
                 max_packets: s
                     .max_packets
-                    .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
+                    .map_or(0, |n| i32::try_from(n.as_u32()).unwrap_or(i32::MAX)),
                 max_bytes: s
                     .max_bytes
                     .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
@@ -1243,12 +1244,13 @@ impl QdiscConfig for NetemConfig {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::FqCodelConfig;
+/// use nlink::Packets;
 /// use std::time::Duration;
 ///
 /// let config = FqCodelConfig::new()
 ///     .target(Duration::from_millis(5))
 ///     .interval(Duration::from_millis(100))
-///     .limit(10000)
+///     .limit(Packets::new(10000))
 ///     .flows(1024)
 ///     .ecn(true)
 ///     .build();
@@ -1264,7 +1266,7 @@ pub struct FqCodelConfig {
     /// Interval for CoDel algorithm.
     pub interval: Option<Duration>,
     /// Queue limit in packets.
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// Number of flows.
     pub flows: Option<u32>,
     /// Quantum (bytes per round).
@@ -1314,7 +1316,7 @@ impl FqCodelConfig {
     }
 
     /// Set the queue limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
@@ -1502,7 +1504,7 @@ impl FqCodelConfig {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_INTERVAL, interval.as_micros() as u32);
         }
         if let Some(limit) = self.limit {
-            builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_LIMIT, limit);
+            builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_LIMIT, limit.as_u32());
         }
         if let Some(flows) = self.flows
             && with_flows
@@ -1551,7 +1553,7 @@ pub struct CodelConfig {
     /// Sliding-window interval.
     pub interval: Option<Duration>,
     /// Hard queue limit in packets.
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// ECN marking instead of dropping (`Some(false)` = explicit noecn).
     pub ecn: Option<bool>,
     /// CE threshold for ECN marking.
@@ -1577,7 +1579,7 @@ impl CodelConfig {
     }
 
     /// Set the hard queue limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
@@ -1680,7 +1682,7 @@ impl QdiscConfig for CodelConfig {
             builder.append_attr_u32(codel::TCA_CODEL_INTERVAL, interval.as_micros() as u32);
         }
         if let Some(limit) = self.limit {
-            builder.append_attr_u32(codel::TCA_CODEL_LIMIT, limit);
+            builder.append_attr_u32(codel::TCA_CODEL_LIMIT, limit.as_u32());
         }
         if let Some(ecn) = self.ecn {
             builder.append_attr_u32(codel::TCA_CODEL_ECN, u32::from(ecn));
@@ -1701,20 +1703,21 @@ impl QdiscConfig for CodelConfig {
 ///
 /// ```no_run
 /// use nlink::netlink::tc::FqConfig;
+/// use nlink::Packets;
 /// use nlink::Rate;
 ///
 /// let cfg = FqConfig::new()
-///     .limit(10_000)
-///     .flow_limit(100)
+///     .limit(Packets::new(10_000))
+///     .flow_limit(Packets::new(100))
 ///     .maxrate(Rate::mbit(100))
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct FqConfig {
     /// Total packet limit across the queue.
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// Per-flow packet limit.
-    pub flow_limit: Option<u32>,
+    pub flow_limit: Option<crate::util::Packets>,
     /// Round-robin quantum in bytes.
     pub quantum: Option<u32>,
     /// Initial quantum for a new flow, in bytes.
@@ -1740,13 +1743,13 @@ impl FqConfig {
     }
 
     /// Set the total packet limit.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
 
     /// Set the per-flow packet limit.
-    pub fn flow_limit(mut self, packets: u32) -> Self {
+    pub fn flow_limit(mut self, packets: crate::util::Packets) -> Self {
         self.flow_limit = Some(packets);
         self
     }
@@ -1840,11 +1843,11 @@ impl FqConfig {
             };
             match key {
                 "limit" => {
-                    cfg.limit = Some(parse_u32(need_value()?, "limit")?);
+                    cfg.limit = Some(crate::util::Packets::new(parse_u32(need_value()?, "limit")?));
                     i += 2;
                 }
                 "flow_limit" => {
-                    cfg.flow_limit = Some(parse_u32(need_value()?, "flow_limit")?);
+                    cfg.flow_limit = Some(crate::util::Packets::new(parse_u32(need_value()?, "flow_limit")?));
                     i += 2;
                 }
                 "quantum" => {
@@ -1899,10 +1902,10 @@ impl QdiscConfig for FqConfig {
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         if let Some(limit) = self.limit {
-            builder.append_attr_u32(fq::TCA_FQ_PLIMIT, limit);
+            builder.append_attr_u32(fq::TCA_FQ_PLIMIT, limit.as_u32());
         }
         if let Some(flow_limit) = self.flow_limit {
-            builder.append_attr_u32(fq::TCA_FQ_FLOW_PLIMIT, flow_limit);
+            builder.append_attr_u32(fq::TCA_FQ_FLOW_PLIMIT, flow_limit.as_u32());
         }
         if let Some(quantum) = self.quantum {
             builder.append_attr_u32(fq::TCA_FQ_QUANTUM, quantum);
@@ -2520,7 +2523,7 @@ pub struct HtbQdiscConfig {
     /// Rate to quantum divisor.
     pub r2q: u32,
     /// Direct queue length.
-    pub direct_qlen: Option<u32>,
+    pub direct_qlen: Option<crate::util::Packets>,
 }
 
 impl Default for HtbQdiscConfig {
@@ -2552,7 +2555,7 @@ impl HtbQdiscConfig {
     }
 
     /// Set the direct queue length.
-    pub fn direct_qlen(mut self, qlen: u32) -> Self {
+    pub fn direct_qlen(mut self, qlen: crate::util::Packets) -> Self {
         self.direct_qlen = Some(qlen);
         self
     }
@@ -2674,7 +2677,7 @@ impl QdiscConfig for HtbQdiscConfig {
         builder.append_attr(htb::TCA_HTB_INIT, glob.as_bytes());
 
         if let Some(qlen) = self.direct_qlen {
-            builder.append_attr_u32(htb::TCA_HTB_DIRECT_QLEN, qlen);
+            builder.append_attr_u32(htb::TCA_HTB_DIRECT_QLEN, qlen.as_u32());
         }
 
         Ok(())
@@ -2868,10 +2871,11 @@ impl QdiscConfig for PrioConfig {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::SfqConfig;
+/// use nlink::Packets;
 ///
 /// let config = SfqConfig::new()
 ///     .perturb(10)
-///     .limit(127)
+///     .limit(Packets::new(127))
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
@@ -2887,7 +2891,7 @@ pub struct SfqConfig {
     /// has 100 flows where the default has 128. This was 127 and always
     /// sent before 0.32, which gave the default sfq 127 flows where tc(8)'s
     /// has 128 (#637).
-    pub limit: u32,
+    pub limit: crate::util::Packets,
     /// Quantum (bytes per round).
     pub quantum: u32,
 }
@@ -2903,7 +2907,7 @@ impl SfqConfig {
     pub fn new() -> Self {
         Self {
             perturb: 0,
-            limit: 0,
+            limit: crate::util::Packets::ZERO,
             quantum: 0,
         }
     }
@@ -2915,7 +2919,7 @@ impl SfqConfig {
     }
 
     /// Set the queue limit.
-    pub fn limit(mut self, limit: u32) -> Self {
+    pub fn limit(mut self, limit: crate::util::Packets) -> Self {
         self.limit = limit;
         self
     }
@@ -3019,7 +3023,7 @@ impl QdiscConfig for SfqConfig {
         let qopt = sfq::TcSfqQopt {
             quantum: self.quantum,
             perturb_period: self.perturb,
-            limit: self.limit,
+            limit: self.limit.as_u32(),
             divisor: 0,
             flows: 0,
         };
@@ -3300,22 +3304,23 @@ impl QdiscConfig for RedConfig {
 ///
 /// ```no_run
 /// use nlink::netlink::tc::ChokeConfig;
+/// use nlink::Packets;
 ///
 /// let cfg = ChokeConfig::new()
-///     .limit(1000)
-///     .min(50)
-///     .max(150)
+///     .limit(Packets::new(1000))
+///     .min(Packets::new(50))
+///     .max(Packets::new(150))
 ///     .ecn(true)
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
 pub struct ChokeConfig {
     /// Queue limit in packets: `sch_choke` counts packets (#723).
-    pub limit: u32,
+    pub limit: crate::util::Packets,
     /// Minimum threshold in packets.
-    pub min: u32,
+    pub min: crate::util::Packets,
     /// Maximum threshold in packets.
-    pub max: u32,
+    pub max: crate::util::Packets,
     /// Maximum probability (0-255, default ~2%).
     pub max_p: u8,
     /// Enable ECN marking instead of dropping.
@@ -3334,9 +3339,9 @@ impl ChokeConfig {
     /// Create a new CHOKe configuration builder.
     pub fn new() -> Self {
         Self {
-            limit: 0,
-            min: 0,
-            max: 0,
+            limit: crate::util::Packets::ZERO,
+            min: crate::util::Packets::ZERO,
+            max: crate::util::Packets::ZERO,
             max_p: 5, // ~2% probability
             ecn: false,
             harddrop: false,
@@ -3345,19 +3350,19 @@ impl ChokeConfig {
 
     /// Set the queue limit in **packets**: `sch_choke` counts packets, as
     /// tc-choke(8) says; this said bytes before 0.32 (#515).
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = packets;
         self
     }
 
     /// Set the minimum threshold in **packets**.
-    pub fn min(mut self, packets: u32) -> Self {
+    pub fn min(mut self, packets: crate::util::Packets) -> Self {
         self.min = packets;
         self
     }
 
     /// Set the maximum threshold in **packets**.
-    pub fn max(mut self, packets: u32) -> Self {
+    pub fn max(mut self, packets: crate::util::Packets) -> Self {
         self.max = packets;
         self
     }
@@ -3425,9 +3430,9 @@ impl ChokeConfig {
                         Error::invalid_message(format!("choke: {key} `{s}` exceeds u32"))
                     })?;
                     match key {
-                        "limit" => cfg.limit = val,
-                        "min" => cfg.min = val,
-                        "max" => cfg.max = val,
+                        "limit" => cfg.limit = crate::util::Packets::new(val),
+                        "min" => cfg.min = crate::util::Packets::new(val),
+                        "max" => cfg.max = crate::util::Packets::new(val),
                         _ => unreachable!(),
                     }
                     i += 2;
@@ -3491,9 +3496,9 @@ impl QdiscConfig for ChokeConfig {
         }
 
         let qopt = choke::TcRedQopt {
-            limit: self.limit,
-            qth_min: self.min,
-            qth_max: self.max,
+            limit: self.limit.as_u32(),
+            qth_min: self.min.as_u32(),
+            qth_max: self.max.as_u32(),
             wlog: 9,      // Weight log (default)
             plog: 13,     // Probability log (default)
             scell_log: 0, // Cell size log
@@ -3891,11 +3896,12 @@ impl QdiscConfig for GredConfig {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PieConfig;
+/// use nlink::Packets;
 /// use std::time::Duration;
 ///
 /// let config = PieConfig::new()
 ///     .target(Duration::from_millis(15))
-///     .limit(1000)
+///     .limit(Packets::new(1000))
 ///     .ecn(true)
 ///     .build();
 ///
@@ -3908,7 +3914,7 @@ pub struct PieConfig {
     /// Target delay.
     pub target: Option<Duration>,
     /// Queue limit in packets.
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// Probability update interval.
     pub tupdate: Option<Duration>,
     /// Alpha parameter (P controller).
@@ -3948,7 +3954,7 @@ impl PieConfig {
     }
 
     /// Set the queue limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
@@ -4096,7 +4102,7 @@ impl QdiscConfig for PieConfig {
             builder.append_attr_u32(pie::TCA_PIE_TARGET, target.as_micros() as u32);
         }
         if let Some(limit) = self.limit {
-            builder.append_attr_u32(pie::TCA_PIE_LIMIT, limit);
+            builder.append_attr_u32(pie::TCA_PIE_LIMIT, limit.as_u32());
         }
         if let Some(tupdate) = self.tupdate {
             builder.append_attr_u32(pie::TCA_PIE_TUPDATE, tupdate.as_micros() as u32);
@@ -4137,13 +4143,14 @@ impl QdiscConfig for PieConfig {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::FqPieConfig;
+/// use nlink::Packets;
 /// use nlink::{Bytes, Percent};
 /// use std::time::Duration;
 ///
 /// let config = FqPieConfig::new()
 ///     .target(Duration::from_millis(15))
 ///     .tupdate(Duration::from_millis(15))
-///     .limit(10240)
+///     .limit(Packets::new(10240))
 ///     .flows(1024)
 ///     .quantum(Bytes::new(1514))
 ///     .ecn(true)
@@ -4156,7 +4163,7 @@ impl QdiscConfig for PieConfig {
 #[derive(Debug, Clone)]
 pub struct FqPieConfig {
     /// Queue limit in packets.
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// Number of flow buckets (default 1024).
     pub flows: Option<u32>,
     /// Target queueing delay.
@@ -4209,7 +4216,7 @@ impl FqPieConfig {
     }
 
     /// Set the queue limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
@@ -4313,11 +4320,13 @@ impl FqPieConfig {
             match key {
                 "limit" => {
                     let s = need_value()?;
-                    cfg.limit = Some(crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::invalid_message(format!(
-                            "fq_pie: invalid limit `{s}` (expected packet count)"
-                        ))
-                    })?);
+                    cfg.limit = Some(crate::util::Packets::new(
+                        crate::util::parse::get_u32(s).map_err(|_| {
+                            Error::invalid_message(format!(
+                                "fq_pie: invalid limit `{s}` (expected packet count)"
+                            ))
+                        })?,
+                    ));
                     i += 2;
                 }
                 "flows" => {
@@ -4444,7 +4453,7 @@ impl QdiscConfig for FqPieConfig {
         use super::types::tc::qdisc::fq_pie;
 
         if let Some(limit) = self.limit {
-            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_LIMIT, limit);
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_LIMIT, limit.as_u32());
         }
         if let Some(flows) = self.flows {
             builder.append_attr_u32(fq_pie::TCA_FQ_PIE_FLOWS, flows);
@@ -4630,9 +4639,10 @@ impl QdiscConfig for ClsactConfig {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PfifoConfig;
+/// use nlink::Packets;
 ///
 /// let config = PfifoConfig::new()
-///     .limit(1000)  // 1000 packets
+///     .limit(Packets::new(1000))  // 1000 packets
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
@@ -4642,7 +4652,7 @@ impl QdiscConfig for ClsactConfig {
 #[derive(Debug, Clone)]
 pub struct PfifoConfig {
     /// Queue limit in packets.
-    pub limit: u32,
+    pub limit: crate::util::Packets,
 }
 
 impl Default for PfifoConfig {
@@ -4654,11 +4664,11 @@ impl Default for PfifoConfig {
 impl PfifoConfig {
     /// Create a new pfifo configuration builder.
     pub fn new() -> Self {
-        Self { limit: 1000 }
+        Self { limit: crate::util::Packets::new(1000) }
     }
 
     /// Set the queue limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = packets;
         self
     }
@@ -4686,11 +4696,13 @@ impl PfifoConfig {
                     let s = params.get(i + 1).copied().ok_or_else(|| {
                         Error::invalid_message("pfifo: `limit` requires a value")
                     })?;
-                    cfg.limit = crate::util::parse::get_u32(s).map_err(|_| {
-                        Error::invalid_message(format!(
-                            "pfifo: invalid limit `{s}` (expected packet count)"
-                        ))
-                    })?;
+                    cfg.limit = crate::util::Packets::new(crate::util::parse::get_u32(s).map_err(
+                        |_| {
+                            Error::invalid_message(format!(
+                                "pfifo: invalid limit `{s}` (expected packet count)"
+                            ))
+                        },
+                    )?);
                     i += 2;
                 }
                 other => {
@@ -4712,7 +4724,7 @@ impl QdiscConfig for PfifoConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::fifo::TcFifoQopt;
 
-        let qopt = TcFifoQopt::new(self.limit);
+        let qopt = TcFifoQopt::new(self.limit.as_u32());
         builder.append(&qopt);
         Ok(())
     }
@@ -5003,19 +5015,20 @@ impl QdiscConfig for CbsConfig {
 ///
 /// ```no_run
 /// use nlink::netlink::tc::SkbprioConfig;
+/// use nlink::Packets;
 ///
-/// let cfg = SkbprioConfig::new().limit(64).build();
+/// let cfg = SkbprioConfig::new().limit(Packets::new(64)).build();
 /// ```
 #[derive(Debug, Clone)]
 pub struct SkbprioConfig {
     /// Queue length limit in packets.
-    pub limit: u32,
+    pub limit: crate::util::Packets,
 }
 
 impl Default for SkbprioConfig {
     fn default() -> Self {
         // Kernel default is 64 packets.
-        Self { limit: 64 }
+        Self { limit: crate::util::Packets::new(64) }
     }
 }
 
@@ -5026,7 +5039,7 @@ impl SkbprioConfig {
     }
 
     /// Set the queue length limit in packets.
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = packets;
         self
     }
@@ -5075,7 +5088,7 @@ impl QdiscConfig for SkbprioConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::skbprio::TcSkbprioQopt;
 
-        let qopt = TcSkbprioQopt::new(self.limit);
+        let qopt = TcSkbprioQopt::new(self.limit.as_u32());
         builder.append(&qopt);
         Ok(())
     }
@@ -5094,13 +5107,14 @@ impl QdiscConfig for SkbprioConfig {
 ///
 /// ```no_run
 /// use nlink::netlink::tc::SfbConfig;
+/// use nlink::Packets;
 ///
-/// let cfg = SfbConfig::new().limit(1000).build();
+/// let cfg = SfbConfig::new().limit(Packets::new(1000)).build();
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct SfbConfig {
     /// Max SFB queue length (packets).
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// Rehash interval.
     pub rehash: Option<Duration>,
     /// Double-buffering warmup time (must be < rehash).
@@ -5126,7 +5140,7 @@ impl SfbConfig {
     }
 
     /// Set the max SFB queue length (packets).
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
@@ -5217,7 +5231,7 @@ impl SfbConfig {
             };
             match key {
                 "limit" => {
-                    cfg.limit = Some(parse_u32(need_value()?)?);
+                    cfg.limit = Some(crate::util::Packets::new(parse_u32(need_value()?)?));
                     i += 2;
                 }
                 "rehash" => {
@@ -5277,7 +5291,7 @@ impl QdiscConfig for SfbConfig {
             bin_size: self.target.unwrap_or(0),
             increment: self.increment.unwrap_or(0),
             decrement: self.decrement.unwrap_or(0),
-            limit: self.limit.unwrap_or(0),
+            limit: self.limit.map_or(0, crate::util::Packets::as_u32),
             penalty_rate: self.penalty_rate.unwrap_or(0),
             penalty_burst: self.penalty_burst.unwrap_or(0),
         };
@@ -5363,13 +5377,14 @@ impl QdiscConfig for MultiqConfig {
 /// ```no_run
 /// # use nlink::Bytes;
 /// use nlink::netlink::tc::HhfConfig;
+/// use nlink::Packets;
 ///
-/// let cfg = HhfConfig::new().limit(1000).quantum(Bytes::new(1514)).build();
+/// let cfg = HhfConfig::new().limit(Packets::new(1000)).quantum(Bytes::new(1514)).build();
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct HhfConfig {
     /// Backlog limit, in packets.
-    pub limit: Option<u32>,
+    pub limit: Option<crate::util::Packets>,
     /// Quantum, in bytes.
     pub quantum: Option<crate::util::Bytes>,
     /// Heavy-hitter flow-table size.
@@ -5391,7 +5406,7 @@ impl HhfConfig {
     }
 
     /// Set the backlog limit (packets).
-    pub fn limit(mut self, packets: u32) -> Self {
+    pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = Some(packets);
         self
     }
@@ -5478,7 +5493,7 @@ impl HhfConfig {
             };
             match key {
                 "limit" => {
-                    cfg.limit = Some(parse_u32(need_value()?)?);
+                    cfg.limit = Some(crate::util::Packets::new(parse_u32(need_value()?)?));
                     i += 2;
                 }
                 "quantum" => {
@@ -5523,7 +5538,7 @@ impl QdiscConfig for HhfConfig {
         use super::types::tc::qdisc::hhf::*;
 
         if let Some(limit) = self.limit {
-            builder.append_attr_u32(TCA_HHF_BACKLOG_LIMIT, limit);
+            builder.append_attr_u32(TCA_HHF_BACKLOG_LIMIT, limit.as_u32());
         }
         if let Some(q) = self.quantum {
             builder.append_attr_u32(TCA_HHF_QUANTUM, q.as_u32_saturating());
@@ -9841,10 +9856,10 @@ mod tests {
     #[test]
     fn test_pfifo_parse_params() {
         let cfg = PfifoConfig::parse_params(&[]).unwrap();
-        assert_eq!(cfg.limit, 1000); // default
+        assert_eq!(cfg.limit, crate::util::Packets::new(1000)); // default
 
         let cfg = PfifoConfig::parse_params(&["limit", "500"]).unwrap();
-        assert_eq!(cfg.limit, 500);
+        assert_eq!(cfg.limit, crate::util::Packets::new(500));
 
         // missing value, unparseable value, and unknown token all error
         assert!(PfifoConfig::parse_params(&["limit"]).is_err());
@@ -9879,7 +9894,7 @@ mod tests {
             "bytemode", "dq_rate_estimator",
         ])
         .unwrap();
-        assert_eq!(cfg.limit, Some(10000));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(10000)));
         assert_eq!(cfg.flows, Some(1024));
         assert_eq!(cfg.target, Some(Duration::from_millis(15)));
         assert_eq!(cfg.tupdate, Some(Duration::from_millis(16)));
@@ -9941,9 +9956,9 @@ mod tests {
     #[test]
     fn test_skbprio_parse() {
         let cfg = SkbprioConfig::parse_params(&["limit", "128"]).unwrap();
-        assert_eq!(cfg.limit, 128);
+        assert_eq!(cfg.limit, crate::util::Packets::new(128));
         // kernel default when unspecified.
-        assert_eq!(SkbprioConfig::parse_params(&[]).unwrap().limit, 64);
+        assert_eq!(SkbprioConfig::parse_params(&[]).unwrap().limit, crate::util::Packets::new(64));
         // strict: missing value, bad value, unknown token.
         assert!(SkbprioConfig::parse_params(&["limit"]).is_err());
         assert!(SkbprioConfig::parse_params(&["limit", "x"]).is_err());
@@ -9957,7 +9972,7 @@ mod tests {
             "increment", "5", "decrement", "1", "penalty_rate", "10", "penalty_burst", "20",
         ])
         .unwrap();
-        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(1000)));
         assert_eq!(cfg.rehash, Some(Duration::from_millis(600)));
         assert_eq!(cfg.db, Some(Duration::from_millis(60)));
         assert_eq!(cfg.max, Some(25));
@@ -9993,7 +10008,7 @@ mod tests {
             "admit_bytes", "131072", "evict_timeout", "1s", "nonhh_weight", "2",
         ])
         .unwrap();
-        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(1000)));
         assert_eq!(cfg.quantum, Some(Bytes::new(1514)));
         assert_eq!(cfg.hh_limit, Some(2048));
         assert_eq!(cfg.reset_timeout, Some(Duration::from_millis(40)));
@@ -10081,13 +10096,13 @@ mod tests {
         let config = FqCodelConfig::new()
             .target(Duration::from_millis(5))
             .interval(Duration::from_millis(100))
-            .limit(10000)
+            .limit(crate::util::Packets::new(10000))
             .ecn(true)
             .build();
 
         assert_eq!(config.target, Some(Duration::from_millis(5)));
         assert_eq!(config.interval, Some(Duration::from_millis(100)));
-        assert_eq!(config.limit, Some(10000));
+        assert_eq!(config.limit, Some(crate::util::Packets::new(10000)));
         assert_eq!(config.ecn, Some(true));
         assert_eq!(config.kind(), "fq_codel");
     }
@@ -10357,7 +10372,7 @@ mod tests {
             crate::netlink::tc_handle::TcHandle::new(1, 0x10).as_raw(),
         );
         assert_eq!(cfg.r2q, 5);
-        assert_eq!(cfg.direct_qlen, Some(1000));
+        assert_eq!(cfg.direct_qlen, Some(crate::util::Packets::new(1000)));
     }
 
     #[test]
@@ -10410,7 +10425,7 @@ mod tests {
         assert_eq!(cfg.delay, None);
         assert_eq!(cfg.jitter, None);
         assert!(cfg.loss.is_zero());
-        assert_eq!(cfg.limit, 1000);
+        assert_eq!(cfg.limit, crate::util::Packets::new(1000));
     }
 
     #[test]
@@ -10460,7 +10475,7 @@ mod tests {
         assert_eq!(cfg.jitter, Some(Duration::from_millis(10)));
         assert!(!cfg.loss.is_zero());
         assert!(!cfg.duplicate.is_zero());
-        assert_eq!(cfg.limit, 5000);
+        assert_eq!(cfg.limit, crate::util::Packets::new(5000));
     }
 
     #[test]
@@ -10491,7 +10506,7 @@ mod tests {
             ),
             (-4, 53, 5)
         );
-        assert_eq!(cfg.limit, 9);
+        assert_eq!(cfg.limit, crate::util::Packets::new(9));
         let cfg = NetemConfig::parse_params(&["rate", "1mbit", "20"]).unwrap();
         assert_eq!((cfg.rate_packet_overhead, cfg.rate_cell_size), (20, 0));
         for bad in [
@@ -10534,7 +10549,7 @@ mod tests {
             cfg.slot,
             Some(
                 NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2))
-                    .packets(5)
+                    .packets(crate::util::Packets::new(5))
                     .bytes(3000)
             )
         );
@@ -10544,7 +10559,7 @@ mod tests {
         let cfg = NetemConfig::parse_params(&["slot", "3ms", "packets", "2"]).unwrap();
         assert_eq!(
             cfg.slot,
-            Some(NetemSlot::new(Duration::from_millis(3), Duration::from_millis(3)).packets(2))
+            Some(NetemSlot::new(Duration::from_millis(3), Duration::from_millis(3)).packets(crate::util::Packets::new(2)))
         );
     }
 
@@ -10592,7 +10607,7 @@ mod tests {
             .rate_overhead(-4, 53, 5)
             .ecn(true)
             .seed(0x0102_0304_0506_0708)
-            .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)).packets(5));
+            .slot(NetemSlot::new(Duration::from_millis(1), Duration::from_millis(2)).packets(crate::util::Packets::new(5)));
         let attrs = netem_attrs(&cfg);
         let rate = &attrs[&TCA_NETEM_RATE];
         assert_eq!(rate.len(), 16);
@@ -10783,7 +10798,7 @@ mod tests {
         let cfg = NetemConfig::parse_params(&["drop", "gemodel", "2%", "delay", "10ms", "limit", "50"]).unwrap();
         assert!(matches!(cfg.loss_model, Some(NetemLossModel::GilbertElliot { .. })));
         assert_eq!(cfg.delay, Some(Duration::from_millis(10)));
-        assert_eq!(cfg.limit, 50);
+        assert_eq!(cfg.limit, crate::util::Packets::new(50));
     }
 
     #[test]
@@ -11133,7 +11148,7 @@ mod tests {
     fn sfq_parse_params_empty_yields_default() {
         let cfg = SfqConfig::parse_params(&[]).unwrap();
         assert_eq!(cfg.perturb, 0);
-        assert_eq!(cfg.limit, 0, "the kernel's, as tc leaves it (#637)");
+        assert_eq!(cfg.limit, crate::util::Packets::new(0), "the kernel's, as tc leaves it (#637)");
         assert_eq!(cfg.quantum, 0);
     }
 
@@ -11142,7 +11157,7 @@ mod tests {
         let cfg = SfqConfig::parse_params(&["perturb", "10", "limit", "1000", "quantum", "1500"])
             .unwrap();
         assert_eq!(cfg.perturb, 10);
-        assert_eq!(cfg.limit, 1000);
+        assert_eq!(cfg.limit, crate::util::Packets::new(1000));
         assert_eq!(cfg.quantum, 1500);
     }
 
@@ -11241,7 +11256,7 @@ mod tests {
             "ecn",
         ])
         .unwrap();
-        assert_eq!(cfg.limit, Some(10240));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(10240)));
         assert_eq!(cfg.target, Some(Duration::from_millis(5)));
         assert_eq!(cfg.interval, Some(Duration::from_millis(100)));
         assert_eq!(cfg.flows, Some(1024));
@@ -11279,7 +11294,7 @@ mod tests {
     #[test]
     fn fq_codel_change_mode_leaves_flows_out() {
         use crate::netlink::test_support::encode;
-        let cfg = FqCodelConfig::new().flows(1024).limit(1000);
+        let cfg = FqCodelConfig::new().flows(1024).limit(crate::util::Packets::new(1000));
         let create = encode(|b| cfg.write_options(b));
         let change = encode(|b| cfg.write_change_options(b));
         assert!(create.contains_key(&fq_codel::TCA_FQ_CODEL_FLOWS));
@@ -11405,9 +11420,9 @@ mod tests {
     #[test]
     fn choke_parse_params_empty_yields_default() {
         let cfg = ChokeConfig::parse_params(&[]).unwrap();
-        assert_eq!(cfg.limit, 0);
-        assert_eq!(cfg.min, 0);
-        assert_eq!(cfg.max, 0);
+        assert_eq!(cfg.limit, crate::util::Packets::new(0));
+        assert_eq!(cfg.min, crate::util::Packets::new(0));
+        assert_eq!(cfg.max, crate::util::Packets::new(0));
         assert!(!cfg.ecn);
         assert!(!cfg.harddrop);
     }
@@ -11417,9 +11432,9 @@ mod tests {
         let cfg =
             ChokeConfig::parse_params(&["limit", "100k", "min", "10k", "max", "30k", "ecn"])
                 .unwrap();
-        assert_eq!(cfg.limit, 100 * 1024);
-        assert_eq!(cfg.min, 10 * 1024);
-        assert_eq!(cfg.max, 30 * 1024);
+        assert_eq!(cfg.limit, crate::util::Packets::new(100 * 1024));
+        assert_eq!(cfg.min, crate::util::Packets::new(10 * 1024));
+        assert_eq!(cfg.max, crate::util::Packets::new(30 * 1024));
         assert!(cfg.ecn);
     }
 
@@ -11531,7 +11546,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cfg.target, Some(Duration::from_millis(15)));
-        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(1000)));
         assert_eq!(cfg.tupdate, Some(Duration::from_millis(30)));
         assert_eq!(cfg.alpha, Some(2));
         assert_eq!(cfg.beta, Some(20));
@@ -11976,7 +11991,7 @@ mod tests {
             "limit", "1000", "target", "5ms", "interval", "100ms", "ecn",
         ])
         .unwrap();
-        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(1000)));
         assert_eq!(cfg.target, Some(Duration::from_millis(5)));
         assert_eq!(cfg.interval, Some(Duration::from_millis(100)));
         assert_eq!(cfg.ecn, Some(true));
@@ -11999,8 +12014,8 @@ mod tests {
             "nopacing",
         ])
         .unwrap();
-        assert_eq!(cfg.limit, Some(10000));
-        assert_eq!(cfg.flow_limit, Some(100));
+        assert_eq!(cfg.limit, Some(crate::util::Packets::new(10000)));
+        assert_eq!(cfg.flow_limit, Some(crate::util::Packets::new(100)));
         assert_eq!(cfg.quantum, Some(3028));
         // 100 mbit = 12_500_000 bytes/sec
         assert_eq!(

@@ -170,13 +170,13 @@ impl QdiscSpec {
             (Self::Htb(cfg), Some(QdiscOptions::Htb(live))) => {
                 live.default_class == cfg.default_class
                     && live.rate2quantum == cfg.r2q
-                    && cfg.direct_qlen.is_none_or(|q| live.direct_qlen == Some(q))
+                    && cfg.direct_qlen.is_none_or(|q| live.direct_qlen == Some(q.as_u32()))
             }
             (Self::FqCodel(cfg), Some(QdiscOptions::FqCodel(live))) => {
                 // Only what the spec sets is written; the kernel chooses
                 // the rest. `quantum` is kept as `max(256, quantum)`.
                 let us = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
-                cfg.limit.is_none_or(|l| live.limit == l)
+                cfg.limit.is_none_or(|l| live.limit == l.as_u32())
                     && cfg.flows.is_none_or(|f| live.flows == f)
                     && cfg
                         .target
@@ -201,7 +201,8 @@ impl QdiscSpec {
                 // being the kernel's "off". The limit is capped at
                 // `maxdepth * maxflows`.
                 live.perturb_period == cfg.perturb
-                    && (cfg.limit == 0 || live.limit == cfg.limit.min(SFQ_MAX_LIMIT))
+                    && (cfg.limit == crate::util::Packets::ZERO
+                        || live.limit == cfg.limit.as_u32().min(SFQ_MAX_LIMIT))
                     && (cfg.quantum == 0 || live.quantum == cfg.quantum)
             }
             (Self::Prio(cfg), Some(QdiscOptions::Prio(live))) => {
@@ -481,7 +482,7 @@ mod tests {
         let sfq = |perturb: i32, limit: u32, quantum: u32| {
             let mut c = SfqConfig::new();
             c.perturb = perturb;
-            c.limit = limit;
+            c.limit = crate::util::Packets::new(limit);
             c.quantum = quantum;
             QdiscSpec::from(c)
         };

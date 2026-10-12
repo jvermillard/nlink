@@ -272,7 +272,7 @@ pub use netlink::{Generic, Nftables, Route, Wireguard};
 // Strongly-typed unit types (rate, byte, percent values used at TC API
 // boundaries). Use these in new code; the kernel's unit confusion (bits/sec
 // vs bytes/sec, decimal vs binary) is handled at type construction.
-pub use util::{AddressFamily, Bytes, Percent, Rate};
+pub use util::{AddressFamily, Bytes, Packets, Percent, Rate};
 
 // ---- Plan 148 §4.3 re-export hygiene ----------------------------------
 // The route / address / rule builders and the extension traits users

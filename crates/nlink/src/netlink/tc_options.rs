@@ -49,7 +49,7 @@ use super::{messages::TcMessage, psched};
 /// if let Some(QdiscOptions::Netem(netem)) = root.options() {
 ///     println!("{netem}"); // limit 1000 delay 100ms 10ms loss 1%
 ///     // The same netem, one thing changed.
-///     let cfg = NetemConfig::from(&netem).limit(5000);
+///     let cfg = NetemConfig::from(&netem).limit(nlink::Packets::new(5000));
 ///     conn.replace_qdisc("eth0", cfg).await?;
 /// }
 /// # Ok(())
@@ -2725,7 +2725,7 @@ mod tests {
         use crate::netlink::tc::QdiscConfig;
 
         let cfg = FqPieConfig::new()
-            .limit(10240)
+            .limit(crate::util::Packets::new(10240))
             .flows(2048)
             .target(Duration::from_millis(15))
             .tupdate(Duration::from_millis(20))

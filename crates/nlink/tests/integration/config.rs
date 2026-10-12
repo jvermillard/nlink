@@ -559,7 +559,7 @@ async fn declarative_qdisc_knobs_reach_the_kernel() -> Result<()> {
     NetworkConfig::new()
         .qdisc("dummy0", |q| {
             q.fq_codel()
-                .limit(1200)
+                .limit(nlink::Packets::new(1200))
                 .target(Duration::from_millis(5))
                 .interval(Duration::from_millis(100))
                 .flows(1024)
@@ -594,7 +594,7 @@ async fn declarative_qdisc_knobs_reach_the_kernel() -> Result<()> {
         .qdisc("dummy0", |q| {
             q.sfq()
                 .perturb(Duration::from_secs(10))
-                .limit(200)
+                .limit(nlink::Packets::new(200))
                 .quantum(1514)
         })
         .apply(&conn)
@@ -743,7 +743,7 @@ async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
             "fq_codel-tuned",
             NetworkConfig::new().qdisc("dummy0", |q| {
                 q.fq_codel()
-                    .limit(1200)
+                    .limit(nlink::Packets::new(1200))
                     .target(Duration::from_millis(5))
                     .interval(Duration::from_millis(100))
                     .flows(1024)
@@ -757,7 +757,7 @@ async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
             NetworkConfig::new().qdisc("dummy0", |q| {
                 q.sfq()
                     .perturb(Duration::from_secs(10))
-                    .limit(200)
+                    .limit(nlink::Packets::new(200))
                     .quantum(1514)
             }),
         ),
