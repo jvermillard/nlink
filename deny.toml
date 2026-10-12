@@ -6,7 +6,11 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # serde_yaml 0.9 (deprecated) pulls it, for the nlink-config demo bin
+    # only; unmaintained, not a known vulnerability. Drop with #747.
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml in bins/config only; migration tracked in #747" },
+]
 
 [licenses]
 version = 2
