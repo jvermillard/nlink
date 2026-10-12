@@ -1621,6 +1621,31 @@ All notable changes to this project will be documented in this file.
 
     It fails without the control-message metadata.
 
+- **`events::view`: a serializable projection of every event (#523,
+  seventh part; feature `serde`).**
+  - **`EventView`** is one shape for both families. It is tagged
+    `"object"` (`link`, `address`, `route`, …, `nft_table`, `nft_rule`,
+    …), with an `"action"` (`new`/`del`) and the fields that identify
+    and describe the object. Optional fields are left out when absent.
+  - **Names are stable.**
+    - Families are written `inet`, `inet6`, `bridge`, as `ip` and `nft`
+      name them.
+    - States, scopes, protocols and route types use their `name()`.
+    - Prefixes are written as CIDR, and a route with no destination as
+      `default`.
+  - **Conversions.** `From<&NetworkEvent>` and `From<&NftablesEvent>`
+    build a view, and so do their owned forms.
+  - **Serde on more types.** `ResyncedEvent`, `ResyncMarker` and
+    `EventMeta` now implement `Serialize` and `Deserialize` too. So
+    `.map_event(|e| EventView::from(&e))` turns a resync stream into
+    JSON lines.
+  - **Why.** nlink-lab mirrored every event type into its own
+    serializable enum.
+  - **Tests.** Unit tests pin the JSON of a link, a route (and the
+    `default` destination), an nftables table, the resync items and the
+    metadata. Each view is built from the kernel's message bytes and
+    round-trips through `Deserialize`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

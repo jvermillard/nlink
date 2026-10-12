@@ -85,6 +85,7 @@
 /// consistent snapshot of network devices should take it from
 /// rtnetlink, which has a real dump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum ResyncMarker {
     /// Resync is starting. The next items will be
@@ -108,6 +109,7 @@ pub enum ResyncMarker {
 /// boundary markers so the consumer's state-rebuild logic can
 /// trigger at the right moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum ResyncedEvent<T> {
     /// A real-time multicast event from the kernel.
