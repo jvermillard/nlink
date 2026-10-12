@@ -2921,7 +2921,7 @@ impl FilterConfig for TcindexFilter {
 #[must_use = "builders do nothing unless used"]
 pub struct BpfFilter {
     /// BPF program file descriptor.
-    fd: i32,
+    fd: super::bpf_fd::ProgFd,
     /// Program name.
     name: Option<String>,
     /// Use direct action mode.
@@ -2939,6 +2939,10 @@ pub struct BpfFilter {
 impl BpfFilter {
     /// Create a new BPF filter with the given program file descriptor.
     pub fn new(fd: i32) -> Self {
+        Self::with_fd(super::bpf_fd::ProgFd::Raw(fd))
+    }
+
+    fn with_fd(fd: super::bpf_fd::ProgFd) -> Self {
         Self {
             fd,
             name: None,
@@ -2971,9 +2975,7 @@ impl BpfFilter {
     /// # }
     /// ```
     pub fn from_pinned(path: impl AsRef<std::path::Path>) -> crate::netlink::Result<Self> {
-        use std::os::unix::io::IntoRawFd;
-        let file = std::fs::File::open(path.as_ref())?;
-        Ok(Self::new(file.into_raw_fd()))
+        Ok(Self::with_fd(super::bpf_fd::ProgFd::open_pinned(path.as_ref())?))
     }
 
     /// Set the program name.
@@ -3044,11 +3046,10 @@ impl BpfFilter {
     /// field. File an issue if you need hardware-offload control
     /// on a BPF filter.
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
-        use std::os::unix::io::IntoRawFd;
-
+        use super::bpf_fd::ProgFd;
         use crate::Error;
 
-        let mut fd: Option<i32> = None;
+        let mut fd: Option<ProgFd> = None;
         let mut name: Option<String> = None;
         let mut classid: Option<TcHandle> = None;
         let mut chain: Option<u32> = None;
@@ -3071,11 +3072,11 @@ impl BpfFilter {
                             "bpf: `fd` and `pinned` are mutually exclusive".into(),
                         ));
                     }
-                    fd = Some(s.parse().map_err(|_| {
+                    fd = Some(ProgFd::Raw(s.parse().map_err(|_| {
                         Error::InvalidMessage(format!(
                             "bpf: invalid fd `{s}` (expected signed integer)"
                         ))
-                    })?);
+                    })?));
                     i += 2;
                 }
                 "pinned" | "object-pinned" => {
@@ -3085,12 +3086,12 @@ impl BpfFilter {
                             "bpf: `fd` and `pinned` are mutually exclusive".into(),
                         ));
                     }
-                    let file = std::fs::File::open(path).map_err(|e| {
+                    // `BPF_OBJ_GET`: bpffs refuses `open(2)` on a pin (#710).
+                    fd = Some(ProgFd::open_pinned(std::path::Path::new(path)).map_err(|e| {
                         Error::InvalidMessage(format!(
                             "bpf: failed to open pinned program `{path}`: {e}"
                         ))
-                    })?;
-                    fd = Some(file.into_raw_fd());
+                    })?);
                     i += 2;
                 }
                 "name" | "section" => {
@@ -3135,7 +3136,7 @@ impl BpfFilter {
             ));
         };
 
-        let mut f = Self::new(fd);
+        let mut f = Self::with_fd(fd);
         if let Some(n) = name {
             f = f.name(n);
         }
@@ -3188,7 +3189,7 @@ impl FilterConfig for BpfFilter {
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Add file descriptor
-        builder.append_attr_u32(bpf::TCA_BPF_FD, self.fd as u32);
+        builder.append_attr_u32(bpf::TCA_BPF_FD, self.fd.raw() as u32);
 
         // Add name if set
         if let Some(ref name) = self.name {
@@ -5707,7 +5708,7 @@ mod tests {
             .priority(crate::FilterPriority::new(100))
             .chain(5);
 
-        assert_eq!(filter.fd, 42);
+        assert_eq!(filter.fd.raw(), 42);
         assert_eq!(filter.name.as_deref(), Some("my_prog"));
         assert!(filter.direct_action);
         assert_eq!(filter.priority, 100);
@@ -5718,7 +5719,7 @@ mod tests {
     fn test_bpf_filter_defaults() {
         let filter = BpfFilter::new(7);
 
-        assert_eq!(filter.fd, 7);
+        assert_eq!(filter.fd.raw(), 7);
         assert!(filter.name.is_none());
         assert!(!filter.direct_action);
         assert_eq!(filter.priority, 0);
@@ -6145,7 +6146,7 @@ mod tests {
     #[test]
     fn bpf_parse_params_fd() {
         let f = BpfFilter::parse_params(&["fd", "42"]).unwrap();
-        assert_eq!(f.fd, 42);
+        assert_eq!(f.fd.raw(), 42);
         assert!(!f.direct_action);
     }
 
@@ -6155,7 +6156,7 @@ mod tests {
             "fd", "10", "name", "my_prog", "classid", "1:5", "chain", "2", "da",
         ])
         .unwrap();
-        assert_eq!(f.fd, 10);
+        assert_eq!(f.fd.raw(), 10);
         assert_eq!(f.name.as_deref(), Some("my_prog"));
         assert_eq!(f.classid, Some(TcHandle::new(1, 5).as_raw()));
         assert_eq!(f.chain, Some(2));
