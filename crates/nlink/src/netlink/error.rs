@@ -44,6 +44,8 @@ struct Inner {
     /// Outermost first.
     context: Vec<String>,
     object: Option<ErrorObject>,
+    /// The namespace of the connection it came from (#718).
+    netns: Option<std::sync::Arc<str>>,
 }
 
 /// What a failed operation was done to (#526): the object an [`Error`]
@@ -180,21 +182,29 @@ impl std::fmt::Display for Error {
                 *errno,
                 ext_ack.as_deref(),
                 *ext_ack_offset,
-            )),
-            detail => detail.fmt(f),
+            ))?,
+            detail => detail.fmt(f)?,
         }
+        if let Some(netns) = &self.0.netns {
+            write!(f, " [netns {netns}]")?;
+        }
+        Ok(())
     }
 }
 
 impl std::fmt::Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0.context.is_empty() {
+        if self.0.context.is_empty() && self.0.netns.is_none() {
             return self.0.detail.fmt(f);
         }
-        f.debug_struct("Error")
-            .field("context", &self.0.context)
-            .field("detail", &self.0.detail)
-            .finish()
+        let mut s = f.debug_struct("Error");
+        if !self.0.context.is_empty() {
+            s.field("context", &self.0.context);
+        }
+        if let Some(netns) = &self.0.netns {
+            s.field("netns", netns);
+        }
+        s.field("detail", &self.0.detail).finish()
     }
 }
 
@@ -222,6 +232,7 @@ impl From<ErrorDetail> for Error {
             detail,
             context: Vec::new(),
             object,
+            netns: None,
         }))
     }
 }
@@ -934,6 +945,28 @@ impl Error {
             protocol.get_or_insert(p);
         }
         self
+    }
+
+    /// Note the namespace of the connection an error came from (#718),
+    /// unless it has one. The socket does this for what it sends and
+    /// receives, and the connection paths for what the kernel refuses.
+    pub(crate) fn in_netns(mut self, label: &std::sync::Arc<str>) -> Self {
+        self.0.netns.get_or_insert_with(|| label.clone());
+        self
+    }
+
+    /// The namespace of the connection this error came from (#718): the
+    /// label of the [`Netns`](crate::netlink::namespace::Netns) it was
+    /// made in (an `ip netns` name, a path, `pid 42`, …). `None` for a
+    /// connection in the calling thread's namespace, and for an error that
+    /// did not come from a connection.
+    ///
+    /// A caller with one connection per namespace (a lab with a node per
+    /// namespace, say) can tell which one failed without wrapping every
+    /// call. `Display` shows it last: `add_link(d0): File exists
+    /// (errno 17) [netns red]`.
+    pub fn netns(&self) -> Option<&str> {
+        self.0.netns.as_deref()
     }
 
     /// The protocol of the request the kernel refused, where known (#722).
@@ -1745,6 +1778,32 @@ mod tests {
             "{err}"
         );
         assert_eq!(err.kind(), ErrorKind::NotFound);
+    }
+
+    /// #718: an error says which namespace its connection was in. It shows
+    /// last, after any context and the kernel's message, and the first
+    /// stamp wins: a sibling's error does not take its caller's label.
+    #[test]
+    fn an_error_names_its_namespace() {
+        let red: std::sync::Arc<str> = "red".into();
+        let blue: std::sync::Arc<str> = "blue".into();
+        let err = Error::from_errno(libc::EEXIST)
+            .in_netns(&red)
+            .in_netns(&blue)
+            .with_context("add_link(d0)");
+        assert_eq!(err.netns(), Some("red"));
+        assert_eq!(err.to_string(), "add_link(d0): File exists (errno 17) [netns red]");
+        assert_eq!(
+            Error::timeout().in_netns(&red).to_string(),
+            format!("{} [netns red]", Error::timeout())
+        );
+        let debug = format!("{err:?}");
+        assert!(debug.contains("netns: \"red\""), "{debug}");
+        assert!(err.is_already_exists(), "the kind survives the stamp");
+
+        let plain = Error::from_errno(libc::EEXIST);
+        assert_eq!(plain.netns(), None);
+        assert!(!plain.to_string().contains("[netns"), "{plain}");
     }
 
     /// #526: a context is kept on every error. Until 0.32 `with_context`

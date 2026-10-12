@@ -247,12 +247,13 @@ impl ApplyResult {
 ///
 /// With the `serde` feature it serializes as its operation and the error's
 /// message, plus the error's kind, errno, extended ack, context and object
-/// (#526):
+/// (#526), and the namespace of the connection it came from (#718):
 ///
 /// ```json
 /// {"operation": "add route 10.9.0.0/24", "error": "kernel error: …",
 ///  "kind": "network-unreachable", "errno": 101, "ext-ack": null,
-///  "context": [], "object": {"type": "route", "destination": "10.9.0.0/24", "table": null}}
+///  "context": [], "object": {"type": "route", "destination": "10.9.0.0/24", "table": null},
+///  "netns": "red"}
 /// ```
 ///
 /// Until 0.32 only the message was there, so a consumer that wanted the
@@ -278,6 +279,7 @@ struct ApplyErrorView {
     ext_ack: Option<String>,
     context: Vec<String>,
     object: Option<crate::netlink::ErrorObject>,
+    netns: Option<String>,
 }
 
 #[cfg(feature = "serde")]
@@ -291,6 +293,7 @@ impl serde::Serialize for ApplyError {
             ext_ack: self.error.ext_ack().map(str::to_string),
             context: self.error.context().to_vec(),
             object: self.error.object().cloned(),
+            netns: self.error.netns().map(str::to_string),
         }
         .serialize(ser)
     }
@@ -1663,7 +1666,7 @@ async fn set_port_vlans(
     let ifindex = conn
         .get_link_by_name(name)
         .await?
-        .ok_or_else(|| Error::interface_not_found(name))?
+        .ok_or_else(|| conn.interface_not_found(name))?
         .ifindex();
     let have = conn.get_bridge_vlans_by_index(ifindex).await?;
     for v in want {
@@ -1713,7 +1716,7 @@ async fn set_link_attrs(conn: &Connection<Route>, name: &str, changes: &LinkChan
     let ifindex = conn
         .get_link_by_name(name)
         .await?
-        .ok_or_else(|| Error::interface_not_found(name))?
+        .ok_or_else(|| conn.interface_not_found(name))?
         .ifindex();
     if let Some(v) = changes.set_txqlen {
         conn.set_link_txqlen_by_index(ifindex, v).await?;
@@ -1790,7 +1793,7 @@ async fn change_kind_params(
     let ifindex = conn
         .get_link_by_name(name)
         .await?
-        .ok_or_else(|| Error::interface_not_found(name))?
+        .ok_or_else(|| conn.interface_not_found(name))?
         .ifindex();
     // Links named by an attribute (a VXLAN underlay) resolve now: they
     // may have been created by this apply.
@@ -1800,7 +1803,7 @@ async fn change_kind_params(
             let link = conn
                 .get_link_by_name(dev)
                 .await?
-                .ok_or_else(|| Error::interface_not_found(dev))?;
+                .ok_or_else(|| conn.interface_not_found(dev))?;
             ifindexes.push((*t, link.ifindex()));
         }
     }
@@ -2269,6 +2272,28 @@ async fn atomic_replace(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resu
 mod tests {
     use super::*;
     use crate::netlink::config::types::LinkState;
+
+    /// #526, #718: an apply error serializes what the error knows, the
+    /// namespace its connection was in among it.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn an_apply_error_serializes_its_namespace() {
+        let red: std::sync::Arc<str> = "red".into();
+        let error = ApplyError {
+            operation: "add route 10.9.0.0/24".into(),
+            error: Error::from_errno(libc::ENETUNREACH).in_netns(&red),
+        };
+        let v = serde_json::to_value(&error).unwrap();
+        assert_eq!(v["kind"], "network-unreachable");
+        assert_eq!(v["errno"], 101);
+        assert_eq!(v["netns"], "red");
+        assert!(v["error"].as_str().unwrap().ends_with("[netns red]"), "{v}");
+        let host = ApplyError {
+            operation: "add route 10.9.0.0/24".into(),
+            error: Error::from_errno(libc::ENETUNREACH),
+        };
+        assert_eq!(serde_json::to_value(&host).unwrap()["netns"], serde_json::Value::Null);
+    }
 
     fn link(link_type: DeclaredLinkType, address: Option<[u8; 6]>) -> DeclaredLink {
         DeclaredLink {

@@ -637,6 +637,13 @@ hand-decoded walkers call `done_result` inline instead — they have no
 await point, or migrating their parse path would change behaviour —
 and the audit's allowlist says so per entry.
 
+**Errors leave stamped (#718).** The socket stamps its own I/O errors with
+its protocol and namespace label (`NetlinkSocket::stamp`), and
+`Connection::with_timeout`, the `send_*` primitives and the dump and event
+streams stamp whatever leaves them. A new loop that runs outside all of
+those stamps its errors itself, or `Error::netns()` goes quiet on that path:
+`netns::errors_name_the_namespace_they_came_from` checks one of each.
+
 **Batch commits are not dumps.** They terminate on the BATCH_END seq's
 ACK, not on the first per-op ACK, and `NLMSG_DONE` there is an error
 (#209).

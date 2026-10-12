@@ -740,7 +740,7 @@ impl Diagnostics {
 
         // Get the link
         let link = self.conn.get_link_by_name(dev).await?;
-        let link = link.ok_or_else(|| crate::netlink::error::Error::interface_not_found(dev))?;
+        let link = link.ok_or_else(|| self.conn.interface_not_found(dev))?;
 
         let ifindex = link.ifindex();
         let name = dev.to_string();

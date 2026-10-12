@@ -294,8 +294,22 @@ impl NetnsWatch {
 /// first, then sources the next multicast batch from the backend:
 /// `Direct` polls the socket (mutex mode); `Dispatched` polls the
 /// driver-routed channel (dispatcher mode). Returns the head event of
-/// each freshly parsed batch.
+/// each freshly parsed batch. An error it yields carries the socket's
+/// namespace (#718).
 fn poll_event_backend<P: EventSource>(
+    backend: &mut EventBackend,
+    conn: &Connection<P>,
+    buffer: &mut Vec<u8>,
+    pending: &mut Vec<(EventMeta, P::Event)>,
+    terminated: &mut bool,
+    netns_watch: &mut Option<NetnsWatch>,
+    cx: &mut Context<'_>,
+) -> Poll<Option<Result<MetaEvent<P>>>> {
+    poll_event_backend_unstamped(backend, conn, buffer, pending, terminated, netns_watch, cx)
+        .map(|item| item.map(|r| r.map_err(|e| conn.socket().stamp(e))))
+}
+
+fn poll_event_backend_unstamped<P: EventSource>(
     backend: &mut EventBackend,
     conn: &Connection<P>,
     buffer: &mut Vec<u8>,

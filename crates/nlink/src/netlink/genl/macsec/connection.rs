@@ -13,7 +13,7 @@ use crate::{
         attr::{AttrIter, NLA_F_NESTED, get},
         builder::MessageBuilder,
         connection::Connection,
-        error::{Error, Result},
+        error::Result,
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
         message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN},
@@ -55,7 +55,7 @@ impl Connection<Macsec> {
                     .get_link_by_name(name)
                     .await?
                     .map(|l| l.ifindex())
-                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound { name: name.clone() }))
+                    .ok_or_else(|| self.interface_not_found(name.clone()))
             }
         }
     }
@@ -117,9 +117,7 @@ impl Connection<Macsec> {
             .await?;
 
         if responses.is_empty() {
-            return Err(Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-                name: format!("ifindex {}", ifindex),
-            }));
+            return Err(self.interface_not_found(format!("ifindex {ifindex}")));
         }
 
         // One device per response, and only the one that was asked for.
@@ -152,9 +150,7 @@ impl Connection<Macsec> {
             }
         }
 
-        Err(Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-            name: format!("ifindex {}", ifindex),
-        }))
+        Err(self.interface_not_found(format!("ifindex {ifindex}")))
     }
 
     /// Add a TX Security Association by interface index.

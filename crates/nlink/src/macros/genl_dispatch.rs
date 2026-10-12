@@ -363,6 +363,20 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        // An error carries the socket's protocol and namespace (#718).
+        let socket = this.conn.socket();
+        this.poll_unstamped(cx)
+            .map(|item| item.map(|r| r.map_err(|e| socket.stamp(e))))
+    }
+}
+
+impl<F, R> GenlTypedDumpStream<'_, F, R>
+where
+    F: ProtocolState + GenlFamily,
+    R: GenlMessage + Default + Unpin,
+{
+    fn poll_unstamped(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<R>>> {
+        let this = self;
 
         if let Some(item) = this.pending.pop_front() {
             return Poll::Ready(Some(item));

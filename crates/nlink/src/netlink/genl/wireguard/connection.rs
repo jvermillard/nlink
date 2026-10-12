@@ -15,7 +15,7 @@ use crate::{
         attr::{AttrIter, NLA_F_NESTED, get},
         builder::MessageBuilder,
         connection::Connection,
-        error::{Error, Result},
+        error::Result,
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
         message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN},
@@ -57,9 +57,7 @@ impl Connection<Wireguard> {
                     .get_link_by_index(*idx)
                     .await?
                     .and_then(|l| l.name().map(|s| s.to_string()))
-                    .ok_or_else(|| Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-                        name: format!("ifindex {}", idx),
-                    }))
+                    .ok_or_else(|| self.interface_not_found(format!("ifindex {idx}")))
             }
         }
     }
@@ -164,9 +162,7 @@ impl Connection<Wireguard> {
             .await?;
 
         if responses.is_empty() {
-            return Err(Error::from(crate::netlink::ErrorDetail::InterfaceNotFound {
-                name: ifname.to_string(),
-            }));
+            return Err(self.interface_not_found(ifname));
         }
 
         // Parse the response(s) - may be split across multiple messages for large peer lists

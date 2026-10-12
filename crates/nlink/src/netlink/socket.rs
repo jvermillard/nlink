@@ -105,6 +105,9 @@ pub struct NetlinkSocket {
     /// one by fd, path or `Netns`: `Connection::netns` and `sibling` read
     /// it. `None` for a socket made in its creating thread's namespace.
     netns: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+    /// #718 — what that namespace was opened as (`Netns::label`), which
+    /// every error from this socket carries: see [`Self::stamp`].
+    netns_label: Option<std::sync::Arc<str>>,
 }
 
 impl NetlinkSocket {
@@ -329,18 +332,40 @@ impl NetlinkSocket {
             dispatcher: std::sync::OnceLock::new(),
             namespace_marker: None,
             netns: None,
+            netns_label: None,
         })
     }
 
-    /// Record the namespace a socket was made in, and the marker its
-    /// streams watch (#504, #520).
+    /// Record the namespace a socket was made in, the marker its streams
+    /// watch, and the label its errors carry (#504, #520, #718).
     pub(crate) fn set_namespace(
         &mut self,
         netns: std::sync::Arc<std::os::fd::OwnedFd>,
         marker: Option<super::namespace::NamespaceMarker>,
+        label: Option<std::sync::Arc<str>>,
     ) {
         self.netns = Some(netns);
         self.namespace_marker = marker;
+        self.netns_label = label;
+    }
+
+    /// The label of the namespace this socket was made in, if it was made
+    /// through a [`Netns`](super::namespace::Netns) (#718).
+    pub(crate) fn netns_label(&self) -> Option<&std::sync::Arc<str>> {
+        self.netns_label.as_ref()
+    }
+
+    /// Note on an error where it came from: this socket's protocol, for a
+    /// kernel refusal (#722), and its namespace (#718). Neither overwrites
+    /// what the error already says. The socket stamps what it sends and
+    /// receives itself; `Connection::with_timeout`, the request primitives
+    /// and the streams stamp what leaves them, kernel refusals included.
+    pub(crate) fn stamp(&self, e: Error) -> Error {
+        let e = e.in_protocol(self.protocol);
+        match &self.netns_label {
+            Some(label) => e.in_netns(label),
+            None => e,
+        }
     }
 
     /// The namespace this socket was made in, when it was made in one by
@@ -768,6 +793,12 @@ impl NetlinkSocket {
     /// `Timeout`; surfacing backpressure sooner lets a caller back
     /// off without waiting the full timeout window.
     pub async fn send(&self, msg: &[u8]) -> Result<()> {
+        self.send_unstamped(msg).await.map_err(|e| self.stamp(e))
+    }
+
+    /// [`send`](Self::send), its errors not yet stamped with the
+    /// socket's protocol and namespace.
+    async fn send_unstamped(&self, msg: &[u8]) -> Result<()> {
         let mut would_block_count: u32 = 0;
         loop {
             let mut guard = self.fd.ready(Interest::WRITABLE).await?;
@@ -810,6 +841,12 @@ impl NetlinkSocket {
     /// `OVPN_A_PEER_SOCKET_NETNSID` attributes instead — see
     /// [`Connection::<Ovpn>::attach_socket`](crate::netlink::Connection).
     pub async fn send_with_fds(&self, msg: &[u8], fds: &[BorrowedFd<'_>]) -> Result<()> {
+        self.send_with_fds_unstamped(msg, fds).await.map_err(|e| self.stamp(e))
+    }
+
+    /// [`send_with_fds`](Self::send_with_fds), its errors not yet stamped with the
+    /// socket's protocol and namespace.
+    async fn send_with_fds_unstamped(&self, msg: &[u8], fds: &[BorrowedFd<'_>]) -> Result<()> {
         if fds.is_empty() {
             return self.send(msg).await;
         }
@@ -882,6 +919,12 @@ impl NetlinkSocket {
     /// and another process's (`ip`, `nft`) with a seq that is not 0. Only
     /// changes the kernel originates carry seq 0 (#465).
     pub async fn recv_msg_from(&self) -> Result<(Vec<u8>, bool)> {
+        self.recv_msg_from_unstamped().await.map_err(|e| self.stamp(e))
+    }
+
+    /// [`recv_msg_from`](Self::recv_msg_from), its errors not yet stamped with the
+    /// socket's protocol and namespace.
+    async fn recv_msg_from_unstamped(&self) -> Result<(Vec<u8>, bool)> {
         loop {
             let mut guard = self.fd.ready(Interest::READABLE).await?;
             match guard.try_io(|inner| recv_whole(inner.get_ref(), 0)) {
@@ -955,6 +998,12 @@ impl NetlinkSocket {
     /// [`try_recv_msg`](Self::try_recv_msg) with the multicast tag, as in
     /// [`recv_msg_from`](Self::recv_msg_from).
     fn try_recv_inner(&self) -> Result<Option<(Vec<u8>, bool)>> {
+        self.try_recv_inner_unstamped().map_err(|e| self.stamp(e))
+    }
+
+    /// [`try_recv_inner`](Self::try_recv_inner), its errors not yet stamped with the
+    /// socket's protocol and namespace.
+    fn try_recv_inner_unstamped(&self) -> Result<Option<(Vec<u8>, bool)>> {
         match recv_whole(self.fd.get_ref(), libc::MSG_DONTWAIT) {
             Ok(got) => got.into_result().map(Some),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
@@ -1366,6 +1415,12 @@ impl NetlinkSocket {
     /// completes leaves the socket state intact (AsyncFd has not
     /// consumed any data). Re-polling resumes cleanly.
     pub async fn recv_batch(&self, out: &mut Vec<Vec<u8>>, max: usize) -> Result<usize> {
+        self.recv_batch_unstamped(out, max).await.map_err(|e| self.stamp(e))
+    }
+
+    /// [`recv_batch`](Self::recv_batch), its errors not yet stamped with the
+    /// socket's protocol and namespace.
+    async fn recv_batch_unstamped(&self, out: &mut Vec<Vec<u8>>, max: usize) -> Result<usize> {
         let max = max.clamp(1, NL_BATCH_SIZE);
         loop {
             let mut guard = self.fd.ready(Interest::READABLE).await?;
@@ -1475,6 +1530,12 @@ impl NetlinkSocket {
     /// receive side, matched by `nlmsg_seq`. `send_batch` only
     /// reports syscall-level errors (`ENOBUFS`, `EMSGSIZE`, etc.).
     pub async fn send_batch(&self, msgs: &[&[u8]]) -> Result<usize> {
+        self.send_batch_unstamped(msgs).await.map_err(|e| self.stamp(e))
+    }
+
+    /// [`send_batch`](Self::send_batch), its errors not yet stamped with the
+    /// socket's protocol and namespace.
+    async fn send_batch_unstamped(&self, msgs: &[&[u8]]) -> Result<usize> {
         if msgs.is_empty() {
             return Ok(0);
         }
