@@ -668,3 +668,81 @@ async fn a_restarting_stream_ends_when_its_namespace_is_deleted() -> Result<()> 
     );
     Ok(())
 }
+
+/// #523: a link deleted while the socket was overflowing is in no event —
+/// the overflow dropped its `DelLink` — and a snapshot only says what
+/// exists. `with_gap_deltas` reports it as a `Resynced(DelLink)`, so a
+/// mirror that applies events as they come, and never clears itself,
+/// still ends equal to the kernel.
+#[tokio::test]
+async fn gap_deltas_report_a_link_deleted_during_an_overflow() -> Result<()> {
+    use nlink::netlink::resync::ResyncedEvent;
+    use nlink::netlink::resync_ext::ResyncStreamExt;
+    use std::collections::BTreeSet;
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("gap")?;
+    let other = ns.connection()?;
+    other.add_link(DummyLink::new("gone")).await?;
+    let (factory, _) = flaky_factory(&ns, 0);
+    let conn = ns.connection()?;
+    conn.socket().set_rcvbuf(1024)?;
+    let mut stream = conn
+        .into_events_with_resync(factory)
+        .await?
+        .with_gap_deltas(NetworkEvent::object_key);
+
+    let mut mirror: BTreeSet<String> = BTreeSet::new();
+    let mut gap_del = false;
+    let mut apply = |item: ResyncedEvent<NetworkEvent>, mirror: &mut BTreeSet<String>| {
+        match item {
+            ResyncedEvent::Event(NetworkEvent::NewLink(l))
+            | ResyncedEvent::Resynced(NetworkEvent::NewLink(l)) => {
+                mirror.extend(l.name().map(str::to_string));
+            }
+            ResyncedEvent::Event(NetworkEvent::DelLink(l)) => {
+                mirror.remove(l.name().unwrap_or_default());
+            }
+            ResyncedEvent::Resynced(NetworkEvent::DelLink(l)) => {
+                gap_del |= l.name() == Some("gone");
+                mirror.remove(l.name().unwrap_or_default());
+            }
+            _ => {}
+        }
+    };
+    // The initial snapshot, read in full before the burst.
+    loop {
+        let item = stream.next().await.expect("an item")?;
+        let end = item.is_resync_end();
+        apply(item, &mut mirror);
+        if end {
+            break;
+        }
+    }
+    assert!(mirror.contains("gone"), "{mirror:?}");
+
+    // Overflow the 1 KiB buffer, reading nothing, then delete the link:
+    // its DelLink has nowhere to go.
+    for i in 1..=100 {
+        other.add_link(DummyLink::new(format!("t{i}").as_str())).await?;
+    }
+    other.del_link("gone").await?;
+
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
+        let Ok(Some(item)) = next else { break };
+        apply(item?, &mut mirror);
+    }
+    assert!(gap_del, "no Resynced(DelLink) for the link deleted in the gap");
+    let fresh: BTreeSet<String> = ns
+        .connection()?
+        .get_links()
+        .await?
+        .iter()
+        .filter_map(|l| l.name().map(str::to_string))
+        .collect();
+    assert_eq!(mirror, fresh);
+    Ok(())
+}

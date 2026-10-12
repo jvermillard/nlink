@@ -1967,3 +1967,71 @@ async fn an_absent_table_is_deleted_and_stays_gone() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #523: a table deleted while the subscriber was overflowing is in no
+/// event, and the resync snapshot only says what exists.
+/// `with_gap_deltas(NftablesEvent::object_key)` reports it as a
+/// `Resynced(DelTable)` before the resync closes.
+#[tokio::test]
+async fn gap_deltas_report_a_table_deleted_during_an_overflow() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    use std::sync::Arc;
+
+    use nlink::netlink::nftables::{NftablesEvent, Rule};
+    use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent};
+    use nlink::netlink::resync_ext::ResyncStreamExt;
+    use tokio_stream::StreamExt;
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nft-gap")?;
+        let cfg = NftablesConfig::new().table("keep", Family::Inet, |t| {
+            t.chain("input", |c| {
+                c.hook(Hook::Input)
+                    .priority(Priority::Filter)
+                    .policy(Policy::Accept)
+            })
+        });
+        let other = ns.connection_for::<Nftables>()?;
+        cfg.diff(&other).await?.apply(&other).await?;
+        other.add_table("gone", Family::Inet).await?;
+
+        let name = ns.name().to_string();
+        let factory: ConnectionFactory<Nftables> = Arc::new(move || {
+            let name = name.clone();
+            Box::pin(async move { namespace::connection_for(&name) })
+        });
+        let conn = ns.connection_for::<Nftables>()?;
+        conn.socket().set_rcvbuf(256)?;
+        let mut stream = conn
+            .into_events_with_resync(factory)
+            .await?
+            .with_gap_deltas(NftablesEvent::object_key);
+        while !stream.next().await.expect("an item")?.is_resync_end() {}
+
+        // Overflow the buffer, reading nothing, then delete the table.
+        for i in 0..200u32 {
+            let rule = Rule::new("keep", "input")
+                .family(Family::Inet)
+                .accept()
+                .comment(&format!("r{i}"));
+            other.add_rule(rule).await?;
+        }
+        other.del_table("gone", Family::Inet).await?;
+
+        let mut gone = false;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
+            let Ok(Some(item)) = next else { break };
+            if let ResyncedEvent::Resynced(NftablesEvent::DelTable(t)) = item?
+                && t.name == "gone"
+            {
+                gone = true;
+            }
+        }
+        assert!(gone, "no Resynced(DelTable) for the table deleted in the gap");
+        Ok(())
+    })
+    .await
+}

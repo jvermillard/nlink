@@ -37,6 +37,7 @@ use super::{
         TcMessage,
     },
     nexthop::Nexthop,
+    resync_ext::{GapDelta, ObjectKey},
 };
 
 /// Network events that can be received from the kernel.
@@ -134,6 +135,116 @@ pub enum NetworkEvent {
 }
 
 impl NetworkEvent {
+    /// The object this event is about, for
+    /// [`with_gap_deltas`](super::resync_ext::ResyncStreamExt::with_gap_deltas)
+    /// (#523): a link by ifindex, an address by device and prefix, a route
+    /// by table, prefixes, TOS and metric, and so on. `None` for an
+    /// action, which nothing here tracks.
+    pub fn object_key(&self) -> Option<ObjectKey> {
+        use std::fmt::Write;
+        fn ip(a: Option<&std::net::IpAddr>) -> String {
+            a.map_or_else(|| "-".to_string(), |a| a.to_string())
+        }
+        let key = match self {
+            Self::NewLink(m) | Self::DelLink(m) => ObjectKey::new("link", m.ifindex().to_string()),
+            Self::NewAddress(m) | Self::DelAddress(m) => ObjectKey::new(
+                "address",
+                format!("{} {}/{}", m.ifindex(), ip(m.local().or(m.address())), m.prefix_len()),
+            ),
+            Self::NewRoute(m) | Self::DelRoute(m) => ObjectKey::new(
+                "route",
+                format!(
+                    "{} table {} {}/{} from {}/{} tos {} metric {}",
+                    m.family(),
+                    m.table_id(),
+                    ip(m.destination()),
+                    m.dst_len(),
+                    ip(m.source()),
+                    m.src_len(),
+                    m.header.rtm_tos,
+                    m.priority().unwrap_or(0)
+                ),
+            ),
+            Self::NewNeighbor(m) | Self::DelNeighbor(m) => ObjectKey::new(
+                if m.is_proxy() { "proxy-neighbour" } else { "neighbour" },
+                format!("{} {}", m.ifindex(), ip(Some(m.destination()?))),
+            ),
+            Self::NewFdb(m) | Self::DelFdb(m) => {
+                let mut id = format!("{} {}", m.ifindex(), m.mac_str());
+                if let Some(vlan) = m.vlan() {
+                    let _ = write!(id, " vlan {vlan}");
+                }
+                if let Some(dst) = m.dst() {
+                    let _ = write!(id, " dst {dst}");
+                }
+                if let Some(vni) = m.vni() {
+                    let _ = write!(id, " vni {vni}");
+                }
+                id.push_str(if m.is_master() { " master" } else { " self" });
+                ObjectKey::new("fdb", id)
+            }
+            Self::NewQdisc(m) | Self::DelQdisc(m) => ObjectKey::new(
+                "qdisc",
+                format!("{} parent {} handle {}", m.ifindex(), m.parent(), m.handle()),
+            ),
+            Self::NewClass(m) | Self::DelClass(m) => {
+                ObjectKey::new("class", format!("{} {}", m.ifindex(), m.handle()))
+            }
+            Self::NewFilter(m) | Self::DelFilter(m) => ObjectKey::new(
+                "filter",
+                format!(
+                    "{} parent {} chain {} info {:#x} handle {:#x}",
+                    m.ifindex(),
+                    m.parent(),
+                    m.chain().unwrap_or(0),
+                    m.info(),
+                    m.handle_raw()
+                ),
+            ),
+            Self::NewAction(_) | Self::DelAction(_) => return None,
+            Self::NewRule(m) | Self::DelRule(m) => ObjectKey::new(
+                "rule",
+                format!(
+                    "{} pref {} from {}/{} to {}/{} iif {:?} oif {:?} fwmark {:?}/{:?} \
+                     table {} action {:?} invert {} proto {:?} sport {:?} dport {:?} \
+                     uid {:?} l3mdev {:?} goto {:?}",
+                    m.family(),
+                    m.priority(),
+                    ip(m.source().as_ref()),
+                    m.src_len(),
+                    ip(m.destination().as_ref()),
+                    m.dst_len(),
+                    m.iifname(),
+                    m.oifname(),
+                    m.fwmark(),
+                    m.fwmask(),
+                    m.table(),
+                    m.action(),
+                    m.is_invert(),
+                    m.ip_proto(),
+                    m.sport_range(),
+                    m.dport_range(),
+                    m.uid_range(),
+                    m.l3mdev(),
+                    m.goto()
+                ),
+            ),
+            Self::NewNexthop(m) | Self::DelNexthop(m) => ObjectKey::new("nexthop", m.id().to_string()),
+            Self::NewNsId(m) | Self::DelNsId(m) => ObjectKey::new("nsid", m.nsid()?.to_string()),
+            Self::NewMdb(m) | Self::DelMdb(m) => ObjectKey::new(
+                "mdb",
+                format!(
+                    "{} port {} {:?} vid {}",
+                    m.bridge_ifindex, m.port_ifindex, m.group, m.vid
+                ),
+            ),
+            Self::NewNetconf(m) | Self::DelNetconf(m) => {
+                ObjectKey::new("netconf", format!("{} {:?}", m.family(), m.device()))
+            }
+        };
+        Some(key)
+    }
+
     /// Returns true if this is a "new" event (add or change).
     pub fn is_new(&self) -> bool {
         matches!(
@@ -374,5 +485,32 @@ impl NetworkEvent {
             NetworkEvent::NewMdb(m) | NetworkEvent::DelMdb(m) => Some(m),
             _ => None,
         }
+    }
+}
+
+impl GapDelta for NetworkEvent {
+    fn is_removal(&self) -> bool {
+        self.is_del()
+    }
+
+    fn removal(&self) -> Option<Self> {
+        let removal = match self {
+            Self::NewLink(m) => Self::DelLink(m.clone()),
+            Self::NewAddress(m) => Self::DelAddress(m.clone()),
+            Self::NewRoute(m) => Self::DelRoute(m.clone()),
+            Self::NewNeighbor(m) => Self::DelNeighbor(m.clone()),
+            Self::NewFdb(m) => Self::DelFdb(m.clone()),
+            Self::NewQdisc(m) => Self::DelQdisc(m.clone()),
+            Self::NewClass(m) => Self::DelClass(m.clone()),
+            Self::NewFilter(m) => Self::DelFilter(m.clone()),
+            Self::NewAction(m) => Self::DelAction(m.clone()),
+            Self::NewRule(m) => Self::DelRule(m.clone()),
+            Self::NewNexthop(m) => Self::DelNexthop(m.clone()),
+            Self::NewNsId(m) => Self::DelNsId(m.clone()),
+            Self::NewMdb(m) => Self::DelMdb(m.clone()),
+            Self::NewNetconf(m) => Self::DelNetconf(m.clone()),
+            _ => return None,
+        };
+        Some(removal)
     }
 }

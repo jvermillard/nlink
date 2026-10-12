@@ -115,6 +115,70 @@ pub enum NftablesEvent {
     DelObject(super::object::ObjectInfo),
 }
 
+impl NftablesEvent {
+    /// The object this event is about, for
+    /// [`with_gap_deltas`](crate::netlink::resync_ext::ResyncStreamExt::with_gap_deltas)
+    /// (#523): a table, chain, set, flowtable or object by family, table
+    /// and name, a rule by its handle. `None` for set elements and
+    /// generations, which nothing here tracks.
+    pub fn object_key(&self) -> Option<crate::netlink::resync_ext::ObjectKey> {
+        use crate::netlink::resync_ext::ObjectKey;
+        let key = match self {
+            Self::NewTable(t) | Self::DelTable(t) => {
+                ObjectKey::new("table", format!("{} {}", t.family, t.name))
+            }
+            Self::NewChain(c) | Self::DelChain(c) => {
+                ObjectKey::new("chain", format!("{} {} {}", c.family, c.table, c.name))
+            }
+            Self::NewRule(r) | Self::DelRule(r) => ObjectKey::new(
+                "rule",
+                format!("{} {} {} {}", r.family, r.table, r.chain, r.handle),
+            ),
+            Self::NewSet(s) | Self::DelSet(s) => {
+                ObjectKey::new("set", format!("{} {} {}", s.family, s.table, s.name))
+            }
+            Self::NewFlowtable(f) | Self::DelFlowtable(f) => {
+                ObjectKey::new("flowtable", format!("{} {} {}", f.family, f.table, f.name))
+            }
+            Self::NewObject(o) | Self::DelObject(o) => ObjectKey::new(
+                "object",
+                format!("{} {} {} {:?}", o.family, o.table, o.name, o.object_type()),
+            ),
+            _ => return None,
+        };
+        Some(key)
+    }
+}
+
+impl crate::netlink::resync_ext::GapDelta for NftablesEvent {
+    fn is_removal(&self) -> bool {
+        matches!(
+            self,
+            Self::DelTable(_)
+                | Self::DelChain(_)
+                | Self::DelRule(_)
+                | Self::DelFlowtable(_)
+                | Self::DelSet(_)
+                | Self::DelSetElements(_)
+                | Self::DelObject(_)
+        )
+    }
+
+    fn removal(&self) -> Option<Self> {
+        let removal = match self {
+            Self::NewTable(t) => Self::DelTable(t.clone()),
+            Self::NewChain(c) => Self::DelChain(c.clone()),
+            Self::NewRule(r) => Self::DelRule(r.clone()),
+            Self::NewFlowtable(f) => Self::DelFlowtable(f.clone()),
+            Self::NewSet(s) => Self::DelSet(s.clone()),
+            Self::NewSetElements(e) => Self::DelSetElements(e.clone()),
+            Self::NewObject(o) => Self::DelObject(o.clone()),
+            _ => return None,
+        };
+        Some(removal)
+    }
+}
+
 /// Elements added to or removed from a set, as one notification carries
 /// them. They are the raw wire elements: an event does not say what kind
 /// of set it is, so an interval set's range shows as its start element and
