@@ -199,7 +199,7 @@ pub use parse::{FromNetlink, ToNetlink};
 #[doc(hidden)]
 pub use protocol::__macro_seal;
 pub use protocol::{
-    AsyncProtocolInit, Audit, Connector, Devlink, Ethtool, FibLookup, Generic, KobjectUevent,
+    AsyncProtocolInit, Audit, Connector, Devlink, Ethtool, FibLookup, Generic, Hwsim, KobjectUevent,
     Macsec, Mptcp, Netfilter, Nflog, Nftables, Nl80211, ProtocolState, Route, SELinux, SockDiag,
     Wireguard, Xfrm, construction,
 };

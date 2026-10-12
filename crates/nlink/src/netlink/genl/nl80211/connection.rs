@@ -388,6 +388,13 @@ impl Connection<Nl80211> {
         Ok(phys.into_iter().find(|p| p.index == wiphy))
     }
 
+    /// The physical device named `name` — a `mac80211_hwsim` radio's
+    /// wiphy is named after the radio (#530).
+    pub async fn get_phy_by_name(&self, name: &str) -> Result<Option<PhyInfo>> {
+        let phys = self.get_phys().await?;
+        Ok(phys.into_iter().find(|p| p.name == name))
+    }
+
     // =========================================================================
     // Regulatory
     // =========================================================================
@@ -680,6 +687,134 @@ impl Connection<Nl80211> {
         self.move_wiphy(wiphy, WiphyNetns::Pid(pid))
             .await
             .map_err(|e| e.with_context("set_wiphy_netns_pid"))
+    }
+
+    /// Change interface `ifindex`'s type (`NL80211_CMD_SET_INTERFACE`,
+    /// #530): to a mesh point to join a mesh, to an access point, ….
+    /// Bring the interface down first: mac80211 changes a running
+    /// interface's type only where the driver can (`EBUSY` otherwise, as
+    /// on `mac80211_hwsim`). Unverified on a live kernel.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_interface_type_by_index"))]
+    pub async fn set_interface_type_by_index(&self, ifindex: u32, iftype: InterfaceType) -> Result<()> {
+        let builder = interface_request(self.state().family_id, NL80211_CMD_SET_INTERFACE, Some(ifindex), |b| {
+            b.append_attr_u32(NL80211_ATTR_IFTYPE, iftype as u32);
+        });
+        self.ack(builder).await.map_err(|e| e.with_context("set_interface_type"))
+    }
+
+    /// [`set_interface_type_by_index`](Self::set_interface_type_by_index),
+    /// by name.
+    pub async fn set_interface_type(&self, iface: &str, iftype: InterfaceType) -> Result<()> {
+        let ifindex = self.resolve_ifindex(iface).await?;
+        self.set_interface_type_by_index(ifindex, iftype).await
+    }
+
+    /// Create an interface `name` of `iftype` on `wiphy`
+    /// (`NL80211_CMD_NEW_INTERFACE`, #530), returning its ifindex.
+    /// Unverified on a live kernel.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_interface"))]
+    pub async fn new_interface(&self, wiphy: u32, name: &str, iftype: InterfaceType) -> Result<u32> {
+        let mut builder = interface_request(self.state().family_id, NL80211_CMD_NEW_INTERFACE, None, |b| {
+            b.append_attr_u32(NL80211_ATTR_WIPHY, wiphy);
+            b.append_attr_str(NL80211_ATTR_IFNAME, name);
+            b.append_attr_u32(NL80211_ATTR_IFTYPE, iftype as u32);
+        });
+        let seq = self.socket().next_seq();
+        let mut session = self.recv_session(seq).await?;
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+        self.socket().send(&builder.finish()).await?;
+        // The kernel answers with the new interface, then the ACK.
+        let mut ifindex = None;
+        self.with_timeout(async {
+            loop {
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
+                for message in MessageIter::new(&data) {
+                    let (header, payload) = message?;
+                    if header.nlmsg_seq != seq {
+                        continue;
+                    }
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if !err.is_ack() {
+                            return Err(err.to_error(header.nlmsg_flags, payload));
+                        }
+                        return ifindex.ok_or_else(|| {
+                            crate::netlink::Error::InvalidMessage(
+                                "new_interface: the kernel acked without the interface".into(),
+                            )
+                        });
+                    }
+                    let attrs = payload.get(crate::netlink::genl::GENL_HDRLEN..).unwrap_or(&[]);
+                    ifindex = AttrIter::new(attrs)
+                        .find(|(a, _)| a & 0x7FFF == NL80211_ATTR_IFINDEX)
+                        .and_then(|(_, v)| crate::netlink::attr::get::u32_ne(v).ok())
+                        .or(ifindex);
+                }
+            }
+        })
+        .await
+    }
+
+    /// Delete interface `ifindex` (`NL80211_CMD_DEL_INTERFACE`, #530).
+    /// Unverified on a live kernel.
+    pub async fn del_interface_by_index(&self, ifindex: u32) -> Result<()> {
+        let builder = interface_request(self.state().family_id, NL80211_CMD_DEL_INTERFACE, Some(ifindex), |_| {});
+        self.ack(builder).await.map_err(|e| e.with_context("del_interface"))
+    }
+
+    /// [`del_interface_by_index`](Self::del_interface_by_index), by name.
+    pub async fn del_interface(&self, iface: &str) -> Result<()> {
+        let ifindex = self.resolve_ifindex(iface).await?;
+        self.del_interface_by_index(ifindex).await
+    }
+
+    /// Join mesh `mesh_id` (at most 32 bytes) on `freq_mhz`
+    /// (`NL80211_CMD_JOIN_MESH`, #530) — `iw dev X mesh join`. The
+    /// interface must be a mesh point, and up. Unverified on a live
+    /// kernel.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "join_mesh_by_index"))]
+    pub async fn join_mesh_by_index(&self, ifindex: u32, mesh_id: &[u8], freq_mhz: u32) -> Result<()> {
+        if mesh_id.is_empty() || mesh_id.len() > 32 {
+            return Err(crate::netlink::Error::InvalidMessage(format!(
+                "join_mesh: a mesh id is 1 to 32 bytes, not {}",
+                mesh_id.len()
+            )));
+        }
+        let builder = interface_request(self.state().family_id, NL80211_CMD_JOIN_MESH, Some(ifindex), |b| {
+            b.append_attr(NL80211_ATTR_MESH_ID, mesh_id);
+            b.append_attr_u32(NL80211_ATTR_WIPHY_FREQ, freq_mhz);
+        });
+        self.ack(builder).await.map_err(|e| e.with_context("join_mesh"))
+    }
+
+    /// [`join_mesh_by_index`](Self::join_mesh_by_index), by name.
+    pub async fn join_mesh(&self, iface: &str, mesh_id: &[u8], freq_mhz: u32) -> Result<()> {
+        let ifindex = self.resolve_ifindex(iface).await?;
+        self.join_mesh_by_index(ifindex, mesh_id, freq_mhz).await
+    }
+
+    /// Leave the mesh (`NL80211_CMD_LEAVE_MESH`, #530). Unverified on a
+    /// live kernel.
+    pub async fn leave_mesh_by_index(&self, ifindex: u32) -> Result<()> {
+        let builder = interface_request(self.state().family_id, NL80211_CMD_LEAVE_MESH, Some(ifindex), |_| {});
+        self.ack(builder).await.map_err(|e| e.with_context("leave_mesh"))
+    }
+
+    /// [`leave_mesh_by_index`](Self::leave_mesh_by_index), by name.
+    pub async fn leave_mesh(&self, iface: &str) -> Result<()> {
+        let ifindex = self.resolve_ifindex(iface).await?;
+        self.leave_mesh_by_index(ifindex).await
+    }
+
+    /// Send `builder` and wait for its ACK.
+    async fn ack(&self, mut builder: MessageBuilder) -> Result<()> {
+        let seq = self.socket().next_seq();
+        let mut session = self.recv_session(seq).await?;
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+        self.socket().send(&builder.finish()).await?;
+        self.wait_ack(&mut session, seq).await
     }
 
     async fn move_wiphy(&self, wiphy: u32, to: WiphyNetns) -> Result<()> {
@@ -1984,6 +2119,23 @@ enum WiphyNetns {
 /// `iw phy <phy> set netns` sends: `NL80211_CMD_SET_WIPHY` does not read the
 /// namespace attributes, so the move it was sent as was acked and did
 /// nothing (#604). Unverified on a live kernel: nothing here has a wiphy.
+/// An nl80211 request for `cmd`, on `ifindex` if given, with what
+/// `attrs` adds.
+fn interface_request(
+    family_id: u16,
+    cmd: u8,
+    ifindex: Option<u32>,
+    attrs: impl FnOnce(&mut MessageBuilder),
+) -> MessageBuilder {
+    let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+    builder.append(&GenlMsgHdr::new(cmd, NL80211_GENL_VERSION));
+    if let Some(ifindex) = ifindex {
+        builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
+    }
+    attrs(&mut builder);
+    builder
+}
+
 fn wiphy_netns_request(family_id: u16, wiphy: u32, to: WiphyNetns) -> MessageBuilder {
     let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
     builder.append(&GenlMsgHdr::new(
@@ -2001,6 +2153,40 @@ fn wiphy_netns_request(family_id: u16, wiphy: u32, to: WiphyNetns) -> MessageBui
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #530: each interface and mesh command, its command byte and its
+    /// attributes as `iw` sends them.
+    #[test]
+    fn interface_and_mesh_requests_carry_their_command_and_attrs() {
+        let attrs = |msg: Vec<u8>| -> (u8, Vec<(u16, Vec<u8>)>) {
+            (msg[16], AttrIter::new(&msg[20..]).map(|(a, v)| (a, v.to_vec())).collect())
+        };
+        let ne = |v: u32| v.to_ne_bytes().to_vec();
+        let set = interface_request(0x1d, NL80211_CMD_SET_INTERFACE, Some(4), |b| {
+            b.append_attr_u32(NL80211_ATTR_IFTYPE, InterfaceType::MeshPoint as u32);
+        });
+        assert_eq!(
+            attrs(set.finish()),
+            (NL80211_CMD_SET_INTERFACE, vec![(NL80211_ATTR_IFINDEX, ne(4)), (NL80211_ATTR_IFTYPE, ne(7))])
+        );
+        let join = interface_request(0x1d, NL80211_CMD_JOIN_MESH, Some(4), |b| {
+            b.append_attr(NL80211_ATTR_MESH_ID, b"lab");
+            b.append_attr_u32(NL80211_ATTR_WIPHY_FREQ, 2412);
+        });
+        assert_eq!(
+            attrs(join.finish()),
+            (
+                NL80211_CMD_JOIN_MESH,
+                vec![
+                    (NL80211_ATTR_IFINDEX, ne(4)),
+                    (NL80211_ATTR_MESH_ID, b"lab".to_vec()),
+                    (NL80211_ATTR_WIPHY_FREQ, ne(2412)),
+                ]
+            )
+        );
+        let leave = interface_request(0x1d, NL80211_CMD_LEAVE_MESH, Some(4), |_| {});
+        assert_eq!(attrs(leave.finish()), (NL80211_CMD_LEAVE_MESH, vec![(NL80211_ATTR_IFINDEX, ne(4))]));
+    }
 
     /// The command byte after the 16-byte nlmsghdr, and the attributes
     /// after the 4-byte genl header (#604).

@@ -137,6 +137,7 @@ impl construction::SyncConstructible for Nflog {}
 // GENL protocols — must be constructed via `new_async()` so the
 // family ID is resolved before first use.
 impl construction::AsyncConstructible for Wireguard {}
+impl construction::AsyncConstructible for Hwsim {}
 impl construction::AsyncConstructible for Macsec {}
 impl construction::AsyncConstructible for Mptcp {}
 impl construction::AsyncConstructible for Devlink {}
@@ -267,6 +268,22 @@ impl private::Sealed for Netfilter {}
 
 impl ProtocolState for Netfilter {
     const PROTOCOL: Protocol = Protocol::Netfilter;
+}
+
+/// `mac80211_hwsim` protocol state: simulated Wi-Fi radios (#530). See
+/// [`genl::hwsim`](super::genl::hwsim).
+///
+/// Construct with `Connection::<Hwsim>::new_async().await?`.
+#[derive(Debug, Default)]
+pub struct Hwsim {
+    /// Resolved `MAC80211_HWSIM` GENL family ID.
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Hwsim {}
+
+impl ProtocolState for Hwsim {
+    const PROTOCOL: Protocol = Protocol::Generic;
 }
 
 /// NFLOG (`nfnetlink_log`) protocol state: the packets `log group N`
