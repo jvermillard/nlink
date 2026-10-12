@@ -675,6 +675,21 @@ impl NetlinkSocket {
         Self::set_netlink_sockopt(self.as_raw_fd(), NETLINK_GET_STRICT_CHK, on)
     }
 
+    /// Receive each datagram's multicast group with it
+    /// (`NETLINK_PKTINFO`), for [`EventMeta::group`](super::EventMeta::group)
+    /// (#523). Event streams turn it on in `with_meta()`.
+    pub fn set_pktinfo(&self, on: bool) -> Result<()> {
+        Self::set_netlink_sockopt(self.as_raw_fd(), NETLINK_PKTINFO, on)
+    }
+
+    /// Receive notifications from every namespace that has an id in this
+    /// socket's (`NETLINK_LISTEN_ALL_NSID`, kernel 4.6+), each with that
+    /// id, for [`EventMeta::nsid`](super::EventMeta::nsid) (#523). Needs
+    /// `CAP_NET_BROADCAST`.
+    pub fn set_listen_all_nsid(&self, on: bool) -> Result<()> {
+        Self::set_netlink_sockopt(self.as_raw_fd(), NETLINK_LISTEN_ALL_NSID, on)
+    }
+
     /// Internal helper: setsockopt(SOL_NETLINK, optname, on as int).
     /// Treats `ENOPROTOOPT` as success (graceful degradation when
     /// the running kernel doesn't recognize the optname).
@@ -966,6 +981,14 @@ impl NetlinkSocket {
     /// [`Error::FrameTruncated`], which an event stream reports as an
     /// overrun and survives.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
+        self.poll_recv_meta(cx).map(|r| r.map(|(data, _)| data))
+    }
+
+    /// [`poll_recv`](Self::poll_recv), with what the datagram's control
+    /// messages say: its multicast group and its namespace's id, when the
+    /// socket asked for them ([`set_pktinfo`](Self::set_pktinfo),
+    /// [`set_listen_all_nsid`](Self::set_listen_all_nsid)) (#523).
+    pub(crate) fn poll_recv_meta(&self, cx: &mut Context<'_>) -> Poll<Result<(Vec<u8>, RecvMeta)>> {
         loop {
             let mut guard = match self.fd.poll_read_ready(cx) {
                 Poll::Ready(Ok(guard)) => guard,
@@ -973,9 +996,11 @@ impl NetlinkSocket {
                 Poll::Pending => return Poll::Pending,
             };
 
-            match guard.try_io(|inner| recv_whole(inner.get_ref(), 0)) {
+            match guard.try_io(|inner| recv_whole_meta(inner.get_ref(), 0, RECV_MAX_CAPACITY)) {
                 Ok(result) => match result {
-                    Ok(got) => return Poll::Ready(got.into_result().map(|(data, _)| data)),
+                    Ok((got, meta)) => {
+                        return Poll::Ready(got.into_result().map(|(data, _)| (data, meta)));
+                    }
                     Err(e) => {
                         // Plan 234 §4 — see recv_msg for the
                         // ENOBUFS routing rationale. poll_recv is
@@ -1051,6 +1076,97 @@ fn recv_whole_capped(
     let mut big = BytesMut::with_capacity(len);
     socket.recv_from(&mut big, flags)?;
     Ok(RecvWhole::Frame(big.to_vec(), multicast))
+}
+
+/// `NETLINK_PKTINFO` from `linux/netlink.h`.
+const NETLINK_PKTINFO: libc::c_int = 3;
+/// `NETLINK_LISTEN_ALL_NSID` from `linux/netlink.h`.
+const NETLINK_LISTEN_ALL_NSID: libc::c_int = 8;
+
+/// What a datagram's control messages said (#523).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RecvMeta {
+    /// The multicast group it was sent to (`NETLINK_PKTINFO`).
+    pub(crate) group: Option<u32>,
+    /// The id of the namespace it came from, as this socket's namespace
+    /// knows it (`NETLINK_LISTEN_ALL_NSID`). Absent for its own.
+    pub(crate) nsid: Option<i32>,
+}
+
+/// [`recv_whole`], keeping the control messages: the peek reads them,
+/// since netlink attaches them to every receive of the datagram.
+fn recv_whole_meta(
+    socket: &Socket,
+    flags: libc::c_int,
+    max: usize,
+) -> std::io::Result<(RecvWhole, RecvMeta)> {
+    let fd = socket.as_raw_fd();
+    let mut buf = vec![0u8; RECV_INITIAL_CAPACITY];
+    let (len, meta, multicast) =
+        recvmsg_meta(fd, &mut buf, flags | libc::MSG_PEEK | libc::MSG_TRUNC)?;
+    if len > max || len <= buf.len() {
+        let mut none = BytesMut::new();
+        socket.recv_from(&mut none, flags)?;
+        if len > max {
+            return Ok((RecvWhole::TooLarge(len), meta));
+        }
+        buf.truncate(len);
+        return Ok((RecvWhole::Frame(buf, multicast), meta));
+    }
+    let mut big = vec![0u8; len];
+    let (got, _, _) = recvmsg_meta(fd, &mut big, flags)?;
+    big.truncate(got);
+    Ok((RecvWhole::Frame(big, multicast), meta))
+}
+
+/// One `recvmsg` into `buf`, returning the datagram's full length (with
+/// `MSG_TRUNC`), its netlink control messages, and whether it was a
+/// multicast copy.
+fn recvmsg_meta(
+    fd: RawFd,
+    buf: &mut [u8],
+    flags: libc::c_int,
+) -> std::io::Result<(usize, RecvMeta, bool)> {
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr().cast(),
+        iov_len: buf.len(),
+    };
+    // Room for both control messages; u64 for cmsghdr's alignment.
+    let mut control = [0u64; 8];
+    // SAFETY: sockaddr_nl and msghdr are plain data; all-zero is valid.
+    let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = (&raw mut addr).cast();
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_nl>() as _;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = std::mem::size_of_val(&control) as _;
+    // SAFETY: `msg` points at `addr`, `iov` (over `buf`) and `control`,
+    // all live and writable for the call.
+    let n = unsafe { libc::recvmsg(fd, &mut msg, flags) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut meta = RecvMeta::default();
+    // SAFETY: the CMSG_* macros walk the control buffer the kernel just
+    // filled, bounded by `msg_controllen`; each data read stays within
+    // its cmsg, whose length the kernel set for the type read.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == libc::SOL_NETLINK {
+                let data = libc::CMSG_DATA(cmsg);
+                match (*cmsg).cmsg_type {
+                    NETLINK_PKTINFO => meta.group = Some(data.cast::<u32>().read_unaligned()),
+                    NETLINK_LISTEN_ALL_NSID => meta.nsid = Some(data.cast::<i32>().read_unaligned()),
+                    _ => {}
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+        }
+    }
+    Ok((n as usize, meta, addr.nl_groups != 0))
 }
 
 /// What [`recv_whole`] got.

@@ -832,3 +832,51 @@ async fn a_multi_namespace_watch_follows_namespaces_until_they_go() -> Result<()
     assert_eq!(key, "a");
     Ok(())
 }
+
+/// #523: the control messages of a notification say which group it was
+/// sent to and, on a connection listening to every namespace, which
+/// namespace it happened in — by the id the listener's namespace gave it.
+#[tokio::test]
+async fn an_event_says_which_group_and_namespace_it_came_from() -> Result<()> {
+    use nlink::netlink::EventMeta;
+    use std::os::fd::AsRawFd;
+    nlink::require_root!();
+    // NETLINK_LISTEN_ALL_NSID needs CAP_NET_BROADCAST, which the rootless
+    // CI container is not granted.
+    nlink::require_host_root!();
+    nlink::require_module!("dummy");
+
+    let a = TestNamespace::new("meta-nsid-a")?;
+    let b = TestNamespace::new("meta-nsid-b")?;
+    let watch = a.connection()?;
+    let b_fd = std::fs::File::open(format!("/var/run/netns/{}", b.name()))?;
+    watch.set_nsid(b_fd.as_raw_fd(), 42).await?;
+    watch.listen_all_nsid(true)?;
+    watch.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
+    let mut events = watch.events().await.with_meta();
+
+    a.connection()?.add_link(DummyLink::new("in-a")).await?;
+    let (meta, _) = expect_event(&mut events, WITHIN, "a's own link", |(_, e): &(EventMeta, NetworkEvent)| {
+        matches!(e, NetworkEvent::NewLink(l) if l.name() == Some("in-a"))
+    })
+    .await?;
+    assert_eq!((meta.group, meta.nsid), (Some(1), None), "RTNLGRP_LINK, here: {meta:?}");
+
+    let conn_b = b.connection()?;
+    conn_b.add_link(DummyLink::new("in-b")).await?;
+    let (meta, _) = expect_event(&mut events, WITHIN, "b's link, seen from a", |(_, e): &(EventMeta, NetworkEvent)| {
+        matches!(e, NetworkEvent::NewLink(l) if l.name() == Some("in-b"))
+    })
+    .await?;
+    assert_eq!((meta.group, meta.nsid), (Some(1), Some(42)), "{meta:?}");
+
+    conn_b
+        .add_address(Ipv4Address::new("in-b", Ipv4Addr::new(10, 94, 0, 1), 24))
+        .await?;
+    let (meta, _) = expect_event(&mut events, WITHIN, "b's address", |(_, e): &(EventMeta, NetworkEvent)| {
+        matches!(e, NetworkEvent::NewAddress(_))
+    })
+    .await?;
+    assert_eq!((meta.group, meta.nsid), (Some(5), Some(42)), "RTNLGRP_IPV4_IFADDR: {meta:?}");
+    Ok(())
+}

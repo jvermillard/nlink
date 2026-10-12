@@ -1595,6 +1595,32 @@ All notable changes to this project will be documented in this file.
     deleted namespace is treated as an ordinary error: the watch then
     reports giving up rather than the deletion.
 
+- **Event metadata: the group and the namespace (#523, sixth part).**
+  - **New fields.** `EventMeta` gains `group` and `nsid`, from the
+    datagram's control messages.
+    - `group` is the multicast group the notification was sent to
+      (`NETLINK_PKTINFO`, which `with_meta()` turns on). It includes
+      groups past 32, which the socket address cannot name.
+    - `nsid` is the id of the namespace the change happened in.
+  - **`Connection::listen_all_nsid(true)`** (`NETLINK_LISTEN_ALL_NSID`,
+    kernel 4.6+) receives the events of every namespace that has an id in
+    the connection's own.
+    - One socket can then watch many namespaces.
+    - `EventMeta::nsid` says which namespace an event came from, by the
+      id the listener's namespace gave it. It is absent for the
+      listener's own namespace.
+  - **The receive path.** An event stream's receive now uses `recvmsg`
+    with a control buffer. It still peeks each datagram whole first, as
+    before (#505). In dispatcher mode, events carry neither field.
+  - **Test.** A root test runs a listener in one namespace with an id
+    for a second, and checks each field:
+    - its own link: group 1 (`RTNLGRP_LINK`), no nsid;
+    - the second namespace's link: group 1, nsid 42;
+    - the second namespace's address: group 5 (`RTNLGRP_IPV4_IFADDR`),
+      nsid 42.
+
+    It fails without the control-message metadata.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

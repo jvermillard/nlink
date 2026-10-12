@@ -128,11 +128,21 @@ pub trait EventSource: ProtocolState + private::Sealed {
                 kind: u16::from_ne_bytes([rest[4], rest[5]]),
                 seq: u32::from_ne_bytes([rest[8], rest[9], rest[10], rest[11]]),
                 portid: u32::from_ne_bytes([rest[12], rest[13], rest[14], rest[15]]),
+                group: None,
+                nsid: None,
             };
             out.extend(Self::parse_events(&rest[..len]).into_iter().map(|e| (meta, e)));
             rest = &rest[((len + 3) & !3).min(rest.len())..];
         }
         out
+    }
+}
+
+/// Ask for each datagram's multicast group. Without it the metadata only
+/// lacks the group, so a failure is logged, not returned.
+fn enable_pktinfo<P: EventSource>(conn: &Connection<P>) {
+    if let Err(e) = conn.socket().set_pktinfo(true) {
+        tracing::debug!(error = %e, "event stream: no NETLINK_PKTINFO; events carry no group");
     }
 }
 
@@ -147,6 +157,13 @@ type MetaEvent<P> = (EventMeta, <P as EventSource>::Event);
 /// process's own — and one the kernel originated (a link losing carrier,
 /// an expiring address, a learned neighbour) with port id 0. So a watcher
 /// can tell its own changes from others', and drift from kernel noise.
+///
+/// The datagram's control messages add where it was sent: its multicast
+/// group, and — on a connection that
+/// [listens to every namespace](crate::Connection::listen_all_nsid) —
+/// the id of the namespace it happened in. A stream in dispatcher mode
+/// ([`Connection::with_dispatcher`](crate::Connection::with_dispatcher))
+/// has neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct EventMeta {
@@ -156,6 +173,15 @@ pub struct EventMeta {
     pub seq: u32,
     /// The message type (`RTM_NEWLINK`, …).
     pub kind: u16,
+    /// The multicast group the notification was sent to
+    /// (`RTNLGRP_LINK` is 1, …), from `NETLINK_PKTINFO`. Groups past 32,
+    /// which the socket address cannot name, included.
+    pub group: Option<u32>,
+    /// The id, in the receiving connection's namespace, of the namespace
+    /// the change happened in — only on a connection that
+    /// [listens to every namespace](crate::Connection::listen_all_nsid),
+    /// and absent for its own.
+    pub nsid: Option<i32>,
 }
 
 impl EventMeta {
@@ -292,9 +318,9 @@ fn poll_event_backend<P: EventSource>(
         return Poll::Ready(Some(Err(e)));
     }
     loop {
-        let data: Vec<u8> = match backend {
-            EventBackend::Direct(_) => match conn.socket().poll_recv(cx) {
-                Poll::Ready(Ok(data)) => data,
+        let (data, recv): (Vec<u8>, super::socket::RecvMeta) = match backend {
+            EventBackend::Direct(_) => match conn.socket().poll_recv_meta(cx) {
+                Poll::Ready(Ok(got)) => got,
                 // ENOBUFS is recoverable and must NOT fuse: the socket
                 // is fine, its buffer overflowed, and the whole resync
                 // machinery is built on the stream continuing after
@@ -343,7 +369,7 @@ fn poll_event_backend<P: EventSource>(
                 }
                 match guard.rx.poll_recv(cx) {
                     Poll::Ready(Some(super::dispatcher::EventFrame::Data(frame))) => {
-                        (*frame).clone()
+                        ((*frame).clone(), Default::default())
                     }
                     // The wake-up for an overrun: the flag says the rest.
                     Poll::Ready(Some(super::dispatcher::EventFrame::Overrun)) => continue,
@@ -359,6 +385,10 @@ fn poll_event_backend<P: EventSource>(
 
         *buffer = data;
         *pending = P::parse_events_with_meta(buffer);
+        for (meta, _) in pending.iter_mut() {
+            meta.group = recv.group;
+            meta.nsid = recv.nsid;
+        }
         tracing::trace!(
             protocol = std::any::type_name::<P>(),
             events = pending.len(),
@@ -374,8 +404,10 @@ fn poll_event_backend<P: EventSource>(
 
 impl<'a, P: EventSource> EventSubscription<'a, P> {
     /// This stream, each event with the [`EventMeta`] of its notification
-    /// (#523): who caused it.
+    /// (#523): who caused it, and where it was sent. Turns on
+    /// `NETLINK_PKTINFO` on the connection's socket for the group.
     pub fn with_meta(self) -> WithMeta<Self> {
+        enable_pktinfo(self.conn);
         WithMeta(self)
     }
 
@@ -504,8 +536,10 @@ impl<P: EventSource> OwnedEventStream<P> {
 
 impl<P: EventSource> OwnedEventStream<P> {
     /// This stream, each event with the [`EventMeta`] of its notification
-    /// (#523): who caused it.
+    /// (#523): who caused it, and where it was sent. Turns on
+    /// `NETLINK_PKTINFO` on the connection's socket for the group.
     pub fn with_meta(self) -> WithMeta<Self> {
+        enable_pktinfo(&self.conn);
         WithMeta(self)
     }
 
@@ -869,6 +903,8 @@ impl EventSource for KobjectUevent {
             portid: 0,
             seq: 0,
             kind: 0,
+            group: None,
+            nsid: None,
         };
         Self::parse_events(data).into_iter().map(|e| (meta, e)).collect()
     }
