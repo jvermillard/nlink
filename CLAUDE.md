@@ -74,7 +74,9 @@ For new tests that need root, gate with `nlink::require_root!()`
 (early-returns `Ok(())` when `euid != 0`). For the few operations the
 kernel checks against `init_user_ns` no matter what the container was
 granted — mounting over `/etc` or remounting `/sys` in a spawned
-namespace, the TC police rate table, creating a WireGuard device — add
+namespace, the TC police rate table, creating a WireGuard device,
+`NETLINK_LISTEN_ALL_NSID` (`CAP_NET_BROADCAST`), loading a BPF program
+(`CAP_BPF`) — add
 `nlink::require_host_root!()`: `euid == 0` is also true inside a
 rootless container, which is where six tests were failing instead of
 skipping (#357). An environment that really is host root sets
@@ -149,8 +151,17 @@ Inside `crates/nlink/src/`:
   protocol (`netfilter.rs`, `xfrm.rs`, `connector.rs`,
   `uevent.rs`, `audit.rs`, `selinux.rs`, `fib_lookup.rs`,
   `nftables/`, `genl/`).
-- `netlink/genl/{wireguard,macsec,mptcp,ethtool,nl80211,devlink}/`
-  — Generic Netlink families.
+- `netlink/genl/{wireguard,macsec,mptcp,ethtool,nl80211,devlink,dpll,net_shaper,ovpn,hwsim}/`
+  — Generic Netlink families. `hwsim` (`MAC80211_HWSIM` radios) is
+  unverified on a live kernel.
+- `netlink/namespace/` — `Netns` (owned handle), `NetnsRef` (a
+  serializable description), `NetnsTarget` (what every `*_in` takes) and
+  `NetnsCommand` (0.32, #520/#521/#532).
+- `netlink/nflog.rs` — `Connection<Nflog>`, reading what an NFLOG group
+  sends (0.32, #528).
+- `blocking.rs` — `nlink::blocking::Connection<P>`: a worker thread with a
+  current-thread runtime, safe to call from a `Drop` inside tokio (0.32,
+  #533).
 - `netlink/config/` — declarative `NetworkConfig` (diff + apply +
   reconcile + opt-in purge).
 - `netlink/{resync,resync_ext,reflector}.rs` — ENOBUFS-resync event
@@ -340,20 +351,37 @@ the ifindex once via `conn.get_link_by_name("eth0").await?` and
 pass it to subsequent calls.
 
 ```rust
-use nlink::netlink::namespace;
-
-// Plain (rtnetlink) — sync constructor
-let conn: Connection<Route> = namespace::connection_for("myns")?;
-// GENL families need async resolution
-let wg: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
+// Any target: an ip-netns name, an open &Netns, a NetnsRef, a path, an fd
+let conn = Connection::<Route>::new_in("myns")?;
+// GENL families resolve their id inside the namespace
+let wg = Connection::<Wireguard>::new_in_async("myns").await?;
 ```
 
-`namespace::Netns` (0.32, #520) is the owned handle: it holds an fd, so
+**One spelling (0.32, #532).** Every entry point that works in a namespace
+takes `impl Into<NetnsTarget>`:
+- `Connection::new_in{,_async}`;
+- the facade's `*_in` and `Stack`'s `*_in`;
+- `ConnectionPool::new_in`;
+- `MultiNsWatch::add`.
+
+`namespace::connection_for*`, `Connection::{for_namespace,
+new_in_namespace*}` and the facade's `*_in_namespace(&str)` are deprecated.
+Don't add another spelling: take `impl Into<NetnsTarget<'a>>`. A `&str`
+is always a name; a path is `Path::new(..)`.
+
+`namespace::Netns` (0.32, #520) is the owned handle. It holds an fd, so
 what it names cannot change under it (`NetnsId` is the nsfs dev + inode).
-`netns.connection::<P>()`, `netns.run(|| …)` and `netns.socket(..)` all
-work inside it, and `conn.netns()` / `conn.sibling::<Q>()` recover it
+`Connection::new_in(&netns)`, `netns.run(|| …)` and `netns.socket(..)`
+all work inside it. `conn.netns()` and `conn.sibling::<Q>()` recover it
 from a connection. New namespace-aware code should hold a `Netns` rather
 than re-resolve a name: a name can be deleted and reused.
+`NetnsCommand` (`netns.command(cmd)`) spawns a process there, with the
+`/etc/netns/<name>` overlay, a cgroup, `pdeathsig` and a detached mode
+(#521).
+
+File descriptors are `impl AsFd` in every public signature (#532). A
+builder that keeps one until the request is sent duplicates it
+(`VethLink::peer_netns_fd`, `BpfFilter::new`, `BpfAction::from_fd`).
 
 The `nlink::lab` module (feature `lab`) provides `LabNamespace`
 and `with_namespace` for integration tests + local CLI demos.
@@ -532,7 +560,19 @@ keep a context on **every** error, so messages read like
 `"add_link(veth0, kind=veth): File exists (errno 17)"`. Construct with
 the helpers (`Error::invalid_message`, `Error::from_errno`,
 `Error::from(io_err)`, `ErrorDetail::X { .. }.into()`), never by
-naming a variant on `Error`. **Operation timeout defaults to 30 seconds**
+naming a variant on `Error`.
+
+- **The object.** `err.object()` names what failed (`ErrorObject`: link,
+  address, route, qdisc, WireGuard peer, sysctl, …). A declarative apply
+  sets it per step, and `ApplyError` serializes kind, errno, ext-ack,
+  context and object.
+- **The request.** A kernel error records the request type it refused,
+  and `kind()` reads the errno against it. `ESRCH` to a route delete is
+  `NotFound`.
+- **Keep the source.** A new error site keeps the source error:
+  `Error::from(io_err).with_context("remove namespace file …")`. Never use
+  `invalid_message(format!("…{e}"))` around something that has an errno.
+  That made `is_busy()` false for a busy namespace (#526). **Operation timeout defaults to 30 seconds**
 (Plan 171 — closes the "hidden hang" class). Override with
 `Connection::timeout(Duration)`; opt out (rarely useful) with
 `.no_timeout()`. The default surfaces any kernel response
@@ -856,6 +896,31 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 40 examples are feature-gated and the default job never saw them.
 
 ## Active work
+
+**The 0.32 cycle is open on `master`** (workspace 0.32.0, unreleased). It
+carries #534's redesigns, and `docs/migration_guide/0.31.0-to-0.32.0.md`
+lists every break.
+- **Namespaces:** `Netns`, `NetnsTarget`, `Connection::new_in`,
+  `NetnsCommand`.
+- **The error model:** `Error` is a one-pointer struct with `kind()`,
+  `detail()`, `context()` and `object()`.
+- **`NetworkConfig`:** ownership, recreate and purge
+  (`PlanOptions::previous`, `RecreatePolicy`, typed `Blocker`s).
+- **Declarative TC:** `QdiscSpec`, and `NetworkConfig::tc` trees.
+- **The plan/apply split:** `PlanOptions`/`ExecOptions`, `Plan`,
+  `StackPlan`.
+- **nftables:** typed statement decoders, NAT, comments,
+  `RulesetSnapshot` and `TableMode`.
+- **And:** `AsFd` throughout, NFLOG, hwsim and mesh, `get_stats64_all`
+  and `RateSampler`, `blocking::Connection`.
+
+Lessons to carry:
+- **A sweep finds what one site hides.** Converting the BPF constructors
+  to `AsFd` found that `from_pinned` had never opened a real pin (#710):
+  bpffs refuses `open(2)`, and the only tests used a missing path.
+- **A context that is dropped is worse than none.** `with_context` kept a
+  context only on kernel errors. Every I/O, batch and validation error
+  lost the "what was being done" that nlink-lab needed.
 
 **0.31.0 shipped 2026-10-11** (`0.31.0` tagged — bare, no `v`; both crates
 on crates.io). Narrative in `CHANGELOG.md ## [0.31.0]` +
