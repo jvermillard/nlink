@@ -1342,6 +1342,8 @@ pub(crate) fn diff_snapshot(
     let current_routes: Vec<RouteMessage> = current_routes
         .into_iter()
         .filter(|r| r.oif().is_none_or(|oif| !plan.gone.contains(&oif)))
+        // A multipath route goes with any hop's link (#516).
+        .filter(|r| r.multipath().is_none_or(|hops| !hops.iter().any(|h| plan.gone.contains(&h.ifindex))))
         .collect();
     let current_qdiscs: Vec<TcMessage> = current_qdiscs
         .into_iter()
@@ -1390,6 +1392,8 @@ pub(crate) fn diff_snapshot(
     let current_routes: Vec<RouteMessage> = current_routes
         .into_iter()
         .filter(|r| r.oif().is_none_or(|oif| !flushed.contains(&oif)))
+        // And with its last live hop, when all go down (#516).
+        .filter(|r| r.multipath().is_none_or(|hops| !hops.iter().all(|h| flushed.contains(&h.ifindex))))
         .collect();
     // Nexthop objects on a link the apply deletes or flushes go with it,
     // and so does every route through them (#516): the declared ones are
@@ -2650,6 +2654,7 @@ fn diff_routes(
         .iter()
         .map(|(idx, name)| (*name, *idx))
         .collect();
+    let resolve = |name: &str| name_to_ifindex.get(name).copied();
 
     // Index current routes by (dst, prefix, table) for fast lookup
     // of every matching kernel route. ECMP / multi-metric setups
@@ -2719,7 +2724,7 @@ fn diff_routes(
             && current_by_key.get(&key).is_some_and(|kernel_routes| {
                 kernel_routes
                     .iter()
-                    .any(|r| route_matches(declared, declared_oif, r))
+                    .any(|r| route_matches(declared, declared_oif, &resolve, r))
             });
 
         if matches_existing {
@@ -2836,7 +2841,7 @@ fn diff_routes(
             .get(&(dst, r.dst_len(), r.table_id()))
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let carried = declared_here.iter().any(|d| route_matches(d, oif_of(d), r));
+        let carried = declared_here.iter().any(|d| route_matches(d, oif_of(d), &resolve, r));
         let replaced = declared_here
             .iter()
             .any(|d| kernel_metric(d) == r.priority().unwrap_or(0));
@@ -2845,13 +2850,13 @@ fn diff_routes(
         }
         let superseded = declared_here
             .iter()
-            .any(|d| route_matches_but_metric(d, oif_of(d), r));
+            .any(|d| route_matches_but_metric(d, oif_of(d), &resolve, r));
         // The caller's own tables are never purged (#513).
         let purged = purge && purgeable_route(r, &tables, config) && !opts.owns_table(r.table_id());
         // Declared before, not now: it goes, wherever its table (#512).
         let dropped = previous_by_key
             .get(&(dst, r.dst_len(), r.table_id()))
-            .is_some_and(|prev| prev.iter().any(|d| route_matches(d, oif_of(d), r)));
+            .is_some_and(|prev| prev.iter().any(|d| route_matches(d, oif_of(d), &resolve, r)));
         if !(superseded || purged || dropped) {
             continue;
         }
@@ -2898,6 +2903,17 @@ fn declared_from_live(
             scope: Some(r.scope()),
             onlink: r.is_onlink(),
             nhid: r.nh_id(),
+            multipath: r
+                .multipath()
+                .unwrap_or_default()
+                .iter()
+                .map(|h| super::types::RouteNexthop {
+                    gateway: h.gateway,
+                    dev: ifindex_to_name.get(&h.ifindex).map(|n| n.to_string()),
+                    weight: h.weight,
+                    onlink: h.flags & crate::netlink::route::rtnh_flags::ONLINK != 0,
+                })
+                .collect(),
             ..Default::default()
         }
         .with_metrics(r.metrics()),
@@ -2908,6 +2924,12 @@ fn declared_from_live(
 /// dev eth0`.
 pub(crate) fn route_text(route: &DeclaredRoute) -> String {
     let mut out = format!("{}/{}", route.destination, route.prefix_len);
+    if let Some(id) = route.attrs.nhid {
+        out.push_str(&format!(" nhid {id}"));
+    }
+    for hop in &route.attrs.multipath {
+        out.push_str(&format!(" {hop}"));
+    }
     if let Some(g) = route.gateway {
         out.push_str(&format!(" via {g}"));
     }
@@ -2962,7 +2984,12 @@ fn describe_route(r: &RouteMessage, ifindex_to_name: &HashMap<u32, &str>) -> Str
 
 /// Does the kernel route `r`, at `declared`'s key, carry `declared`?
 /// `declared_oif` is the declared device's ifindex, if it resolves.
-fn route_matches(declared: &DeclaredRoute, declared_oif: Option<u32>, r: &RouteMessage) -> bool {
+fn route_matches(
+    declared: &DeclaredRoute,
+    declared_oif: Option<u32>,
+    resolve: &dyn Fn(&str) -> Option<u32>,
+    r: &RouteMessage,
+) -> bool {
     // Metric (priority). A route added without an explicit metric does
     // not come back as 0 for both families: IPv4 leaves it 0, but IPv6
     // substitutes `IP6_RT_PRIO_USER` (1024, include/net/ip6_route.h).
@@ -2976,7 +3003,7 @@ fn route_matches(declared: &DeclaredRoute, declared_oif: Option<u32>, r: &RouteM
     // IP6_RT_PRIO_USER;` in `ip6_route_info_create`), so `.metric(0)`
     // installs 1024 and comparing it as 0 re-added the route on every
     // apply.
-    route_matches_but_metric(declared, declared_oif, r)
+    route_matches_but_metric(declared, declared_oif, resolve, r)
         && kernel_metric(declared) == r.priority().unwrap_or(0)
         && route_attrs_match(declared, r)
 }
@@ -2999,6 +3026,7 @@ fn route_attrs_match(declared: &DeclaredRoute, r: &RouteMessage) -> bool {
 fn route_matches_but_metric(
     declared: &DeclaredRoute,
     declared_oif: Option<u32>,
+    resolve: &dyn Fn(&str) -> Option<u32>,
     r: &RouteMessage,
 ) -> bool {
     // Through a nexthop object (#516): the id is the route's next hop, and
@@ -3006,6 +3034,19 @@ fn route_matches_but_metric(
     // object's — a route through a blackhole nexthop is a blackhole route.
     if declared.attrs.nhid.is_some() || r.nh_id().is_some() {
         return declared.attrs.nhid == r.nh_id();
+    }
+    // A multipath route (#516): its next hops, in order. A hop declared
+    // without a device takes the one the kernel picked.
+    if !declared.attrs.multipath.is_empty() || r.multipath().is_some() {
+        let Some(have) = r.multipath() else { return false };
+        let want = &declared.attrs.multipath;
+        return want.len() == have.len()
+            && want.iter().zip(have).all(|(w, h)| {
+                w.gateway == h.gateway
+                    && w.dev.as_deref().is_none_or(|d| resolve(d) == Some(h.ifindex))
+                    && w.weight == h.weight
+                    && w.onlink == (h.flags & crate::netlink::route::rtnh_flags::ONLINK != 0)
+            });
     }
     // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
     let gw_match = match (declared.gateway, r.gateway()) {

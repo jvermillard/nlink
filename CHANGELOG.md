@@ -1274,6 +1274,35 @@ All notable changes to this project will be documented in this file.
       is refused), and with the routes through lost nexthops taken as
       present (it does not converge).
 
+- **Declared multipath routes (#516, row 11, second part).**
+  - **Builder.** `RouteBuilder::nexthop(|h| h.via(..).dev(..).weight(..).onlink())`
+    adds a next hop. A route takes two or more, in place of a gateway
+    and device. The kernel keeps them in the order given, and the diff
+    compares them in that order.
+  - **Comparison.** A hop declared without a device takes the one the
+    kernel picks.
+  - **Lost with a link.** The kernel deletes an IPv4 multipath route
+    with any hop's link, and an IPv6 route's hop with its link. A
+    multipath route with a hop on a link the apply deletes, or with
+    every hop on links it flushes, counts as absent. The apply puts it
+    back whole.
+  - **Validation errors:**
+    - one hop only (the kernel dumps it as a plain route, which would
+      never match);
+    - a gateway, device or nhid beside the hops;
+    - a hop with neither gateway nor device;
+    - a gateway of the other family;
+    - `onlink` without both;
+    - a non-unicast type.
+  - **Tests.**
+    - A transition test changes the hops' weights in place, recreates
+      the link one hop is on, then returns to single-gateway routes,
+      checked through `ip -j route` for IPv4 and IPv6. It passes on
+      iproute2 6.15 and 6.1.
+    - It fails with the hops uncompared (the weights stay), and with a
+      route whose hop's link is recreated taken as present (it does not
+      converge).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

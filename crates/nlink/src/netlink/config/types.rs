@@ -223,6 +223,32 @@ impl NetworkConfig {
                 bad("a member is listed twice".into());
             }
         }
+        for r in self.routes.iter().filter(|r| !r.attrs.multipath.is_empty()) {
+            let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
+            let mut bad = |why: String| errors.push(ValidationErrorInfo::new(at(), why));
+            if r.gateway.is_some() || r.dev.is_some() || r.attrs.nhid.is_some() {
+                bad("a multipath route has no gateway, device or nexthop object of its own".into());
+            }
+            // The kernel dumps a one-hop route as a plain one, and the diff
+            // would never match it.
+            if r.attrs.multipath.len() < 2 {
+                bad("a multipath route has two next hops or more; one is .via() and .dev()".into());
+            }
+            if r.route_type != DeclaredRouteType::Unicast {
+                bad("a multipath route is a unicast one".into());
+            }
+            for hop in &r.attrs.multipath {
+                if hop.gateway.is_none() && hop.dev.is_none() {
+                    bad(format!("{hop}: a next hop needs a gateway or device"));
+                }
+                if hop.gateway.is_some_and(|g| g.is_ipv4() != r.destination.is_ipv4()) {
+                    bad(format!("{hop}: the gateway is not of the destination's family"));
+                }
+                if hop.onlink && (hop.gateway.is_none() || hop.dev.is_none()) {
+                    bad(format!("{hop}: onlink needs a gateway and a device"));
+                }
+            }
+        }
         for r in &self.routes {
             let Some(id) = r.attrs.nhid else { continue };
             let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
@@ -4017,6 +4043,99 @@ pub(crate) struct RouteAttrs {
     /// The nexthop object the route goes through (`nhid`, `RTA_NH_ID`),
     /// in place of a gateway and device.
     pub(crate) nhid: Option<u32>,
+    /// The next hops of a multipath route (`RTA_MULTIPATH`), in place of a
+    /// gateway and device; in the kernel's order, which is the declared.
+    pub(crate) multipath: Vec<RouteNexthop>,
+}
+
+/// One next hop of a multipath route (#516); see [`RouteBuilder::nexthop`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RouteNexthop {
+    /// The gateway.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub gateway: Option<IpAddr>,
+    /// The device; the kernel's, from the gateway, when unset.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub dev: Option<String>,
+    /// Its share of the flows, 1 and up.
+    #[cfg_attr(feature = "serde", serde(default = "one", skip_serializing_if = "is_one"))]
+    pub weight: u8,
+    /// The gateway is on the link whatever the subnets say.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    pub onlink: bool,
+}
+
+#[cfg(feature = "serde")]
+fn one() -> u8 {
+    1
+}
+
+#[cfg(feature = "serde")]
+fn is_one(w: &u8) -> bool {
+    *w == 1
+}
+
+impl std::fmt::Display for RouteNexthop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("nexthop")?;
+        if let Some(g) = self.gateway {
+            write!(f, " via {g}")?;
+        }
+        if let Some(d) = &self.dev {
+            write!(f, " dev {d}")?;
+        }
+        if self.weight != 1 {
+            write!(f, " weight {}", self.weight)?;
+        }
+        if self.onlink {
+            f.write_str(" onlink")?;
+        }
+        Ok(())
+    }
+}
+
+/// Builds one next hop of a multipath route; see [`RouteBuilder::nexthop`].
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct RouteNexthopBuilder {
+    hop: RouteNexthop,
+    error: Option<RouteParseError>,
+}
+
+impl RouteNexthopBuilder {
+    /// The gateway; one that does not parse is an error from
+    /// [`NetworkConfig::route`].
+    pub fn via(mut self, gateway: &str) -> Self {
+        match gateway.parse() {
+            Ok(addr) => self.hop.gateway = Some(addr),
+            Err(_) => {
+                self.error.get_or_insert(RouteParseError::InvalidGateway(gateway.to_string()));
+            }
+        }
+        self
+    }
+
+    /// The device.
+    pub fn dev(mut self, dev: &str) -> Self {
+        self.hop.dev = Some(dev.to_string());
+        self
+    }
+
+    /// Its share of the flows, 1 and up (0 is 1).
+    pub fn weight(mut self, weight: u8) -> Self {
+        self.hop.weight = weight.max(1);
+        self
+    }
+
+    /// The gateway is on the link whatever the subnets say.
+    pub fn onlink(mut self) -> Self {
+        self.hop.onlink = true;
+        self
+    }
 }
 
 impl RouteAttrs {
@@ -4098,6 +4217,9 @@ struct RouteRepr {
     /// The nexthop object it goes through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nhid: Option<u32>,
+    /// The next hops of a multipath route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nexthops: Vec<RouteNexthop>,
 }
 
 // Delegate `DeclaredRoute`'s schema to `RouteRepr` so it describes
@@ -4150,6 +4272,7 @@ impl From<DeclaredRoute> for RouteRepr {
             initrwnd: a.initrwnd,
             hoplimit: a.hoplimit,
             nhid: a.nhid,
+            nexthops: a.multipath,
         }
     }
 }
@@ -4226,6 +4349,7 @@ impl TryFrom<RouteRepr> for DeclaredRoute {
                 initrwnd: r.initrwnd,
                 hoplimit: r.hoplimit,
                 nhid: r.nhid,
+                multipath: r.nexthops,
             },
         })
     }
@@ -4484,6 +4608,38 @@ impl RouteBuilder {
     /// [`NetworkConfig::nexthop`]: in place of a gateway and device.
     pub fn nhid(mut self, id: u32) -> Self {
         self.attrs.nhid = Some(id);
+        self
+    }
+
+    /// Add a next hop of a multipath route (#516), as `ip route … nexthop
+    /// via <gw> dev <dev> weight <w>` does: two or more, in place of a
+    /// gateway and device, kept in the order declared.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    ///
+    /// let config = NetworkConfig::new()
+    ///     .route("10.1.0.0/16", |r| {
+    ///         r.nexthop(|h| h.via("10.0.0.2").dev("eth0"))
+    ///             .nexthop(|h| h.via("10.0.1.2").dev("eth1").weight(3))
+    ///     })
+    ///     .unwrap();
+    /// config.validate().unwrap();
+    /// ```
+    pub fn nexthop(mut self, f: impl FnOnce(RouteNexthopBuilder) -> RouteNexthopBuilder) -> Self {
+        let built = f(RouteNexthopBuilder {
+            hop: RouteNexthop {
+                gateway: None,
+                dev: None,
+                weight: 1,
+                onlink: false,
+            },
+            error: None,
+        });
+        if let Some(e) = built.error {
+            self.error.get_or_insert(e);
+        }
+        self.attrs.multipath.push(built.hop);
         self
     }
 
@@ -6181,6 +6337,42 @@ mod serde_roundtrip_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("veth_peer_netns"), "{err}");
+    }
+
+    #[test]
+    fn multipath_routes_roundtrip_and_validate() {
+        let cfg = NetworkConfig::new()
+            .route("10.1.0.0/16", |r| {
+                r.nexthop(|h| h.via("10.0.0.2").dev("eth0"))
+                    .nexthop(|h| h.via("10.0.1.2").weight(3).onlink().dev("eth1"))
+            })
+            .unwrap();
+        cfg.validate().unwrap();
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        let want = r#""nexthops":[{"gateway":"10.0.0.2","dev":"eth0"},{"gateway":"10.0.1.2","dev":"eth1","weight":3,"onlink":true}]"#;
+        assert!(json.contains(want), "{json}");
+        let route = |f: fn(RouteBuilder) -> RouteBuilder| NetworkConfig::new().route("10.1.0.0/16", f).unwrap();
+        for (cfg, says) in [
+            (route(|r| r.nexthop(|h| h.via("10.0.0.2"))), "two next hops or more"),
+            (
+                route(|r| r.via("10.0.0.9").nexthop(|h| h.via("10.0.0.2")).nexthop(|h| h.via("10.0.0.3"))),
+                "no gateway, device or nexthop object of its own",
+            ),
+            (route(|r| r.nexthop(|h| h).nexthop(|h| h.via("10.0.0.3"))), "needs a gateway or device"),
+            (
+                route(|r| r.nexthop(|h| h.via("fd00::2")).nexthop(|h| h.via("10.0.0.3"))),
+                "not of the destination's family",
+            ),
+            (
+                route(|r| r.nexthop(|h| h.via("10.0.0.2").onlink()).nexthop(|h| h.via("10.0.0.3"))),
+                "onlink needs a gateway and a device",
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        assert!(NetworkConfig::new().route("10.1.0.0/16", |r| r.nexthop(|h| h.via("x"))).is_err());
     }
 
     #[test]
