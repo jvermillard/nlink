@@ -520,3 +520,55 @@ async fn a_nexthop_without_a_gateway_is_created() -> Result<()> {
     assert_eq!(ids, [5, 6], "{shown}");
     Ok(())
 }
+
+/// A route with an MPLS encapsulation is added (#678). `MplsEncap` put a
+/// TTL — 255 unless set — in the bottom label entry, and the kernel takes
+/// a label stack only with TTL 0 there (`nla_get_labels`: "TTL in label
+/// must be 0"); the TTL is `MPLS_IPTUNNEL_TTL`'s. Every one failed.
+#[tokio::test]
+async fn an_mpls_encap_route_is_added() -> Result<()> {
+    use nlink::netlink::mpls::MplsEncap;
+    nlink::require_root!();
+    nlink::require_modules!("mpls_iptunnel");
+
+    let (ns, conn) = setup_routed_ns("mplsencap").await?;
+    conn.add_route(
+        Ipv4Route::new("10.88.0.0", 16)
+            .gateway(Ipv4Addr::new(192, 168, 1, 2))
+            .dev("dummy0")
+            .mpls_encap(MplsEncap::new().labels(&[100, 200]).ttl(32)),
+    )
+    .await?;
+    // Text: iproute2 6.1's JSON puts the labels in the route's `dst`.
+    let shown = ns.exec("ip", &["route", "show", "10.88.0.0/16"])?;
+    assert!(shown.contains("encap mpls  100/200 ttl 32 via 192.168.1.2 dev dummy0"), "{shown}");
+    Ok(())
+}
+
+/// An MPLS swap route is added and deleted (#678). Every MPLS route request
+/// failed: an add and a delete both left `rtm_table` 0, where the kernel
+/// takes only main ("MPLS only supports the main route table"), a delete
+/// left `rtm_type` 0 where it takes only unicast, and the swap's
+/// `RTA_NEWDST` stack carried TTL 255 in its bottom entry.
+#[tokio::test]
+async fn an_mpls_swap_route_is_added() -> Result<()> {
+    use nlink::netlink::mpls::MplsRouteBuilder;
+    nlink::require_root!();
+    nlink::require_modules!("mpls_router");
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+
+    let (ns, conn) = setup_routed_ns("mplsswap").await?;
+    ns.exec("sysctl", &["-w", "net.mpls.platform_labels=1000"])?;
+    conn.add_mpls_route(
+        MplsRouteBuilder::swap(100, 200)
+            .dev("dummy0")
+            .via(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2))),
+    )
+    .await?;
+    let shown = ns.exec("ip", &["-f", "mpls", "route", "show"])?;
+    assert!(shown.contains("100 as to 200 via inet 192.168.1.2 dev dummy0"), "{shown}");
+    conn.del_mpls_route(100).await?;
+    let shown = ns.exec("ip", &["-f", "mpls", "route", "show"])?;
+    assert!(shown.trim().is_empty(), "{shown}");
+    Ok(())
+}
