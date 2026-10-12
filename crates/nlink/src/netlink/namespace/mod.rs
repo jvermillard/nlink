@@ -902,6 +902,149 @@ pub fn create(name: &str) -> Result<()> {
     create_path(named_path(name)?)
 }
 
+/// Where [`create_with`] writes the owner tags: one file per named
+/// namespace, holding its owner. Not under `/run/netns`, which `ip netns`
+/// lists as namespaces, and not an xattr, which tmpfs may not keep (#522).
+pub const OWNER_TAG_DIR: &str = "/run/nlink/netns-owners";
+
+/// How [`create_with`] creates a named namespace (#522).
+///
+/// ```no_run
+/// # fn example() -> nlink::Result<()> {
+/// use nlink::netlink::namespace::{self, CreateOptions};
+///
+/// namespace::create_with("lab-r1", CreateOptions::new().owner("nlink-lab").reclaim_stale(true))?;
+/// assert_eq!(namespace::owner_of("lab-r1")?.as_deref(), Some("nlink-lab"));
+/// for name in namespace::list_owned("nlink-lab")? {
+///     println!("{name}");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct CreateOptions {
+    owner: Option<String>,
+    reclaim_stale: bool,
+}
+
+impl CreateOptions {
+    /// The defaults: no owner, and an existing marker is an error.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Tag the namespace as `owner`'s, under [`OWNER_TAG_DIR`]. The tag is
+    /// written before the namespace is made, so a crash between the two
+    /// leaves a tag with no namespace — which [`list_owned`] still lists —
+    /// and never a namespace with no tag.
+    pub fn owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
+        self
+    }
+
+    /// Remove a stale marker in the name's place — a `/run/netns` file
+    /// nothing is mounted on, left by a crash — instead of failing. A live
+    /// namespace is never touched: that is still an error.
+    pub fn reclaim_stale(mut self, reclaim: bool) -> Self {
+        self.reclaim_stale = reclaim;
+        self
+    }
+}
+
+/// The owner tag's path for `name`.
+fn owner_tag_path(name: &str) -> Result<PathBuf> {
+    validate_name(name)?;
+    Ok(PathBuf::from(OWNER_TAG_DIR).join(name))
+}
+
+/// Create a named namespace as [`create`] does, with an owner tag and stale
+/// marker reclaim (#522).
+///
+/// # Errors
+///
+/// As [`create`]; and [`Error::is_already_exists`] for a live namespace of
+/// the name even with [`CreateOptions::reclaim_stale`]. A failed create
+/// removes the tag it wrote.
+pub fn create_with(name: &str, opts: CreateOptions) -> Result<()> {
+    let path = named_path(name)?;
+    if opts.reclaim_stale && path.exists() && !is_namespace_path(&path) {
+        std::fs::remove_file(&path)
+            .map_err(|e| Error::InvalidMessage(format!("cannot remove stale marker {}: {e}", path.display())))?;
+    }
+    let tag = match &opts.owner {
+        Some(owner) => Some(write_owner_tag(name, owner)?),
+        None => None,
+    };
+    match create_path(&path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(tag) = tag {
+                let _ = std::fs::remove_file(tag);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Write `owner` as `name`'s tag, atomically: a temporary file renamed
+/// over the tag.
+fn write_owner_tag(name: &str, owner: &str) -> Result<PathBuf> {
+    let tag = owner_tag_path(name)?;
+    std::fs::create_dir_all(OWNER_TAG_DIR)
+        .map_err(|e| Error::InvalidMessage(format!("cannot create {OWNER_TAG_DIR}: {e}")))?;
+    let tmp = tag.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, owner)
+        .and_then(|()| std::fs::rename(&tmp, &tag))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            Error::InvalidMessage(format!("cannot write owner tag {}: {e}", tag.display()))
+        })?;
+    Ok(tag)
+}
+
+/// The owner [`create_with`] tagged `name` with, if any (#522). The tag
+/// outlives a crash that left no namespace; [`exists`] says whether there
+/// is one.
+pub fn owner_of(name: &str) -> Result<Option<String>> {
+    match std::fs::read_to_string(owner_tag_path(name)?) {
+        Ok(owner) => Ok(Some(owner)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
+/// The names [`create_with`] tagged as `owner`'s (#522), sorted: the
+/// namespaces it made, and any whose create a crash cut short — the tag is
+/// written first. A reaper deletes the namespaces that exist and the tags
+/// of those that do not, with [`delete`] and [`remove_owner_tag`].
+pub fn list_owned(owner: &str) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(OWNER_TAG_DIR) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        // A rename in flight.
+        .filter(|name| !name.contains(".tmp."))
+        .filter(|name| owner_of(name).ok().flatten().as_deref() == Some(owner))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Remove `name`'s owner tag, if it has one (#522). [`delete`] does this
+/// for a namespace it deletes; this is for a tag with no namespace.
+pub fn remove_owner_tag(name: &str) -> Result<()> {
+    match std::fs::remove_file(owner_tag_path(name)?) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 /// The EEXIST-shaped error [`create_path`] returns for an already-present
 /// path. Built as `ErrorKind::AlreadyExists` (rather than a stringly
 /// `InvalidMessage`) so callers can classify it with
@@ -1173,7 +1316,9 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
 ///
 /// See also [`delete_path`] to delete a netns at an arbitrary path.
 pub fn delete(name: &str) -> Result<()> {
-    delete_path(named_path(name)?)
+    delete_path(named_path(name)?)?;
+    // Its owner tag, if [`create_with`] wrote one (#522).
+    remove_owner_tag(name)
 }
 
 /// Delete a persistent network namespace at an arbitrary `path`.

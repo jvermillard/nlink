@@ -1362,6 +1362,28 @@ All notable changes to this project will be documented in this file.
     ifindexes), checked through `ip -d -j link`. It passes on iproute2
     6.15 and 6.1. It fails if the change sends only one attribute.
 
+- **Namespace creation options: an owner tag, and stale-marker reclaim
+  (#522).**
+  - **`create_with`.** `namespace::create_with(name, CreateOptions)` and
+    `Netns::create_with` create a named namespace as `create` does,
+    with two options.
+    - **`owner(tag)`** writes the owner to a sidecar under
+      `namespace::OWNER_TAG_DIR` (`/run/nlink/netns-owners`), before the
+      namespace is made. A crash in between leaves a tag with no
+      namespace, never an untagged namespace. A failed create removes the
+      tag.
+    - **`reclaim_stale(true)`** removes a stale marker in the name's
+      place: a `/run/netns` file nothing is mounted on. `create` refuses
+      such a marker. A live namespace is never reclaimed.
+  - **Reading and removing tags.** `namespace::owner_of(name)` reads a
+    tag, and `list_owned(owner)` lists the names tagged with an owner,
+    including those whose create was cut short. `remove_owner_tag(name)`
+    removes a tag.
+  - **Deleting.** `delete`, and so `Netns::delete`, removes the tag with
+    the namespace.
+  - **Tests.** Root tests cover the tag's life, and a stale marker
+    reclaimed next to a live namespace left alone.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
