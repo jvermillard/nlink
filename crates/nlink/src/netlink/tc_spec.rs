@@ -23,8 +23,8 @@ use super::{
     messages::TcMessage,
     psched,
     tc::{
-        ClsactConfig, FqCodelConfig, HtbQdiscConfig, InPlace, IngressConfig, NetemConfig,
-        PrioConfig, QdiscConfig, SfqConfig, TbfConfig,
+        ClsactConfig, DrrConfig, FqCodelConfig, HfscConfig, HtbQdiscConfig, InPlace,
+        IngressConfig, NetemConfig, PrioConfig, QdiscConfig, QfqConfig, SfqConfig, TbfConfig,
     },
     tc_handle::TcHandle,
 };
@@ -59,6 +59,13 @@ pub enum QdiscSpec {
     Sfq(SfqConfig),
     /// prio.
     Prio(PrioConfig),
+    /// HFSC: its classes are declared with
+    /// [`NetworkConfig::tc`](crate::netlink::config::NetworkConfig::tc).
+    Hfsc(HfscConfig),
+    /// DRR, which has no parameters of its own.
+    Drr(DrrConfig),
+    /// QFQ, which has no parameters of its own.
+    Qfq(QfqConfig),
     /// The ingress hook.
     Ingress,
     /// The clsact hooks.
@@ -84,8 +91,18 @@ from_config!(
     FqCodelConfig => FqCodel,
     TbfConfig => Tbf,
     SfqConfig => Sfq,
-    PrioConfig => Prio
+    PrioConfig => Prio,
+    HfscConfig => Hfsc,
+    DrrConfig => Drr,
+    QfqConfig => Qfq
 );
+
+/// A live HFSC qdisc's default class: `hfsc_dump_qdisc()` reports its
+/// `tc_hfsc_qopt` as the bare `TCA_OPTIONS` payload.
+fn hfsc_defcls(live: &TcMessage) -> Option<u16> {
+    let b = live.raw_options()?.get(..2)?;
+    Some(u16::from_ne_bytes([b[0], b[1]]))
+}
 
 /// fq_codel's smallest quantum: `fq_codel_change()` stores
 /// `max(256, quantum)`.
@@ -106,6 +123,9 @@ impl QdiscSpec {
             Self::Tbf(c) => Some(c),
             Self::Sfq(c) => Some(c),
             Self::Prio(c) => Some(c),
+            Self::Hfsc(c) => Some(c),
+            Self::Drr(c) => Some(c),
+            Self::Qfq(c) => Some(c),
             Self::Ingress => Some(&IngressConfig),
             Self::Clsact => Some(&ClsactConfig),
             Self::KernelDefault => None,
@@ -132,6 +152,9 @@ impl QdiscSpec {
         Some(match (live.kind()?, live.options()) {
             ("ingress", _) => Self::Ingress,
             ("clsact", _) => Self::Clsact,
+            ("hfsc", _) => Self::Hfsc(HfscConfig::new().default_class(hfsc_defcls(live)?)),
+            ("drr", _) => Self::Drr(DrrConfig::new()),
+            ("qfq", _) => Self::Qfq(QfqConfig::new()),
             (_, Some(O::Netem(o))) => Self::Netem(NetemConfig::from(&o)),
             (_, Some(O::FqCodel(o))) => Self::FqCodel(FqCodelConfig {
                 target: Some(us(o.target_us)),
@@ -258,7 +281,8 @@ impl QdiscSpec {
             (Self::Prio(cfg), Some(QdiscOptions::Prio(live))) => {
                 live.bands == cfg.bands && live.priomap == cfg.effective_priomap()
             }
-            (Self::Ingress | Self::Clsact, _) => true,
+            (Self::Hfsc(cfg), _) => hfsc_defcls(live) == Some(cfg.default_class),
+            (Self::Drr(_) | Self::Qfq(_) | Self::Ingress | Self::Clsact, _) => true,
             // No parser for this kind, or no options reported: compare the
             // bytes, which errs towards "differs".
             _ => self
@@ -558,6 +582,25 @@ mod tests {
         let echo = live("prio", Some(bytes(&prio(3))));
         assert!(prio(3).matches(&echo));
         assert!(!prio(4).matches(&echo));
+    }
+
+    #[test]
+    fn hfsc_drr_and_qfq_roots_compare_and_read_back() {
+        let at_1 = |mut m: TcMessage| {
+            m.header.tcm_handle = TcHandle::major_only(1).as_raw();
+            m
+        };
+        let hfsc = |class| QdiscSpec::from(HfscConfig::new().default_class(class));
+        let echo = at_1(live("hfsc", Some(bytes(&hfsc(0x20)))));
+        assert!(hfsc(0x20).matches(&echo));
+        assert!(!hfsc(0x10).matches(&echo));
+        assert_eq!(QdiscSpec::from_live(&echo), Some(hfsc(0x20)));
+        for spec in [QdiscSpec::from(DrrConfig::new()), QdiscSpec::from(QfqConfig::new())] {
+            let echo = at_1(live(spec.kind(), None));
+            assert!(spec.matches(&echo), "{}", spec.kind());
+            assert_eq!(QdiscSpec::from_live(&echo).as_ref(), Some(&spec));
+        }
+        assert!(!QdiscSpec::from(DrrConfig::new()).matches(&live("qfq", None)));
     }
 
     #[test]

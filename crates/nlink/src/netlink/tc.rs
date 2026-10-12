@@ -5751,7 +5751,7 @@ impl QdiscConfig for DsmarkConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrrConfig {}
 
 impl Default for DrrConfig {
@@ -5827,7 +5827,7 @@ impl QdiscConfig for DrrConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QfqConfig {}
 
 impl Default for QfqConfig {
@@ -7380,7 +7380,7 @@ impl QdiscConfig for TaprioConfig {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HfscConfig {
     /// Default class for unclassified packets.
     pub default_class: u16,
@@ -8254,6 +8254,11 @@ impl HfscClassConfig {
         self
     }
 
+    /// The real-time, link-sharing and upper-limit curves, as declared.
+    pub(crate) fn curves(&self) -> [Option<TcServiceCurve>; 3] {
+        [self.rsc, self.fsc, self.usc]
+    }
+
     /// Parse a simplified `tc(8)`-style HFSC class param token slice.
     ///
     /// Accepts the rate-only forms: `rt rate <rate>`, `ls rate <rate>`,
@@ -8402,6 +8407,11 @@ impl DrrClassConfig {
         self
     }
 
+    /// The declared quantum.
+    pub(crate) fn quantum_bytes(&self) -> Option<crate::util::Bytes> {
+        self.quantum
+    }
+
     /// Parse a `tc(8)`-style DRR class param token slice.
     ///
     /// DRR class accepts a single optional keyword: `quantum <bytes>`.
@@ -8529,6 +8539,11 @@ impl QfqClassConfig {
     /// builder is already usable as a `ClassConfig` without it.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// The declared weight and maximum packet length.
+    pub(crate) fn weight_lmax(&self) -> (Option<u32>, Option<crate::util::Bytes>) {
+        (self.weight, self.lmax)
     }
 
     /// Parse a `tc(8)`-style QFQ class param token slice.

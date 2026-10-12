@@ -2566,6 +2566,34 @@ All notable changes to this project will be documented in this file.
   - **TC trees.** A tree applied against the previous config's tree inverts
     to that one.
 
+- **TC trees take HFSC, DRR and QFQ classes and roots (#645).** Before this, a
+  declared tree could hold only HTB classes.
+  - **Classes.** `ClassSpec` gains `Hfsc`, `Drr` and `Qfq`, built from
+    `HfscClassConfig`, `DrrClassConfig` and `QfqClassConfig`.
+  - **Roots.** `QdiscSpec` gains `Hfsc`, `Drr` and `Qfq`, with
+    `QdiscBuilder::{hfsc, drr, qfq}`. `default_class` now sets HFSC's
+    default too, and HFSC's changes in place.
+  - **Comparison.** Each class is compared with what the kernel reports for
+    it. Some unset values aren't compared, because the kernel chooses them:
+    a DRR quantum, and a QFQ `lmax`, which are the device's MTU. A QFQ
+    weight left unset is compared as 1, because that's what the kernel
+    applies when a change doesn't send one.
+  - **Recreates.** A change can't drop an HFSC curve; the kernel keeps
+    every curve it isn't sent. So a class that drops one is deleted and
+    added again. A class that moved already was, and both now also take
+    along the classes under them, the leaf in them and their qdisc's
+    filters. Without that, a moved class with children was refused, and
+    its leaf didn't come back.
+  - **Validation.** It refuses:
+    - an HFSC class with neither a real-time nor a link-sharing curve;
+    - a DRR or QFQ class hung under another class;
+    - classes of two kinds under one qdisc;
+    - a class whose qdisc is declared as another kind.
+  - `ClassSpec` implements `ClassConfig`, as `QdiscSpec` implements
+    `QdiscConfig`.
+  - An undo puts a replaced HFSC, DRR or QFQ root back, since
+    `QdiscSpec::from_live` reads them.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

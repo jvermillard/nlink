@@ -717,9 +717,9 @@ the `Display` output) — purge is reachable only through the explicit
 ### TC trees
 
 A device's root and ingress qdiscs are declared with `qdisc`; what hangs
-under them — HTB classes, the leaf qdisc in a class, filters with their
-actions, and the redirect of everything a device receives to an IFB — is
-declared with `tc`. The tree is owned: under a qdisc it declares classes
+under them — HTB, HFSC, DRR or QFQ classes, the leaf qdisc in a class,
+filters with their actions, and the redirect of everything a device
+receives to an IFB — is declared with `tc`. The tree is owned: under a qdisc it declares classes
 for, and at a parent it hangs filters off, what it does not declare is
 removed. A link recreated for a kind change gets its tree back.
 
