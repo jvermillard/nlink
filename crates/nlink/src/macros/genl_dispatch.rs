@@ -101,7 +101,7 @@ where
     /// `#[genl_family]`'s `resolve_async` impl, parsing
     /// `CTRL_ATTR_MCAST_GROUPS` out of `CTRL_CMD_GETFAMILY`).
     /// Returns
-    /// [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound) when the named group isn't
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) when the named group isn't
     /// registered on this kernel —
     /// e.g., asking for `"monitor"` on a kernel too old to ship
     /// that group, or a binary/kernel mismatch.
@@ -133,9 +133,7 @@ where
         let id = self
             .state()
             .mcast_group(name)
-            .ok_or_else(|| crate::Error::from(crate::ErrorDetail::FamilyNotFound {
-                name: ::std::format!("{}::{}", F::NAME, name),
-            }))?;
+            .ok_or_else(|| crate::Error::family_not_found(::std::format!("{}::{}", F::NAME, name)))?;
         self.socket().add_membership(id)?;
         Ok(())
     }

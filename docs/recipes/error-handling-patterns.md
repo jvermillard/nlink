@@ -57,7 +57,8 @@ match conn.del_qdisc("eth0", TcHandle::ROOT).await {
 
 Predicate list (see [`error.rs`][error-rs] for the full set):
 
-- `is_not_found` (ENOENT, plus typed `QdiscNotFound` etc.)
+- `is_not_found` (ENOENT, plus `ErrorDetail::NotFound`, whose object says
+  what was missing)
 - `is_already_exists` (EEXIST)
 - `is_busy` (EBUSY)
 - `is_invalid_argument` (EINVAL)

@@ -411,7 +411,7 @@ impl PerPeerImpairer {
         }
         match conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await {
             Ok(()) => Ok(()),
-            Err(e) if e.is_not_found() || matches!(e.detail(), crate::netlink::ErrorDetail::QdiscNotFound { .. }) => Ok(()),
+            Err(e) if e.is_not_found() => Ok(()),
             Err(e) => Err(e),
         }
     }

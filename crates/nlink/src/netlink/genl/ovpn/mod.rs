@@ -93,7 +93,7 @@ pub use types::{
 /// Constructed via [`Connection::<Ovpn>::new_async()`][Connection]
 /// — the family ID is resolved against the kernel at connection
 /// time. Returns
-/// [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound) on
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) on
 /// kernels without OVPN support (kernel < 6.16 or `ovpn` module
 /// not loaded).
 ///

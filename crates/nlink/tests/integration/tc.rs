@@ -2914,7 +2914,7 @@ async fn the_tc_verbs_do_what_their_table_says() -> Result<()> {
     // A verb's error names its slot (#718).
     let slot = |kind: Option<&str>| nlink::ErrorObject::Qdisc {
         dev: "dummy0".into(),
-        parent: "root".into(),
+        parent: Some("root".into()),
         kind: kind.map(str::to_string),
     };
     assert_eq!(missing.object(), Some(&slot(Some("netem"))), "{missing}");

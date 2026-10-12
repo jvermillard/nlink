@@ -202,9 +202,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     let dummy_ifindex = route
         .get_link_by_name("dummy0")
         .await?
-        .ok_or_else(|| nlink::Error::from(nlink::ErrorDetail::InterfaceNotFound {
-            name: "dummy0".to_string(),
-        }))?
+        .ok_or_else(|| nlink::Error::interface_not_found("dummy0"))?
         .ifindex();
 
     println!();

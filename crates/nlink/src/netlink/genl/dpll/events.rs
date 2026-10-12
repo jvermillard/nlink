@@ -133,7 +133,7 @@ impl crate::netlink::Connection<Dpll> {
     /// yields a stream of [`DpllEvent`] values.
     ///
     /// Returns
-    /// [`ErrorDetail::FamilyNotFound`](crate::ErrorDetail::FamilyNotFound)
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound)
     /// (with the `"dpll::monitor"` name) when the kernel doesn't
     /// register the group — typically a kernel-too-old / DPLL-
     /// driver-not-loaded mismatch.

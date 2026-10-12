@@ -468,7 +468,7 @@ pub mod __rt {
     ///
     /// Emits `CTRL_CMD_GETFAMILY` with the family name and parses
     /// the response's `CTRL_ATTR_FAMILY_ID`. Returns
-    /// `Error::FamilyNotFound` if the kernel reports the family
+    /// a not-found error ([`ErrorObject::GenlFamily`](crate::ErrorObject::GenlFamily)) if the kernel reports the family
     /// doesn't exist (typically: required kernel module isn't
     /// loaded, or kernel is too old for the feature).
     ///
@@ -544,9 +544,7 @@ pub mod __rt {
 
         match family_id {
             Some(id) => Ok((id, mcast_groups)),
-            None => Err(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
-                name: name.to_string(),
-            })),
+            None => Err(Error::family_not_found(name)),
         }
     }
 
@@ -572,9 +570,7 @@ pub mod __rt {
                 err.warn_if_ack_warns(header.nlmsg_flags, payload);
                 if !err.is_ack() {
                     if err.error == -libc::ENOENT {
-                        return Err(Error::from(crate::netlink::ErrorDetail::FamilyNotFound {
-                            name: name.to_string(),
-                        }));
+                        return Err(Error::family_not_found(name));
                     }
                     return Err(err.to_error(header.nlmsg_flags, payload));
                 }
@@ -1430,7 +1426,7 @@ mod tests {
         let err = __rt::resolve_genl_family(&socket, "no-such-family")
             .await
             .expect_err("unknown family");
-        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::FamilyNotFound { .. }), "{err}");
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::NotFound { object: crate::ErrorObject::GenlFamily { .. } }), "{err}");
         assert_eq!(socket.try_recv_msg().expect("recv"), None);
     }
 }

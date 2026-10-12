@@ -562,8 +562,8 @@ match conn.del_qdisc("eth0", TcHandle::ROOT).await {
 }
 
 // Typed error variants for common not-found cases
-// del_link/set_link_up/down promote ENOENT to InterfaceNotFound
-// change_qdisc/del_qdisc promote ENOENT to QdiscNotFound
+// del_link/set_link_up/down promote ENOENT to a not-found error of the link,
+// change_qdisc/del_qdisc to one of the qdisc: `err.object()` says which
 let netem = NetemConfig::new().delay(Duration::from_millis(50)).build();
 match conn.change_qdisc("eth0", TcHandle::ROOT, netem.clone()).await {
     Ok(()) => {}

@@ -312,7 +312,10 @@ async fn a_declared_link_that_does_not_exist_is_reported() -> nlink::Result<()> 
     assert!(diff.to_string().contains("! link dO (missing"), "{diff}");
     let err = cfg.apply(&conn).await.expect_err("the apply is refused");
     assert!(
-        matches!(err.detail(), nlink::ErrorDetail::InterfaceNotFound { name } if name == "dO"),
+        matches!(
+            err.detail(),
+            nlink::ErrorDetail::NotFound { object: nlink::ErrorObject::Link { name } } if name == "dO"
+        ),
         "{err}"
     );
     assert!(

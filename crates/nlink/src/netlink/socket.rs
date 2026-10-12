@@ -226,7 +226,7 @@ impl NetlinkSocket {
     /// # }
     /// ```
     pub fn new_in_namespace_path<P: AsRef<Path>>(protocol: Protocol, ns_path: P) -> Result<Self> {
-        // #184: ENOENT → typed NamespaceNotFound (is_not_found()), other
+        // #184: ENOENT → a namespace not-found error (is_not_found()), other
         // errors keep their errno — never a stringly InvalidMessage.
         let ns_file = File::open(ns_path.as_ref())
             .map_err(|e| super::namespace::namespace_open_error(ns_path.as_ref(), e))?;

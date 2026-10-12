@@ -166,7 +166,7 @@ impl QdiscAt<'_> {
     fn object(&self, kind: Option<&str>) -> ErrorObject {
         ErrorObject::Qdisc {
             dev: self.dev.to_string(),
-            parent: self.parent.handle().to_string(),
+            parent: Some(self.parent.handle().to_string()),
             kind: kind.map(str::to_string),
         }
     }
@@ -192,7 +192,7 @@ impl QdiscAt<'_> {
         self.conn
             .add_qdisc_by_index_full(ifindex, self.parent.handle(), self.handle, spec)
             .await
-            .map_err(|e| e.with_object(object))
+            .map_err(|e| e.refine_object(object))
     }
 
     /// Change the live qdisc's parameters to `spec`'s, in place.
@@ -203,15 +203,12 @@ impl QdiscAt<'_> {
     /// is refused — [`replace`](Self::replace) does those.
     pub async fn change(&self, spec: impl QdiscConfig) -> Result<()> {
         let object = self.object(Some(spec.kind()));
-        self.change_unnamed(spec).await.map_err(|e| e.with_object(object))
+        self.change_unnamed(spec).await.map_err(|e| e.refine_object(object))
     }
 
     async fn change_unnamed(&self, spec: impl QdiscConfig) -> Result<()> {
         let Some(live) = self.get().await? else {
-            return Err(Error::from(crate::netlink::ErrorDetail::QdiscNotFound {
-                kind: spec.kind().to_string(),
-                interface: self.dev.to_string(),
-            }));
+            return Err(Error::not_found(self.object(Some(spec.kind()))));
         };
         if live.kind() != Some(spec.kind()) {
             return Err(Error::not_supported(format!(
@@ -243,7 +240,7 @@ impl QdiscAt<'_> {
         self.conn
             .replace_qdisc_by_index_full(ifindex, self.parent.handle(), self.handle, spec)
             .await
-            .map_err(|e| e.with_object(object))
+            .map_err(|e| e.refine_object(object))
     }
 
     /// Make the slot hold `spec`: nothing when the live qdisc already is
@@ -269,7 +266,7 @@ impl QdiscAt<'_> {
         self.conn
             .del_qdisc_by_index_full(ifindex, self.parent.handle(), self.handle)
             .await
-            .map_err(|e| e.with_object(self.object(None)))
+            .map_err(|e| e.refine_object(self.object(None)))
     }
 
     /// Delete the qdisc in the slot only if it is a `kind`; the kernel
@@ -279,7 +276,7 @@ impl QdiscAt<'_> {
         self.conn
             .del_qdisc_kind_by_index(ifindex, self.parent.handle(), self.handle, kind)
             .await
-            .map_err(|e| e.with_object(self.object(Some(kind))))
+            .map_err(|e| e.refine_object(self.object(Some(kind))))
     }
 }
 

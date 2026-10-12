@@ -134,7 +134,7 @@ impl Netns {
     ///
     /// # Errors
     ///
-    /// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (`is_not_found()`) when there is no
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (`is_not_found()`) when there is no
     /// live namespace by that name: no marker, or a stale marker with no
     /// mount behind it.
     pub fn open(name: &str) -> Result<Self> {
@@ -149,7 +149,7 @@ impl Netns {
     ///
     /// # Errors
     ///
-    /// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) when nothing is at `path`, and an
+    /// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) when nothing is at `path`, and an
     /// invalid-argument error when it is not a network namespace.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();

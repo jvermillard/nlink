@@ -340,7 +340,7 @@ fn named_path(name: &str) -> Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -420,7 +420,7 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -465,7 +465,7 @@ pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -487,16 +487,14 @@ pub fn open(name: &str) -> Result<NamespaceFd> {
 }
 
 /// Map a failed open of a namespace path to a classifiable error (#184):
-/// ENOENT becomes `Error::NamespaceNotFound` — matching `is_not_found()`
+/// ENOENT becomes a namespace not-found error — matching `is_not_found()`
 /// and carrying the path in `name`, the same shape [`delete_path`] uses —
 /// and everything else passes through as `Error::from`, preserving the raw
 /// errno so `is_permission_denied()` & co. keep working. Never wrap these
 /// opens in stringly `InvalidMessage`: it defeats every recovery predicate.
 pub(crate) fn namespace_open_error(path: &Path, e: std::io::Error) -> Error {
     if e.kind() == std::io::ErrorKind::NotFound {
-        Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
-            name: path.display().to_string(),
-        })
+        Error::namespace_not_found(path.display().to_string())
     } else {
         Error::from(e)
     }
@@ -506,7 +504,7 @@ pub(crate) fn namespace_open_error(path: &Path, e: std::io::Error) -> Error {
 ///
 /// # Errors
 ///
-/// Returns [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) if the path doesn't exist
+/// Returns [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) if the path doesn't exist
 /// (matchable via [`Error::is_not_found`]); other open failures surface
 /// as [`Error::from`] with their errno intact (e.g. for
 /// [`Error::is_permission_denied`]).
@@ -575,7 +573,7 @@ impl AsFd for NamespaceFd {
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -601,7 +599,7 @@ pub fn enter(name: &str) -> Result<NamespaceGuard> {
 ///
 /// # Errors
 ///
-/// Returns [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) if the path doesn't exist; other
+/// Returns [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) if the path doesn't exist; other
 /// failures (open or `setns`) surface as [`Error::from`] with errno intact.
 pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
     // Save the current namespace
@@ -782,7 +780,7 @@ pub fn is_namespace(name: &str) -> bool {
 /// Every by-name entry point (`spawn*`, `connection_for*`, `open`, `enter`,
 /// the sysctl helpers) funnels through here so that a **stale marker** —
 /// the empty file `ip netns add` leaves behind once its nsfs bind-mount is
-/// gone, after a crash or a bare `umount` — is `Error::NamespaceNotFound`,
+/// gone, after a crash or a bare `umount` — is a namespace not-found error,
 /// the variant `is_not_found()` matches and callers reconcile on. Gating on
 /// `Path::exists()` let the marker through, and the failure then surfaced
 /// from `setns(2)` as an `EINVAL` nothing downstream recognised as "the
@@ -863,9 +861,7 @@ fn live_path_in(run_dir: &Path, ns_name: &str) -> Result<PathBuf> {
             "stale ip-netns marker: file present but no namespace mounted over it"
         );
     }
-    Err(Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
-        name: ns_name.to_string(),
-    }))
+    Err(Error::namespace_not_found(ns_name))
 }
 
 /// Create a named network namespace.
@@ -1326,8 +1322,9 @@ pub fn delete(name: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if:
-/// - The path doesn't exist — `Error::NamespaceNotFound`, whose `name` field
-///   carries the path string for path-based deletes.
+/// - The path doesn't exist — a not-found error whose
+///   [`ErrorObject::Namespace`](crate::ErrorObject::Namespace) carries the
+///   path string for path-based deletes.
 /// - The unmount fails with anything other than `EINVAL` (which covers the
 ///   "not a mount point" case — a stale marker with no live bind mount).
 /// - The marker file cannot be removed.
@@ -1335,9 +1332,7 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
     let ns_path = path.as_ref();
 
     if !ns_path.exists() {
-        return Err(Error::from(crate::netlink::ErrorDetail::NamespaceNotFound {
-            name: ns_path.display().to_string(),
-        }));
+        return Err(Error::namespace_not_found(ns_path.display().to_string()));
     }
     // A namespace is a file — the nsfs inode bind-mounted over a marker, or
     // a stale marker. Lazily unmounting a directory detaches everything
@@ -1542,7 +1537,7 @@ where
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1569,7 +1564,7 @@ pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1595,7 +1590,7 @@ pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1670,7 +1665,7 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -1956,7 +1951,7 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 ///
 /// # Errors
 ///
-/// [`ErrorDetail::NamespaceNotFound`](crate::ErrorDetail::NamespaceNotFound) (matched by `is_not_found()`) unless
+/// [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound) (matched by `is_not_found()`) unless
 /// `/var/run/netns/<name>` is a live namespace — a stale marker with no
 /// mount behind it counts as not found (#348).
 ///
@@ -2383,7 +2378,7 @@ mod tests {
     }
 
     /// #348 — a stale `ip netns` marker (plain file, no nsfs mount over
-    /// it) resolves to `NamespaceNotFound`, not to a path that `setns`
+    /// it) resolves to a namespace not-found error, not to a path that `setns`
     /// will later refuse with EINVAL.
     #[test]
     fn live_path_in_rejects_a_plain_file_marker() {
@@ -2396,7 +2391,7 @@ mod tests {
 
         let err = stale.expect_err("a plain file is not a namespace");
         assert!(err.is_not_found(), "got unclassifiable error: {err}");
-        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::NamespaceNotFound { name } if name == "stale"));
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::NotFound { object: crate::ErrorObject::Namespace { name } } if name == "stale"));
         let err = missing.expect_err("an absent marker is not a namespace");
         assert!(err.is_not_found(), "got unclassifiable error: {err}");
     }
