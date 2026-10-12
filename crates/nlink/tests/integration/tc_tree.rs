@@ -6,8 +6,11 @@ use std::net::SocketAddr;
 
 use nlink::netlink::config::{ApplyOptions, NetworkConfig, QdiscBuilder};
 use nlink::netlink::filter::{FlowerFilter, MatchallFilter};
-use nlink::netlink::tc::{FqCodelConfig, HtbClassConfig, SfqConfig};
-use nlink::{EthProto, FilterPriority, Percent, Rate, TcHandle};
+use nlink::netlink::tc::{
+    DrrClassConfig, FqCodelConfig, HfscClassConfig, HtbClassConfig, QfqClassConfig, SfqConfig,
+    TcServiceCurve,
+};
+use nlink::{Bytes, EthProto, FilterPriority, Percent, Rate, TcHandle};
 
 use crate::common::TestNamespace;
 use crate::common::converge::assert_transition;
@@ -220,6 +223,159 @@ async fn a_tree_changes_in_place_and_drops_what_it_no_longer_declares() -> nlink
         let port = if i == 0 { "22" } else { "80" };
         if word_after(&flower, "dst_port") != Some(port) {
             return Err(format!("the flower should match port {port}: {flower}"));
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The line `tc class show` prints for `classid` on `dev`.
+fn class_line(ns: &TestNamespace, dev: &str, classid: &str) -> Result<String, String> {
+    let text = tc_text(ns, "class", dev, &[])?;
+    text.lines()
+        .find(|l| l.split_whitespace().nth(2) == Some(classid))
+        .map(str::to_string)
+        .ok_or_else(|| format!("no class {classid}: {text}"))
+}
+
+/// HFSC trees changed A→B (#645): a curve changed in place, a curve
+/// dropped — which a change cannot do, so the class goes and comes back
+/// with the classes, leaf and filters it takes with it — and the default
+/// class changed in place.
+#[tokio::test]
+async fn an_hfsc_tree_changes_curves_and_drops_one() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_hfsc", "sch_sfq", "cls_matchall");
+
+    let tree = |default: u32, ul: bool, rt: Rate, with_20: bool| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q: QdiscBuilder| q.hfsc().default_class(default))
+            .tc("d0", |t| {
+                let top = HfscClassConfig::new().ls_rate(Rate::mbit(100));
+                let top = if ul { top.ul_rate(Rate::mbit(100)) } else { top };
+                let t = t
+                    .class(h(1, 0), h(1, 1), top)
+                    .class(
+                        h(1, 1),
+                        h(1, 0x10),
+                        HfscClassConfig::new()
+                            .rt_curve(TcServiceCurve::two_slope(
+                                Rate::mbit(20).as_u32_bytes_per_sec_saturating(),
+                                5000,
+                                rt.as_u32_bytes_per_sec_saturating(),
+                            ))
+                            .ls_rate(Rate::mbit(60)),
+                    );
+                if !with_20 {
+                    return t;
+                }
+                t.class(h(1, 1), h(1, 0x20), HfscClassConfig::new().ls_rate(Rate::mbit(40)))
+                    .leaf(h(1, 0x20), h(0x20, 0), SfqConfig::new())
+                    .filter(
+                        h(1, 0),
+                        FilterPriority::new(2),
+                        EthProto::IP,
+                        MatchallFilter::new().classid(h(1, 0x20)),
+                    )
+            })
+    };
+    let steps = [
+        tree(0x20, true, Rate::mbit(10), true),
+        // 1:1 drops its upper limit: the subtree is made again.
+        tree(0x20, false, Rate::mbit(5), true),
+        tree(0x10, false, Rate::mbit(5), false),
+    ];
+    let ns = TestNamespace::new("tt-hfsc")?;
+    assert_transition(&ns, &steps, false, async |i, _conn| {
+        let classes = class_handles(&ns, "d0")?;
+        let want: &[&str] = if i < 2 { &["1:", "1:1", "1:10", "1:20"] } else { &["1:", "1:1", "1:10"] };
+        if classes != want {
+            return Err(format!("classes {classes:?}, want {want:?}"));
+        }
+        let top = class_line(&ns, "d0", "1:1")?;
+        if (word_after(&top, "ul").is_some()) != (i == 0) {
+            return Err(format!("1:1's upper limit at step {i}: {top}"));
+        }
+        let rt = class_line(&ns, "d0", "1:10")?;
+        let m2 = rt.split(" ls ").next().and_then(|rt| word_after(rt, "m2"));
+        let want_m2 = if i == 0 { "10Mbit" } else { "5Mbit" };
+        if m2 != Some(want_m2) {
+            return Err(format!("1:10's real-time m2, want {want_m2}: {rt}"));
+        }
+        let qdisc = tc_text(&ns, "qdisc", "d0", &[])?;
+        let want_default = if i < 2 { "20" } else { "10" };
+        if word_after(&qdisc, "default") != Some(want_default) {
+            return Err(format!("default class, want {want_default}: {qdisc}"));
+        }
+        if i < 2 {
+            // `tc -j` prints an hfsc root's options as invalid JSON.
+            let leaf = qdisc
+                .lines()
+                .find(|l| word_after(l, "parent") == Some("1:20"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .map(str::to_string);
+            let filters = filters_at(&ns, "d0", "1:")?;
+            if leaf.as_deref() != Some("sfq") || filters != [(2, "matchall".to_string())] {
+                return Err(format!("1:20's leaf {leaf:?} and the filters {filters:?}"));
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// DRR and QFQ trees changed A→B (#645): a quantum, a weight and an lmax
+/// changed in place, a QFQ weight dropped back to the kernel's 1, and a
+/// class removed.
+#[tokio::test]
+async fn drr_and_qfq_trees_change_in_place() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_drr", "sch_qfq");
+
+    let drr = |q1: u64, with_2: bool| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q: QdiscBuilder| q.drr())
+            .tc("d0", |t| {
+                let t = t.class(h(1, 0), h(1, 1), DrrClassConfig::new().quantum(Bytes::new(q1)));
+                if with_2 { t.class(h(1, 0), h(1, 2), DrrClassConfig::new()) } else { t }
+            })
+    };
+    let qfq = |w1: u32, w2: Option<u32>, lmax: u64| {
+        NetworkConfig::new()
+            .link("d1", |l| l.dummy().up())
+            .qdisc("d1", |q: QdiscBuilder| q.qfq())
+            .tc("d1", |t| {
+                let two = QfqClassConfig::new().lmax(Bytes::new(lmax));
+                t.class(h(1, 0), h(1, 1), QfqClassConfig::new().weight(w1))
+                    .class(h(1, 0), h(1, 2), w2.map_or(two.clone(), |w| two.weight(w)))
+            })
+    };
+    let ns = TestNamespace::new("tt-drr")?;
+    assert_transition(&ns, &[drr(3000, true), drr(6000, true), drr(6000, false)], false, async |i, _conn| {
+        let classes = class_handles(&ns, "d0")?;
+        let want: &[&str] = if i < 2 { &["1:1", "1:2"] } else { &["1:1"] };
+        let line = class_line(&ns, "d0", "1:1")?;
+        let quantum = if i == 0 { "3000b" } else { "6000b" };
+        if classes != want || word_after(&line, "quantum") != Some(quantum) {
+            return Err(format!("classes {classes:?} (want {want:?}), 1:1 quantum {quantum}: {line}"));
+        }
+        Ok(())
+    })
+    .await?;
+
+    let ns = TestNamespace::new("tt-qfq")?;
+    let steps = [qfq(10, Some(20), 2048), qfq(5, None, 4096)];
+    assert_transition(&ns, &steps, false, async |i, _conn| {
+        let one = class_line(&ns, "d1", "1:1")?;
+        let two = class_line(&ns, "d1", "1:2")?;
+        let want = if i == 0 { ("10", "20", "2048") } else { ("5", "1", "4096") };
+        if word_after(&one, "weight") != Some(want.0)
+            || word_after(&two, "weight") != Some(want.1)
+            || word_after(&two, "maxpkt") != Some(want.2)
+        {
+            return Err(format!("want weights {want:?}: {one} / {two}"));
         }
         Ok(())
     })

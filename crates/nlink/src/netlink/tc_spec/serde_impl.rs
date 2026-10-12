@@ -20,7 +20,8 @@ use super::QdiscSpec;
 use crate::{
     netlink::{
         tc::{
-            FqCodelConfig, HtbQdiscConfig, NetemConfig, NetemSlot, PrioConfig, SfqConfig, TbfConfig,
+            DrrConfig, FqCodelConfig, HfscConfig, HtbQdiscConfig, NetemConfig, NetemSlot,
+            PrioConfig, QfqConfig, SfqConfig, TbfConfig,
         },
         tc_options::NetemLossModel,
     },
@@ -44,6 +45,9 @@ pub(super) enum Repr {
     Tbf(TbfRepr),
     Sfq(SfqRepr),
     Prio(PrioRepr),
+    Hfsc(HfscRepr),
+    Drr,
+    Qfq,
     Ingress,
     Clsact,
     KernelDefault,
@@ -524,6 +528,16 @@ impl From<PrioRepr> for PrioConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct HfscRepr {
+    /// The minor of the class unclassified traffic goes to; without one,
+    /// it is dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_class: Option<u16>,
+}
+
 impl From<&QdiscSpec> for Repr {
     fn from(s: &QdiscSpec) -> Self {
         match s {
@@ -533,6 +547,11 @@ impl From<&QdiscSpec> for Repr {
             QdiscSpec::Tbf(c) => Repr::Tbf(c.into()),
             QdiscSpec::Sfq(c) => Repr::Sfq(c.into()),
             QdiscSpec::Prio(c) => Repr::Prio(c.into()),
+            QdiscSpec::Hfsc(c) => Repr::Hfsc(HfscRepr {
+                default_class: (c.default_class != 0).then_some(c.default_class),
+            }),
+            QdiscSpec::Drr(_) => Repr::Drr,
+            QdiscSpec::Qfq(_) => Repr::Qfq,
             QdiscSpec::Ingress => Repr::Ingress,
             QdiscSpec::Clsact => Repr::Clsact,
             QdiscSpec::KernelDefault => Repr::KernelDefault,
@@ -550,6 +569,9 @@ impl TryFrom<Repr> for QdiscSpec {
             Repr::Tbf(r) => QdiscSpec::Tbf(r.try_into()?),
             Repr::Sfq(r) => QdiscSpec::Sfq(r.try_into()?),
             Repr::Prio(r) => QdiscSpec::Prio(r.into()),
+            Repr::Hfsc(r) => QdiscSpec::Hfsc(HfscConfig::new().default_class(r.default_class.unwrap_or(0))),
+            Repr::Drr => QdiscSpec::Drr(DrrConfig::new()),
+            Repr::Qfq => QdiscSpec::Qfq(QfqConfig::new()),
             Repr::Ingress => QdiscSpec::Ingress,
             Repr::Clsact => QdiscSpec::Clsact,
             Repr::KernelDefault => QdiscSpec::KernelDefault,

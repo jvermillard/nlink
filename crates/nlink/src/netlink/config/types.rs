@@ -701,6 +701,26 @@ impl NetworkConfig {
             for problem in t.problems() {
                 errors.push(ValidationErrorInfo::new(format!("tc.{}", t.dev), problem));
             }
+            // A class is of its qdisc's kind (#645).
+            for c in t.classes() {
+                let qdisc = self.qdiscs.iter().find(|q| {
+                    q.dev == t.dev && q.effective_handle().map(|h| h.major()) == Some(c.id.major())
+                });
+                if let Some(q) = qdisc
+                    && q.qdisc_type.kind() != c.spec.kind()
+                {
+                    errors.push(ValidationErrorInfo::new(
+                        format!("tc.{}", t.dev),
+                        format!(
+                            "class {} is {}, but its qdisc {} is {}",
+                            c.id,
+                            c.spec.kind(),
+                            crate::TcHandle::major_only(c.id.major()),
+                            q.qdisc_type.kind()
+                        ),
+                    ));
+                }
+            }
         }
         // With strict mode on, a table is one VRF's (#680).
         if self.vrf_strict_mode == Some(true) {
@@ -1256,8 +1276,8 @@ impl NetworkConfig {
         self
     }
 
-    /// Declare `dev`'s TC tree (#514): HTB classes, the leaf qdisc in a
-    /// class, and filters with their actions. See
+    /// Declare `dev`'s TC tree (#514): HTB, HFSC, DRR or QFQ classes, the
+    /// leaf qdisc in a class, and filters with their actions. See
     /// [`TcBuilder`](super::TcBuilder) for what it declares; the device's
     /// root and ingress/clsact qdiscs are declared with
     /// [`qdisc`](Self::qdisc), before this when the tree uses a hook.
@@ -5610,15 +5630,45 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set HTB default class.
+    /// Set the default class of an HTB or HFSC qdisc: the minor
+    /// unclassified traffic goes to.
     ///
-    /// Fixed for the qdisc's lifetime: the kernel's htb has no change
-    /// operation, so `apply` refuses to edit it on a live HTB root
+    /// HTB's is fixed for the qdisc's lifetime: the kernel's htb has no
+    /// change operation, so `apply` refuses to edit it on a live HTB root
     /// (`Error::NotSupported`) rather than delete the root and every class
-    /// and filter under it. Delete the qdisc yourself to change it.
+    /// and filter under it. Delete the qdisc yourself to change it. HFSC's
+    /// changes in place.
     pub fn default_class(mut self, class: u32) -> Self {
-        with_kind!(self, "default_class", "htb", Htb, |c| c.default_class =
-            class)
+        match (&mut self.qdisc_type, u16::try_from(class)) {
+            (Some(QdiscSpec::Htb(c)), _) => c.default_class = class,
+            (Some(QdiscSpec::Hfsc(c)), Ok(class)) => c.default_class = class,
+            (Some(QdiscSpec::Hfsc(_)), Err(_)) => self.errors.push(format!(
+                "`.default_class({class:#x})`: a class minor is 16 bits"
+            )),
+            _ => self.wrong_kind("default_class", "htb, hfsc"),
+        }
+        self
+    }
+
+    /// Configure as HFSC qdisc; its classes are declared with
+    /// [`NetworkConfig::tc`].
+    pub fn hfsc(mut self) -> Self {
+        self.qdisc_type = Some(QdiscSpec::Hfsc(crate::netlink::tc::HfscConfig::new()));
+        self
+    }
+
+    /// Configure as DRR qdisc; its classes are declared with
+    /// [`NetworkConfig::tc`].
+    pub fn drr(mut self) -> Self {
+        self.qdisc_type = Some(QdiscSpec::Drr(crate::netlink::tc::DrrConfig::new()));
+        self
+    }
+
+    /// Configure as QFQ qdisc; its classes are declared with
+    /// [`NetworkConfig::tc`].
+    pub fn qfq(mut self) -> Self {
+        self.qdisc_type = Some(QdiscSpec::Qfq(crate::netlink::tc::QfqConfig::new()));
+        self
     }
 
     /// Configure as fq_codel qdisc.
@@ -6426,6 +6476,27 @@ mod serde_roundtrip_tests {
             ),
             "{json}"
         );
+        let back = NetworkConfig::from_json_str(&json).unwrap();
+        assert_eq!(back.qdiscs()[0].qdisc_type, cfg.qdiscs()[0].qdisc_type);
+    }
+
+    /// #645 — HFSC's default class, and the roots with no parameters of
+    /// their own, are written and read back.
+    #[test]
+    fn hfsc_drr_and_qfq_roots_read_back() {
+        let cfg = NetworkConfig::new()
+            .qdisc("eth0", |q| q.hfsc().default_class(0x20))
+            .qdisc("eth1", |q| q.drr())
+            .qdisc("eth2", |q| q.qfq());
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        for want in [
+            r#""hfsc":{"default_class":32}"#,
+            r#""qdisc-type":"drr""#,
+            r#""qdisc-type":"qfq""#,
+        ] {
+            assert!(json.contains(want), "{want} missing from {json}");
+        }
         let back = NetworkConfig::from_json_str(&json).unwrap();
         assert_eq!(back.qdiscs()[0].qdisc_type, cfg.qdiscs()[0].qdisc_type);
     }

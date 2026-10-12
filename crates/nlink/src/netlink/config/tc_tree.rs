@@ -1,8 +1,8 @@
 //! Declarative traffic-control trees (#514).
 //!
 //! [`NetworkConfig::tc`](super::NetworkConfig::tc) declares, per device,
-//! what hangs under its qdiscs: HTB classes, the leaf qdisc in a class,
-//! and filters with their actions — and, through
+//! what hangs under its qdiscs: HTB, HFSC, DRR or QFQ classes (#645), the
+//! leaf qdisc in a class, and filters with their actions — and, through
 //! [`TcBuilder::redirect_ingress_to`], the redirect of everything a device
 //! receives to an IFB, for shaping inbound traffic. The root and
 //! ingress/clsact qdiscs themselves are declared with
@@ -13,7 +13,10 @@
 //! device that it does not declare — filters only at the parents the tree
 //! uses. A recreate of the device, which destroys its tree, no longer
 //! refuses for the classes and filters declared here: the apply puts them
-//! back, with a redirect's target resolved again by name.
+//! back, with a redirect's target resolved again by name. A class that
+//! cannot become its declaration in place — one that moved, or an HFSC
+//! class that drops a curve — is deleted and added again, and so are the
+//! classes under it, the leaf in it and its qdisc's filters.
 //!
 //! ```no_run
 //! # async fn example() -> nlink::Result<()> {
@@ -52,7 +55,10 @@ use crate::netlink::{
     filter::{FilterConfig, FlowerFilter, FwFilter, MatchallFilter, U32Filter},
     messages::{LinkMessage, TcMessage},
     protocol::Route,
-    tc::{ClassConfig, HtbClassConfig},
+    tc::{
+        ClassConfig, DrrClassConfig, HfscClassConfig, HtbClassConfig, QfqClassConfig,
+        TcServiceCurve,
+    },
     tc_handle::{FilterPriority, TcHandle},
     tc_spec::QdiscSpec,
 };
@@ -143,6 +149,53 @@ impl DeclaredTc {
                     c.id, c.parent
                 ));
             }
+            let kind = c.spec.kind();
+            if let Some(other) = self
+                .classes
+                .iter()
+                .find(|o| o.id.major() == c.id.major() && o.spec.kind() != kind)
+            {
+                out.push(format!(
+                    "class {} is {kind}, but class {} under the same qdisc is {}",
+                    c.id,
+                    other.id,
+                    other.spec.kind()
+                ));
+            }
+            if let Some(l) = self
+                .leaves
+                .iter()
+                .find(|l| l.handle.major() == c.id.major() && l.spec.kind() != kind)
+            {
+                out.push(format!(
+                    "class {} is {kind}, but its qdisc {} is {}",
+                    c.id,
+                    l.handle,
+                    l.spec.kind()
+                ));
+            }
+            match &c.spec {
+                // `hfsc_change_class()` refuses a new class with neither.
+                ClassSpec::Hfsc(h)
+                    if hfsc_curve(h.curves()[0]).is_none() && hfsc_curve(h.curves()[1]).is_none() =>
+                {
+                    out.push(format!(
+                        "class {}: an hfsc class needs a real-time or a link-sharing curve",
+                        c.id
+                    ));
+                }
+                // The kernel takes no parent for these, and reports the
+                // qdisc as every class's.
+                ClassSpec::Drr(_) | ClassSpec::Qfq(_) if c.parent.minor() != 0 => {
+                    out.push(format!(
+                        "class {}: {kind} classes are flat; its parent is the qdisc ({}), not {}",
+                        c.id,
+                        TcHandle::major_only(c.id.major()),
+                        c.parent
+                    ));
+                }
+                _ => {}
+            }
         }
         let mut seen = std::collections::HashSet::new();
         for l in &self.leaves {
@@ -196,31 +249,95 @@ pub struct DeclaredClass {
     pub spec: ClassSpec,
 }
 
-/// A class's kind and parameters.
+/// A class's kind and parameters: the kind of the qdisc it belongs to.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ClassSpec {
     /// An HTB class.
     Htb(HtbClassConfig),
+    /// An HFSC class: its real-time, link-sharing and upper-limit curves.
+    Hfsc(HfscClassConfig),
+    /// A DRR class. DRR classes are flat: each hangs off the qdisc.
+    Drr(DrrClassConfig),
+    /// A QFQ class. QFQ classes are flat: each hangs off the qdisc.
+    Qfq(QfqClassConfig),
 }
 
 impl PartialEq for ClassSpec {
     /// Two specs are equal when they encode the same request.
     fn eq(&self, other: &Self) -> bool {
-        self.options_bytes() == other.options_bytes()
+        self.kind() == other.kind() && self.options_bytes() == other.options_bytes()
     }
 }
 
-impl From<HtbClassConfig> for ClassSpec {
-    fn from(c: HtbClassConfig) -> Self {
-        Self::Htb(c)
-    }
+macro_rules! class_from {
+    ($($cfg:ident => $v:ident),*) => {$(
+        impl From<$cfg> for ClassSpec {
+            fn from(c: $cfg) -> Self {
+                Self::$v(c)
+            }
+        }
+    )*};
+}
+class_from!(
+    HtbClassConfig => Htb,
+    HfscClassConfig => Hfsc,
+    DrrClassConfig => Drr,
+    QfqClassConfig => Qfq
+);
+
+/// An HFSC curve as `(m1, d, m2)`, or `None` for one the kernel treats as
+/// not given: `hfsc_change_class()` drops a curve whose slopes are both 0.
+fn hfsc_curve(c: Option<TcServiceCurve>) -> Option<(u32, u32, u32)> {
+    c.filter(|c| c.m1 != 0 || c.m2 != 0).map(|c| (c.m1, c.d, c.m2))
+}
+
+/// A live class's `TCA_OPTIONS` attributes, by type.
+fn class_attrs(live: &TcMessage) -> BTreeMap<u16, &[u8]> {
+    AttrIter::new(live.raw_options().unwrap_or(&[]))
+        .map(|(t, p)| (t & 0x7FFF, p))
+        .collect()
+}
+
+/// A live HFSC class's curves: real-time, link-sharing, upper-limit. The
+/// kernel reports the ones the class has.
+fn live_hfsc_curves(live: &TcMessage) -> [Option<(u32, u32, u32)>; 3] {
+    use crate::netlink::types::tc::qdisc::hfsc::{TCA_HFSC_FSC, TCA_HFSC_RSC, TCA_HFSC_USC};
+    use zerocopy::FromBytes;
+    let attrs = class_attrs(live);
+    [TCA_HFSC_RSC, TCA_HFSC_FSC, TCA_HFSC_USC].map(|id| {
+        let (c, _) = TcServiceCurve::read_from_prefix(attrs.get(&id)?).ok()?;
+        Some((c.m1, c.d, c.m2))
+    })
 }
 
 impl ClassSpec {
     fn config(&self) -> &dyn ClassConfig {
         match self {
             Self::Htb(c) => c,
+            Self::Hfsc(c) => c,
+            Self::Drr(c) => c,
+            Self::Qfq(c) => c,
+        }
+    }
+
+    /// The kind: that of the qdisc the class belongs to.
+    pub fn kind(&self) -> &'static str {
+        self.config().kind()
+    }
+
+    /// Whether the class has to be deleted and added again to become this
+    /// spec: a change keeps an HFSC curve it is not sent, and one cannot
+    /// be cleared, so a curve the live class has and the spec drops is
+    /// only gone with the class.
+    fn needs_recreate(&self, live: &TcMessage) -> bool {
+        match self {
+            Self::Hfsc(c) if live.kind() == Some("hfsc") => c
+                .curves()
+                .into_iter()
+                .zip(live_hfsc_curves(live))
+                .any(|(want, have)| hfsc_curve(want).is_none() && have.is_some()),
+            _ => false,
         }
     }
 
@@ -234,18 +351,64 @@ impl ClassSpec {
     }
 
     /// Whether `live` is this class, as the kernel keeps it.
+    ///
+    /// What a spec leaves unset is the kernel's choice and is not
+    /// compared, except a QFQ weight, which every change sends as 1 when
+    /// it is not given. A DRR quantum and a QFQ `lmax` left unset are the
+    /// device's MTU when the class is made.
     fn matches(&self, live: &TcMessage) -> bool {
-        use crate::netlink::tc_recipe_internals::{htb_class_matches, htb_class_options};
+        use crate::netlink::{
+            tc_recipe_internals::{htb_class_matches, htb_class_options},
+            types::tc::qdisc::{
+                drr::TCA_DRR_QUANTUM,
+                qfq::{TCA_QFQ_LMAX, TCA_QFQ_WEIGHT},
+            },
+        };
+        if live.kind() != Some(self.kind()) {
+            return false;
+        }
+        let attrs = class_attrs(live);
+        let u32_attr = |id: u16| {
+            attrs
+                .get(&id)
+                .and_then(|p| p.get(..4))
+                .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+        };
         match self {
             Self::Htb(c) => {
-                live.kind() == Some("htb")
-                    && htb_class_matches(live, c)
+                htb_class_matches(live, c)
                     && htb_class_options(live).is_some_and(|o| {
                         c.priority().is_none_or(|p| o.priority == p)
                             && c.cburst_as_dumped().is_none_or(|b| o.cburst == b)
                     })
             }
+            // The kernel keeps a curve in its own units, rounding up, and
+            // reports it rounding down; the trip is exact for every value
+            // (`m2sm()`/`sm2m()`, `d2dx()`/`dx2d()` in sch_hfsc.c).
+            Self::Hfsc(c) => c
+                .curves()
+                .into_iter()
+                .zip(live_hfsc_curves(live))
+                .all(|(want, have)| hfsc_curve(want) == have),
+            Self::Drr(c) => c
+                .quantum_bytes()
+                .is_none_or(|q| u32_attr(TCA_DRR_QUANTUM) == Some(q.as_u32_saturating())),
+            Self::Qfq(c) => {
+                let (weight, lmax) = c.weight_lmax();
+                u32_attr(TCA_QFQ_WEIGHT) == Some(weight.unwrap_or(1))
+                    && lmax.is_none_or(|l| u32_attr(TCA_QFQ_LMAX) == Some(l.as_u32_saturating()))
+            }
         }
+    }
+}
+
+impl ClassConfig for ClassSpec {
+    fn kind(&self) -> &'static str {
+        ClassSpec::kind(self)
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        self.config().write_options(builder)
     }
 }
 
@@ -609,10 +772,10 @@ impl std::fmt::Display for TcTreeDiff {
             lines.push(format!("- class {handle} on {dev}"));
         }
         for c in &self.classes_to_add {
-            lines.push(format!("+ class htb {} under {} on {dev}", c.id, c.parent));
+            lines.push(format!("+ class {} {} under {} on {dev}", c.spec.kind(), c.id, c.parent));
         }
         for c in &self.classes_to_change {
-            lines.push(format!("~ class htb {} on {dev}", c.id));
+            lines.push(format!("~ class {} {} on {dev}", c.spec.kind(), c.id));
         }
         for l in &self.leaves_to_set {
             lines.push(format!(
@@ -690,24 +853,49 @@ pub(crate) fn diff_tree(
     // not the qdisc's handle it was added under.
     let same_parent =
         |declared: TcHandle, live: TcHandle| declared == live || (live.is_root() && declared.minor() == 0);
+    // Classes that are deleted and added again: a class does not move,
+    // and a change cannot drop an HFSC curve.
+    let mut recreated = Vec::new();
     for c in &tree.classes {
         match live_classes.iter().find(|l| l.handle() == c.id) {
             None => diff.classes_to_add.push(c.clone()),
-            Some(l) if !same_parent(c.parent, l.parent()) => {
-                // A class does not move: delete it and add it again.
-                diff.classes_to_remove.push(c.id);
-                diff.classes_to_add.push(c.clone());
+            Some(l) if !same_parent(c.parent, l.parent()) || c.spec.needs_recreate(l) => {
+                recreated.push(c.id);
             }
             Some(l) if !c.spec.matches(l) => diff.classes_to_change.push(c.clone()),
             Some(_) => {}
         }
     }
+    // What a recreated class takes with it goes too, and comes back: the
+    // classes under it (the kernel refuses to delete a class with
+    // children), its leaf, and the filters of its qdisc, which the kernel
+    // counts as the class's users while they point at it.
+    let mut i = 0;
+    while i < recreated.len() {
+        let h = recreated[i];
+        for c in &tree.classes {
+            if c.parent == h
+                && !recreated.contains(&c.id)
+                && live_classes.iter().any(|l| l.handle() == c.id)
+            {
+                diff.classes_to_change.retain(|x| x.id != c.id);
+                recreated.push(c.id);
+            }
+        }
+        i += 1;
+    }
+    for h in &recreated {
+        diff.classes_to_remove.push(*h);
+        diff.classes_to_add
+            .extend(tree.classes.iter().filter(|c| c.id == *h).cloned());
+    }
     // Under a qdisc the tree declares classes for, a class it does not
     // declare goes. A qdisc's own "classes" (prio bands, mq queues) are
-    // not classes anyone made.
+    // not classes anyone made, and neither is HFSC's root class, `1:`.
     for l in live_classes {
         let users = matches!(l.kind(), Some("htb" | "hfsc" | "drr" | "qfq"));
         if users
+            && l.handle().minor() != 0
             && (tree.owns_class(l.handle()) || previous.is_some_and(|p| p.owns_class(l.handle())))
             && !tree.declares_class(l.handle())
             && !diff.classes_to_remove.contains(&l.handle())
@@ -720,7 +908,9 @@ pub(crate) fn diff_tree(
         let live = live_qdiscs
             .iter()
             .find(|q| q.parent() == leaf.class && q.handle().as_raw() != 0);
-        if live.is_none_or(|q| q.handle() != leaf.handle || !leaf.spec.matches(q)) {
+        if recreated.contains(&leaf.class)
+            || live.is_none_or(|q| q.handle() != leaf.handle || !leaf.spec.matches(q))
+        {
             diff.leaves_to_set.push(leaf.clone());
         }
     }
@@ -733,11 +923,30 @@ pub(crate) fn diff_tree(
             diff.leaves_to_remove.push((q.parent(), q.handle()));
         }
     }
+    // The qdiscs whose filters a recreate takes: the recreated classes'
+    // own, and the leaves in them.
+    let destroyed: Vec<u16> = recreated
+        .iter()
+        .map(|h| h.major())
+        .chain(
+            tree.leaves
+                .iter()
+                .filter(|l| recreated.contains(&l.class))
+                .map(|l| l.handle.major()),
+        )
+        .collect();
+    let recreated_major = |parent: TcHandle| destroyed.contains(&parent.major());
     for f in &tree.filters {
         let live = live_filters.iter().find(|l| {
             l.parent() == f.parent && l.priority() == f.priority && l.protocol() == f.protocol
         });
-        if live.is_none_or(|l| !f.matches(l, ifindexes)) {
+        if let Some(l) = live
+            && recreated_major(f.parent)
+        {
+            diff.filters_to_remove
+                .push((l.parent(), l.priority(), l.protocol()));
+            diff.filters_to_set.push(f.clone());
+        } else if live.is_none_or(|l| !f.matches(l, ifindexes)) {
             diff.filters_to_set.push(f.clone());
         }
     }
@@ -914,8 +1123,7 @@ async fn apply_tree(
             )));
         }
         for c in &ready {
-            let ClassSpec::Htb(cfg) = &c.spec;
-            conn.add_class_by_index(ifindex, c.parent, c.id, cfg.clone())
+            conn.add_class_by_index(ifindex, c.parent, c.id, c.spec.clone())
                 .await
                 .map_err(|e| {
                     e.with_context(format!("tc {}: add class {}", diff.dev, c.id))
@@ -926,8 +1134,7 @@ async fn apply_tree(
         to_add = waiting;
     }
     for c in &diff.classes_to_change {
-        let ClassSpec::Htb(cfg) = &c.spec;
-        conn.change_class_by_index(ifindex, c.parent, c.id, cfg.clone())
+        conn.change_class_by_index(ifindex, c.parent, c.id, c.spec.clone())
             .await
             .map_err(|e| {
                 e.with_context(format!("tc {}: change class {}", diff.dev, c.id))
@@ -1116,6 +1323,30 @@ mod tests {
         msg
     }
 
+    /// A class as a dump shows it: the options `cfg` writes.
+    fn live_class_with(cfg: &impl ClassConfig, parent: TcHandle, handle: TcHandle) -> TcMessage {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        cfg.write_options(&mut b).unwrap();
+        let mut msg = live_class(cfg.kind(), parent, handle);
+        msg.options = Some(b.as_bytes()[start..].to_vec());
+        msg
+    }
+
+    /// A qdisc as a dump shows it: the options `cfg` writes.
+    fn live_qdisc(
+        cfg: &impl crate::netlink::tc::QdiscConfig,
+        parent: TcHandle,
+        handle: TcHandle,
+    ) -> TcMessage {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        cfg.write_options(&mut b).unwrap();
+        let mut msg = live_class(cfg.kind(), parent, handle);
+        msg.options = Some(b.as_bytes()[start..].to_vec());
+        msg
+    }
+
     fn ssh() -> FlowerFilter {
         FlowerFilter::new()
             .ip_proto_tcp()
@@ -1239,6 +1470,126 @@ mod tests {
             .qdisc("d0", |q| q.ingress())
             .tc("d0", |t| t.redirect_ingress_to("ifb0"));
         assert_eq!(cfg.tc_trees()[0].filters()[0].parent, TcHandle::INGRESS);
+    }
+
+    #[test]
+    fn hfsc_drr_and_qfq_classes_match_their_echo() {
+        use crate::util::Bytes;
+        let rt = TcServiceCurve::two_slope(2_500_000, 5000, 1_250_000);
+        let hfsc = HfscClassConfig::new().rt_curve(rt).ls_rate(Rate::mbit(60));
+        let spec = ClassSpec::from(hfsc.clone());
+        let echo = live_class_with(&hfsc, h(1, 1), h(1, 0x10));
+        assert!(spec.matches(&echo) && !spec.needs_recreate(&echo));
+        // Another real-time curve: a change.
+        let other = live_class_with(&hfsc.clone().rt_rate(Rate::mbit(5)), h(1, 1), h(1, 0x10));
+        assert!(!spec.matches(&other) && !spec.needs_recreate(&other));
+        // An upper limit the spec does not have: only gone with the class.
+        let capped = live_class_with(&hfsc.clone().ul_rate(Rate::mbit(80)), h(1, 1), h(1, 0x10));
+        assert!(!spec.matches(&capped) && spec.needs_recreate(&capped));
+        // A curve whose slopes are 0 is no curve, as the kernel reads it.
+        assert!(ClassSpec::from(hfsc.clone().ul_curve(TcServiceCurve::rate(0))).matches(&echo));
+        // A class of another kind is not this one.
+        assert!(!spec.matches(&live_class_with(&DrrClassConfig::new(), h(1, 0), h(1, 0x10))));
+
+        // DRR: a quantum left unset is the kernel's choice.
+        let drr = |n| DrrClassConfig::new().quantum(Bytes::new(n));
+        let live = live_class_with(&drr(3000), TcHandle::ROOT, h(1, 1));
+        assert!(ClassSpec::from(drr(3000)).matches(&live));
+        assert!(!ClassSpec::from(drr(6000)).matches(&live));
+        assert!(ClassSpec::from(DrrClassConfig::new()).matches(&live));
+
+        // QFQ: a weight left unset is 1, an lmax the kernel's choice.
+        let qfq = QfqClassConfig::new().weight(1).lmax(Bytes::new(1514));
+        let live = live_class_with(&qfq, TcHandle::ROOT, h(1, 1));
+        assert!(ClassSpec::from(QfqClassConfig::new()).matches(&live));
+        assert!(!ClassSpec::from(QfqClassConfig::new().weight(2)).matches(&live));
+        assert!(!ClassSpec::from(QfqClassConfig::new().lmax(Bytes::new(2048))).matches(&live));
+    }
+
+    #[test]
+    fn a_dropped_hfsc_curve_recreates_the_class_and_what_it_takes() {
+        let ls = |r| HfscClassConfig::new().ls_rate(Rate::mbit(r));
+        let sfq = crate::netlink::tc::SfqConfig::new();
+        let to_20 = MatchallFilter::new().classid(h(1, 0x20));
+        let t = tree(|t| {
+            t.class(h(1, 0), h(1, 1), ls(100))
+                .class(h(1, 1), h(1, 0x20), ls(40))
+                .leaf(h(1, 0x20), h(0x20, 0), sfq.clone())
+                .filter(h(1, 0), FilterPriority::new(2), EthProto::IP, to_20.clone())
+        });
+        let classes = |top: HfscClassConfig| {
+            [
+                // HFSC's root class: nobody's to remove.
+                live_class("hfsc", TcHandle::ROOT, h(1, 0)),
+                live_class_with(&top, h(1, 0), h(1, 1)),
+                live_class_with(&ls(40), h(1, 1), h(1, 0x20)),
+            ]
+        };
+        let qdiscs = [live_qdisc(&sfq, h(1, 0x20), h(0x20, 0))];
+        let filters = [live_filter(&to_20, "matchall", h(1, 0), 2, EthProto::IP)];
+        let names = HashMap::new();
+        let d = diff_tree(&t, None, &classes(ls(100)), &qdiscs, &filters, &names);
+        assert!(d.is_empty(), "{d}");
+
+        // 1:1 has an upper limit the tree drops: it goes, with its child,
+        // the leaf in that child, and the filter pointing at it.
+        let capped = ls(100).ul_rate(Rate::mbit(100));
+        let d = diff_tree(&t, None, &classes(capped), &qdiscs, &filters, &names);
+        assert_eq!(d.classes_to_remove, vec![h(1, 1), h(1, 0x20)]);
+        let added: Vec<TcHandle> = d.classes_to_add.iter().map(|c| c.id).collect();
+        assert_eq!(added, vec![h(1, 1), h(1, 0x20)]);
+        assert!(d.classes_to_change.is_empty(), "{d}");
+        assert_eq!(d.leaves_to_set.len(), 1, "{d}");
+        assert_eq!(d.filters_to_remove, vec![(h(1, 0), FilterPriority::new(2), EthProto::IP)]);
+        assert_eq!(d.filters_to_set.len(), 1, "{d}");
+        assert!(d.to_string().contains("+ class hfsc 1:1 under 1: on d0"), "{d}");
+    }
+
+    #[test]
+    fn validation_knows_the_class_kinds() {
+        use crate::netlink::tc::QdiscConfig as _;
+        let cfg = NetworkConfig::new()
+            .qdisc("d0", |q| q.htb())
+            .tc("d0", |t| {
+                t.class(h(1, 0), h(1, 1), HfscClassConfig::new().ul_rate(Rate::mbit(1)))
+                    .class(h(1, 0), h(1, 2), HtbClassConfig::new(Rate::mbit(10)))
+            })
+            .qdisc("d1", |q| q.drr())
+            .tc("d1", |t| {
+                t.class(h(1, 0), h(1, 1), DrrClassConfig::new())
+                    .class(h(1, 1), h(1, 2), DrrClassConfig::new())
+            });
+        let err = cfg.validate().unwrap_err().to_string();
+        for want in [
+            "class 1:1: an hfsc class needs a real-time or a link-sharing curve",
+            "class 1:1 is hfsc, but class 1:2 under the same qdisc is htb",
+            "class 1:1 is hfsc, but its qdisc 1: is htb",
+            "class 1:2: drr classes are flat; its parent is the qdisc (1:), not 1:1",
+        ] {
+            assert!(err.contains(want), "{want:?} missing from {err}");
+        }
+        assert!(!err.contains("class 1:2 is htb, but its qdisc"), "{err}");
+
+        // The default class is HTB's and HFSC's, a 16-bit minor for HFSC.
+        let cfg = NetworkConfig::new()
+            .qdisc("d0", |q| q.drr().default_class(1))
+            .qdisc("d1", |q| q.hfsc().default_class(0x1_0000));
+        let err = cfg.validate().unwrap_err().to_string();
+        for want in [
+            "`.default_class()` sets a htb, hfsc parameter, but this qdisc is drr",
+            "`.default_class(0x10000)`: a class minor is 16 bits",
+        ] {
+            assert!(err.contains(want), "{want:?} missing from {err}");
+        }
+
+        // The roots are classful, with `1:` by default.
+        for q in [
+            QdiscSpec::from(crate::netlink::tc::HfscConfig::new()),
+            QdiscSpec::from(crate::netlink::tc::DrrConfig::new()),
+            QdiscSpec::from(crate::netlink::tc::QfqConfig::new()),
+        ] {
+            assert_eq!(q.default_handle(), Some(TcHandle::major_only(1)), "{}", q.kind());
+        }
     }
 
     #[test]
