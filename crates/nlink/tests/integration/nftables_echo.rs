@@ -571,3 +571,75 @@ async fn ranges_and_negations_reconcile_and_match_nft() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #528: `fib`, `meta pkttype` and `notrack` are written exactly as `nft`
+/// writes them — each rule nlink builds decodes to the same expressions
+/// as the one `nft` installs from the same statement — and they reconcile.
+/// The meta keys nlink did not name decode typed.
+#[tokio::test]
+async fn fib_pkttype_and_notrack_are_what_nft_writes() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{FibFlags, MetaKey, PktType, RuleExpr};
+    use nlink::netlink::types::route::RouteType;
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_fib_inet", "nft_ct");
+
+    let ns = TestNamespace::new("nft-echo-fib")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let chain = |hook, priority| {
+            move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+                c.hook(hook).priority(priority).chain_type(ChainType::Filter)
+            }
+        };
+        let cfg = NftablesConfig::new().table("f", Family::Inet, |t| {
+            t.chain("pre", chain(Hook::Prerouting, Priority::Filter))
+                .chain("raw", chain(Hook::Prerouting, Priority::Raw))
+                .rule_keyed("pre", "rpf", |r| {
+                    r.match_fib_missing(FibFlags::SADDR | FibFlags::IIF).drop()
+                })
+                .rule_keyed("pre", "local", |r| {
+                    r.match_fib_type(FibFlags::DADDR, RouteType::Local).accept()
+                })
+                .rule_keyed("pre", "bcast", |r| r.match_pkttype(PktType::Broadcast).drop())
+                .rule_keyed("pre", "not-host", |r| r.match_pkttype_not(PktType::Host).drop())
+                .rule_keyed("raw", "notrack", |r| r.match_udp_dport(53).notrack())
+        });
+        assert_reconciles(&conn, &cfg).await?;
+
+        // The same statements, through nft, into a chain of their own.
+        ns.exec("nft", &["add chain inet f theirs"])?;
+        for statement in [
+            "fib saddr . iif oif missing drop",
+            "fib daddr type local accept",
+            "meta pkttype broadcast drop",
+            "meta pkttype != host drop",
+            "udp dport 53 notrack",
+        ] {
+            ns.exec("nft", &[&format!("add rule inet f theirs {statement}")])?;
+        }
+        let rules = conn.list_rules("f", Family::Inet).await?;
+        let exprs = |chain: &str| -> Vec<Vec<RuleExpr>> {
+            rules.iter().filter(|r| r.chain == chain).map(|r| r.expressions()).collect()
+        };
+        let mine: Vec<_> = exprs("pre").into_iter().chain(exprs("raw")).collect();
+        assert_eq!(mine, exprs("theirs"), "nlink writes what nft writes");
+
+        // Keys nlink had no name for decode typed now.
+        ns.exec("nft", &["add rule inet f theirs meta cpu 0 meta iifgroup 0 meta iifkind \"veth\" meta day \"Monday\" accept"])?;
+        let keys: Vec<MetaKey> = conn
+            .list_rules("f", Family::Inet)
+            .await?
+            .iter()
+            .flat_map(|r| r.expressions())
+            .filter_map(|e| match e {
+                RuleExpr::Meta { key, .. } => Some(key),
+                _ => None,
+            })
+            .collect();
+        for key in [MetaKey::Cpu, MetaKey::IifGroup, MetaKey::IifKind, MetaKey::TimeDay] {
+            assert!(keys.contains(&key), "{key:?} in {keys:?}");
+        }
+        Ok(())
+    })
+    .await
+}

@@ -104,6 +104,15 @@ pub enum Expr {
     CtSet { key: CtKey, sreg: Register },
     /// Load routing data into a register (`rt mtu`, `rt classid`, …).
     Rt { dreg: Register, key: RtKey },
+    /// Look the packet up in the routing table (`fib saddr . iif oif`),
+    /// putting `result` in `dreg` (#528).
+    Fib {
+        dreg: Register,
+        result: FibResult,
+        flags: FibFlags,
+    },
+    /// `notrack`: leave the packet out of connection tracking.
+    Notrack,
     /// Compare a register with a range of values, both ends included
     /// (`tcp dport 1000-2000`, `!= 1000-2000`). The values are in network
     /// byte order: a host-order field goes through a
@@ -696,6 +705,17 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             );
             builder.nest_end(data);
         }
+        Expr::Fib { dreg, result, flags } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "fib");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_FIB_DREG, dreg.wire());
+            builder.append_attr_u32_be(NFTA_FIB_RESULT, *result as u32);
+            builder.append_attr_u32_be(NFTA_FIB_FLAGS, flags.bits());
+            builder.nest_end(data);
+        }
+        // `nft_notrack_ops` has no `dump`, so the kernel echoes no data
+        // nest: write none.
+        Expr::Notrack => builder.append_attr_str(NFTA_EXPR_NAME, "notrack"),
         Expr::Range { sreg, op, from, to } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "range");
             let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -1388,6 +1408,18 @@ pub enum RuleExpr {
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
     },
+    /// `fib` — a routing lookup.
+    #[non_exhaustive]
+    Fib {
+        /// Register the result goes to.
+        dreg: Register,
+        /// What it returns.
+        result: FibResult,
+        /// What it keys on.
+        flags: FibFlags,
+    },
+    /// `notrack`.
+    Notrack,
     /// `range` — a register within (or, `Neq`, outside) `from..=to`, both
     /// in network byte order.
     #[non_exhaustive]
@@ -1513,6 +1545,8 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "objref" => parse_objref(data),
         "limit" => parse_limit_attrs(data).map(RuleExpr::Limit),
         "range" => parse_range(data),
+        "fib" => parse_fib(data),
+        "notrack" if data.is_empty() => Some(RuleExpr::Notrack),
         "log" => parse_log(data),
         "reject" => parse_reject(data),
         "masq" => parse_masq(data),
@@ -1597,6 +1631,14 @@ pub(crate) fn parse_limit_attrs(data: &[u8]) -> Option<LimitExpr> {
         limit = limit.over();
     }
     Some(limit)
+}
+
+fn parse_fib(data: &[u8]) -> Option<RuleExpr> {
+    Some(RuleExpr::Fib {
+        dreg: Register::from_u32(u32_attr(data, NFTA_FIB_DREG)?)?,
+        result: FibResult::from_u32(u32_attr(data, NFTA_FIB_RESULT)?)?,
+        flags: FibFlags::from_bits_retain(u32_attr(data, NFTA_FIB_FLAGS)?),
+    })
 }
 
 fn parse_range(data: &[u8]) -> Option<RuleExpr> {

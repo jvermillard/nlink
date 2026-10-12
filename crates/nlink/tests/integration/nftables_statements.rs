@@ -1064,3 +1064,84 @@ async fn ranges_match_traffic() -> nlink::Result<()> {
     assert_eq!(deliver(7300), 3, "mark 0x25 is not");
     Ok(())
 }
+
+/// #528: `fib saddr . iif oif missing drop` drops a source `b` has no
+/// route back to — here `a`'s traffic snat'ed to an address outside every
+/// route — and passes `a`'s own; `notrack` leaves a flow out of conntrack,
+/// so `ct state untracked` counts exactly its packets.
+#[tokio::test]
+async fn fib_and_notrack_act_on_traffic() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{CtState, FibFlags, NatStatement};
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_fib_inet", "nft_ct", "nft_nat", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nft-fib", 96).await?;
+    // The kernel's own reverse-path filter drops a spoofed source too,
+    // after the prerouting hook. Turn it off where /proc/sys can be
+    // written, so the control below can show the spoofed traffic arriving;
+    // where it cannot (a rootless container), the fib rule's own counter
+    // still shows the rule matched first.
+    let mut rp_off = true;
+    for dev in ["all", pair.b_if] {
+        let key = format!("net.ipv4.conf.{dev}.rp_filter");
+        if pair.b.netns().sysctl().get(&key)? != "0" && pair.b.netns().sysctl().set(&key, "0").is_err() {
+            rp_off = false;
+        }
+    }
+    let chain = |hook, priority| {
+        move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+            c.hook(hook).priority(priority).chain_type(ChainType::Filter)
+        }
+    };
+    let b = |rpf: bool| {
+        NftablesConfig::new().table("f", Family::Inet, move |t| {
+            let t = t
+                .chain("raw", chain(Hook::Prerouting, Priority::Raw))
+                .chain("pre", chain(Hook::Prerouting, Priority::Filter))
+                .chain("in", chain(Hook::Input, Priority::Filter))
+                .rule_keyed("raw", "notrack", |r| r.match_udp_dport(7700).notrack())
+                .rule_keyed("in", "untracked", |r| {
+                    r.match_ct_state(CtState::UNTRACKED).counter().accept()
+                });
+            if rpf {
+                t.rule_keyed("pre", "rpf", |r| {
+                    r.match_fib_missing(FibFlags::SADDR | FibFlags::IIF).counter().drop()
+                })
+            } else {
+                t
+            }
+        })
+    };
+    let nft_b = pair.b.connection_for::<Nftables>()?;
+    let to = |port| SocketAddr::from((pair.b_addr, port));
+    let deliver = |port| crate::common::traffic::deliver_udp(&pair.a, &pair.b, to(port), 3);
+    let untracked = || crate::common::counters::rule_packets(&nft_b, "f", Family::Inet, "in", 0);
+
+    // a's traffic to 7702 leaves from 192.0.2.1, which b has no route to.
+    let a = NftablesConfig::new().table("n", Family::Ip, |t| {
+        t.chain("post", |c| {
+            c.hook(Hook::Postrouting).priority(Priority::SrcNat).chain_type(ChainType::Nat)
+        })
+        .rule_keyed("post", "spoof", |r| {
+            r.match_udp_dport(7702).nat(NatStatement::snat(Ipv4Addr::new(192, 0, 2, 1)))
+        })
+    });
+    let nft_a = pair.a.connection_for::<Nftables>()?;
+    a.diff(&nft_a).await?.apply(&nft_a).await?;
+    if rp_off {
+        b(false).diff(&nft_b).await?.apply(&nft_b).await?;
+        assert_eq!(deliver(7702), 3, "without the fib check the spoofed source gets through");
+    }
+
+    b(true).diff(&nft_b).await?.apply(&nft_b).await?;
+    let rpf = || crate::common::counters::rule_packets(&nft_b, "f", Family::Inet, "pre", 0);
+    assert_eq!(deliver(7702), 0, "no route back to 192.0.2.1: the fib check drops it");
+    assert_eq!(rpf().await?, 3, "the fib rule is what dropped all three");
+    assert_eq!(deliver(7700), 3, "a's own source has a route back");
+    assert_eq!(rpf().await?, 3, "and the fib rule let it be");
+    assert_eq!(untracked().await?, 3, "notrack left all three untracked");
+    assert_eq!(deliver(7701), 3);
+    assert_eq!(untracked().await?, 3, "7701 was tracked");
+    Ok(())
+}

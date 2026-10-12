@@ -1826,6 +1826,45 @@ All notable changes to this project will be documented in this file.
     - **Red run.** Without the byteorder step both fail: nft lists the
       mark range differently, and the in-range mark gets through.
 
+- **`fib`, `meta pkttype`, `notrack` and the rest of the meta keys (#528,
+  fifth part).**
+  - **`fib`.**
+    - `Rule::match_fib_missing(FibFlags::SADDR | FibFlags::IIF)` is
+      nft's `fib saddr . iif oif missing`, the reverse-path check that
+      nlink-lab wants for anti-spoofing.
+    - `match_fib_type(flags, RouteType)` is `fib daddr type local`.
+    - `Expr::Fib` and `RuleExpr::Fib` encode and decode it, with
+      `FibResult` and `FibFlags`.
+  - **`meta pkttype`.** `match_pkttype(PktType)` and its `_not` form,
+    with `PktType::{Host, Broadcast, Multicast, OtherHost}`.
+  - **`notrack`.** `Rule::notrack()` leaves a flow out of connection
+    tracking. Its expression has no `dump`, so it is written, and echoed,
+    with no data nest.
+  - **`MetaKey`** gains every key the kernel has that it lacked:
+    `iiftype`/`oiftype`, `nftrace`, `rtclassid`, `secmark`, the bridge
+    names, `pkttype`, `cpu`, the interface groups and kinds, `random`,
+    `ipsec`, the bridge PVID and VLAN protocol, `time`/`day`/`hour`,
+    `sdif`/`sdifname` and `broute`.
+  - **Audit and CI.** `PktType`, `FibResult` and the new meta keys are
+    mapped in the UAPI audit. `nft_fib_inet` joins the CI module guard
+    and the strict list.
+  - **Tests.**
+    - **Parity with nft.** The rules nlink builds for `fib … missing`,
+      `fib daddr type local`, `meta pkttype` (`==` and `!=`) and
+      `notrack` decode to the same expressions as the ones `nft` installs
+      from the same statements. They also reconcile. This comparison
+      caught `fib … missing` comparing one byte where nft compares four;
+      one byte reads the wrong end of the kernel's u32 on a big-endian
+      host.
+    - **Decoding.** Keys nlink had no name for (`cpu`, `iifgroup`,
+      `iifkind`, `day`) decode typed.
+    - **Traffic, fib.** `a`'s traffic is snat'ed to an address `b` has
+      no route to. It arrives without the fib rule, and is dropped with
+      it, while `a`'s own source passes.
+    - **Traffic, notrack.** `notrack` makes `ct state untracked` count
+      exactly that flow's packets. With `notrack` a no-op, both tests
+      fail.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

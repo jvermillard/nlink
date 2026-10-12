@@ -579,6 +579,70 @@ impl std::ops::BitOrAssign for CtState {
     }
 }
 
+/// A packet's type (`meta pkttype`), the `PACKET_*` of
+/// `linux/if_packet.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum PktType {
+    /// `host`: to this host.
+    Host = 0,
+    /// `broadcast`.
+    Broadcast = 1,
+    /// `multicast`.
+    Multicast = 2,
+    /// `other`: to another host, seen in promiscuous mode.
+    OtherHost = 3,
+}
+
+/// What a `fib` lookup returns — `enum nft_fib_result`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum FibResult {
+    /// `oif`: the output interface's index.
+    Oif = 1,
+    /// `oifname`: its name.
+    OifName = 2,
+    /// `type`: the address type, an `RTN_*` ([`RouteType`](crate::netlink::types::route::RouteType)).
+    AddrType = 3,
+}
+
+impl FibResult {
+    /// The result of an `NFTA_FIB_RESULT` value.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Oif),
+            2 => Some(Self::OifName),
+            3 => Some(Self::AddrType),
+            _ => None,
+        }
+    }
+}
+
+bitflags::bitflags! {
+    /// What a `fib` lookup keys on, and how it answers — the
+    /// `NFTA_FIB_F_*` flags: `fib saddr . iif` is `SADDR | IIF`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct FibFlags: u32 {
+        /// `saddr`: look up the source address.
+        const SADDR = 1 << 0;
+        /// `daddr`: look up the destination address.
+        const DADDR = 1 << 1;
+        /// `mark`: with the packet mark.
+        const MARK = 1 << 2;
+        /// `iif`: with the input interface.
+        const IIF = 1 << 3;
+        /// `oif`: with the output interface.
+        const OIF = 1 << 4;
+        /// Answer whether there is a result (`exists`/`missing`), not the
+        /// result.
+        const PRESENT = 1 << 5;
+        // A newer kernel's flags read back as they are.
+        const _ = !0;
+    }
+}
+
 /// In or out of a range — `enum nft_range_ops`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -1032,6 +1096,52 @@ pub enum MetaKey {
     NfProto = 15,
     L4Proto = 16,
     CGroup = 23,
+    /// `iiftype`: the input interface's ARPHRD type.
+    IifType = 8,
+    /// `oiftype`.
+    OifType = 9,
+    /// `nftrace`: set to trace the packet through the ruleset.
+    NfTrace = 12,
+    /// `rtclassid`: the route's realm.
+    RtClassId = 13,
+    /// `secmark`.
+    Secmark = 14,
+    /// `ibrname`: the bridge a frame came in on.
+    BriIifName = 17,
+    /// `obrname`.
+    BriOifName = 18,
+    /// `pkttype`: host, broadcast, multicast, other host — see [`PktType`].
+    PktType = 19,
+    /// `cpu`: the CPU handling the packet.
+    Cpu = 20,
+    /// `iifgroup`: the input interface's group.
+    IifGroup = 21,
+    /// `oifgroup`.
+    OifGroup = 22,
+    /// `random`: a pseudo-random number.
+    PRandom = 24,
+    /// `ipsec`: whether the packet came through IPsec.
+    SecPath = 25,
+    /// `iifkind`: the input interface's kind (`veth`, …).
+    IifKind = 26,
+    /// `oifkind`.
+    OifKind = 27,
+    /// `ibrpvid`: the bridge port's PVID.
+    BriIifPvid = 28,
+    /// `ibrvproto`: the bridge's VLAN protocol.
+    BriIifVproto = 29,
+    /// `time`: nanoseconds since the epoch.
+    TimeNs = 30,
+    /// `day`: the day of the week.
+    TimeDay = 31,
+    /// `hour`: seconds since midnight.
+    TimeHour = 32,
+    /// `sdif`: the L3 master (VRF) slave's index.
+    Sdif = 33,
+    /// `sdifname`.
+    SdifName = 34,
+    /// `broute`: route a bridged frame instead.
+    BriBroute = 35,
 }
 
 impl MetaKey {
@@ -1053,6 +1163,29 @@ impl MetaKey {
             15 => Some(Self::NfProto),
             16 => Some(Self::L4Proto),
             23 => Some(Self::CGroup),
+            8 => Some(Self::IifType),
+            9 => Some(Self::OifType),
+            12 => Some(Self::NfTrace),
+            13 => Some(Self::RtClassId),
+            14 => Some(Self::Secmark),
+            17 => Some(Self::BriIifName),
+            18 => Some(Self::BriOifName),
+            19 => Some(Self::PktType),
+            20 => Some(Self::Cpu),
+            21 => Some(Self::IifGroup),
+            22 => Some(Self::OifGroup),
+            24 => Some(Self::PRandom),
+            25 => Some(Self::SecPath),
+            26 => Some(Self::IifKind),
+            27 => Some(Self::OifKind),
+            28 => Some(Self::BriIifPvid),
+            29 => Some(Self::BriIifVproto),
+            30 => Some(Self::TimeNs),
+            31 => Some(Self::TimeDay),
+            32 => Some(Self::TimeHour),
+            33 => Some(Self::Sdif),
+            34 => Some(Self::SdifName),
+            35 => Some(Self::BriBroute),
             _ => None,
         }
     }
@@ -2690,6 +2823,63 @@ impl Rule {
             std::net::IpAddr::V4(a) => self.match_daddr_v4_not(a, prefix),
             std::net::IpAddr::V6(a) => self.match_daddr_v6_not(a, prefix),
         }
+    }
+
+    /// Match the packet type: `meta pkttype broadcast` (#528).
+    pub fn match_pkttype(mut self, pkttype: PktType) -> Self {
+        self.push_meta_eq(MetaKey::PktType, pkttype as u8);
+        self
+    }
+
+    /// Match any packet type but `pkttype`: `meta pkttype != broadcast`.
+    pub fn match_pkttype_not(mut self, pkttype: PktType) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta { dreg: Register::R0, key: MetaKey::PktType });
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![pkttype as u8] });
+        self
+    }
+
+    /// Match a packet the routing table has no route for, as `flags`
+    /// looks it up (#528): `fib saddr . iif oif missing` is
+    /// `match_fib_missing(FibFlags::SADDR | FibFlags::IIF)` — the
+    /// reverse-path check against spoofed sources.
+    pub fn match_fib_missing(mut self, flags: FibFlags) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Fib {
+            dreg: Register::R0,
+            result: FibResult::Oif,
+            flags: flags | FibFlags::PRESENT,
+        });
+        // The kernel stores the answer as a u32 0 or 1, and nft compares
+        // all four bytes: one would read the wrong end on a big-endian host.
+        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![0; 4] });
+        self
+    }
+
+    /// Match a packet whose address, as `flags` looks it up, is of
+    /// `addr_type`: `fib daddr type local` is
+    /// `match_fib_type(FibFlags::DADDR, RouteType::Local)`.
+    pub fn match_fib_type(
+        mut self,
+        flags: FibFlags,
+        addr_type: crate::netlink::types::route::RouteType,
+    ) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Fib { dreg: Register::R0, result: FibResult::AddrType, flags });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: (addr_type as u32).to_ne_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// `notrack` (#528): leave the packet out of connection tracking. In
+    /// a chain at the `raw` priority on `prerouting` or `output`, before
+    /// conntrack sees it; `ct state untracked` then matches it.
+    pub fn notrack(mut self) -> Self {
+        self.exprs.push(super::expr::Expr::Notrack);
+        self
     }
 
     /// Match a TCP source port other than `port`: `tcp sport != <port>`.
