@@ -15,7 +15,7 @@ use super::{
     NFTA_LIST_ELEM, NFTA_RULE_EXPRESSIONS, NFTA_RULE_USERDATA,
 };
 use crate::netlink::attr::{AttrIter, get};
-use crate::netlink::error::strerror;
+use crate::netlink::error::{ErrorObject, strerror};
 use crate::netlink::message::{NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, ParsedExtAck};
 
 /// `nlmsghdr` (16) + `nfgenmsg` (4): where an nftables message's
@@ -45,6 +45,12 @@ pub struct NftBatchFailure {
     /// That attribute, resolved against the message nlink sent:
     /// `expression #4 (log)`, `attribute 3`.
     pub attribute: Option<String>,
+    /// What the operation was done to, read from the message (#718):
+    /// the table, chain, rule, set, object or flowtable. `None` for a
+    /// failure of the batch as a whole. An
+    /// [`Error`](crate::Error)'s [`object`](crate::Error::object) is the
+    /// first refused operation's.
+    pub object: Option<ErrorObject>,
 }
 
 impl std::fmt::Display for NftBatchFailure {
@@ -83,6 +89,7 @@ impl NftBatchFailure {
             ext_ack: ext.describe(),
             offset: ext.offset,
             attribute,
+            object: object_of(message),
         }
     }
 
@@ -96,6 +103,7 @@ impl NftBatchFailure {
             ext_ack: ext.describe(),
             offset: ext.offset,
             attribute: None,
+            object: None,
         }
     }
 
@@ -118,14 +126,59 @@ impl NftBatchFailure {
     }
 }
 
-/// Render one batch message as the operation it asks for.
-fn describe_operation(message: &[u8]) -> String {
-    let Some(header) = message.get(..ATTRS_START) else {
-        return "malformed message".to_string();
-    };
+/// What one batch message is done to (#718).
+fn object_of(message: &[u8]) -> Option<ErrorObject> {
+    let header = message.get(..ATTRS_START)?;
     let msg_type = u16::from_ne_bytes([header[4], header[5]]);
-    let flags = u16::from_ne_bytes([header[6], header[7]]);
-    let family = match header[16] {
+    let family = family_name(header[16]).to_string();
+    let attrs = message.get(ATTRS_START..).unwrap_or(&[]);
+    let string = |ty: u16| {
+        AttrIter::new(attrs)
+            .find(|(t, _)| t & 0x7FFF == ty)
+            .and_then(|(_, p)| get::string(p).ok().map(str::to_string))
+            .unwrap_or_default()
+    };
+    // Every message names its table first (`NFTA_*_TABLE` is 1), then
+    // what it is about: a chain's name is 3, a set's, object's and
+    // flowtable's 2, and a rule's chain 2.
+    let table = string(1);
+    let in_table = |name_attr: u16| (family.clone(), table.clone(), string(name_attr));
+    Some(match (msg_type & 0xFF) as u8 {
+        NFT_MSG_NEWTABLE | NFT_MSG_DELTABLE => ErrorObject::NftTable {
+            family: family.clone(),
+            name: table.clone(),
+        },
+        NFT_MSG_NEWCHAIN | NFT_MSG_DELCHAIN => {
+            let (family, table, name) = in_table(3);
+            ErrorObject::NftChain { family, table, name }
+        }
+        NFT_MSG_NEWRULE | NFT_MSG_DELRULE => ErrorObject::NftRule {
+            family: family.clone(),
+            table: table.clone(),
+            chain: string(2),
+            key: AttrIter::new(attrs)
+                .find(|(t, _)| t & 0x7FFF == NFTA_RULE_USERDATA)
+                .and_then(|(_, p)| super::userdata::parse_nlink_comment(p)),
+        },
+        NFT_MSG_NEWSET | NFT_MSG_DELSET | NFT_MSG_NEWSETELEM | NFT_MSG_DELSETELEM => {
+            let (family, table, name) = in_table(2);
+            ErrorObject::NftSet { family, table, name }
+        }
+        NFT_MSG_NEWOBJ | NFT_MSG_DELOBJ => {
+            let (family, table, name) = in_table(2);
+            ErrorObject::NftObject { family, table, name }
+        }
+        NFT_MSG_NEWFLOWTABLE | NFT_MSG_DELFLOWTABLE => {
+            let (family, table, name) = in_table(2);
+            ErrorObject::NftFlowtable { family, table, name }
+        }
+        _ => return None,
+    })
+}
+
+/// The name of an `nfgenmsg` family, as nft spells it.
+fn family_name(family: u8) -> &'static str {
+    match family {
         1 => "inet",
         2 => "ip",
         3 => "arp",
@@ -133,7 +186,17 @@ fn describe_operation(message: &[u8]) -> String {
         7 => "bridge",
         10 => "ip6",
         _ => "unspec",
+    }
+}
+
+/// Render one batch message as the operation it asks for.
+fn describe_operation(message: &[u8]) -> String {
+    let Some(header) = message.get(..ATTRS_START) else {
+        return "malformed message".to_string();
     };
+    let msg_type = u16::from_ne_bytes([header[4], header[5]]);
+    let flags = u16::from_ne_bytes([header[6], header[7]]);
+    let family = family_name(header[16]);
     let attrs = message.get(ATTRS_START..).unwrap_or(&[]);
     let string = |ty: u16| {
         AttrIter::new(attrs)
@@ -261,6 +324,54 @@ mod tests {
             pos += (4 + payload.len() + 3) & !3;
         }
         panic!("no expression #{n}");
+    }
+
+    /// #718: each message names what it is done to.
+    #[test]
+    fn a_message_names_its_object() {
+        use crate::netlink::nftables::{Chain, Family, Set, SetKeyType};
+        let mut rule = Rule::new("fw", "input").match_tcp_dport(22).accept();
+        rule.key = Some("ssh".into());
+        assert_eq!(
+            object_of(&rule_message(rule)),
+            Some(ErrorObject::NftRule {
+                family: "inet".into(),
+                table: "fw".into(),
+                chain: "input".into(),
+                key: Some("ssh".into()),
+            })
+        );
+        let tx = Transaction::new_for_test()
+            .add_table("fw", Family::Ip6)
+            .add_chain(Chain::new("fw", "fwd").unwrap().family(Family::Ip6))
+            .add_set(Set::new("fw", "blocked").family(Family::Ip6).key_type(SetKeyType::Ipv6Addr));
+        let objects: Vec<_> = tx.messages_for_test().iter().map(|m| object_of(m)).collect();
+        let in_fw = |name: &str| ("ip6".to_string(), "fw".to_string(), name.to_string());
+        let (family, table, name) = in_fw("fwd");
+        let chain = ErrorObject::NftChain { family, table, name };
+        let (family, table, name) = in_fw("blocked");
+        let set = ErrorObject::NftSet { family, table, name };
+        assert_eq!(
+            objects,
+            [
+                Some(ErrorObject::NftTable {
+                    family: "ip6".into(),
+                    name: "fw".into()
+                }),
+                Some(chain),
+                Some(set),
+            ]
+        );
+        assert_eq!(set_display(), "nftables set ip6 fw/blocked");
+    }
+
+    fn set_display() -> String {
+        ErrorObject::NftSet {
+            family: "ip6".into(),
+            table: "fw".into(),
+            name: "blocked".into(),
+        }
+        .to_string()
     }
 
     #[test]

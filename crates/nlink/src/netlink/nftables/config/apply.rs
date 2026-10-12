@@ -140,7 +140,11 @@ impl NftablesDiff {
             return Err(Error::not_supported(format!(
                 "table {family:?} {name}: {why}. Delete the table and apply again to \
                  recreate it with the new flags."
-            )));
+            ))
+            .with_object(crate::ErrorObject::NftTable {
+                family: family.to_string(),
+                name: name.clone(),
+            }));
         }
         // A refused chain recreate fails here, before anything has changed
         // (#478).
@@ -153,7 +157,12 @@ impl NftablesDiff {
                 refused.chain.name(),
                 refused.reason,
                 refused.blocked_by.join(", ")
-            )));
+            ))
+            .with_object(crate::ErrorObject::NftChain {
+                family: refused.family.to_string(),
+                table: refused.table.clone(),
+                name: refused.chain.name().to_string(),
+            }));
         }
 
         let mut genid = self.generation;
@@ -479,7 +488,12 @@ impl NftablesDiff {
                      (an in-place set update needs Linux 6.5+); delete the set and \
                      re-apply to recreate it",
                     declared.name(),
-                )));
+                ))
+                .with_object(crate::ErrorObject::NftSet {
+                    family: family.to_string(),
+                    table: table.clone(),
+                    name: declared.name().to_string(),
+                }));
             }
         }
         Ok(())

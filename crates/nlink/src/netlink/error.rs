@@ -137,6 +137,60 @@ pub enum ErrorObject {
         /// The name or path.
         name: String,
     },
+    /// An nftables table (#718).
+    NftTable {
+        /// Its family: `inet`, `ip`, `ip6`, `arp`, `bridge` or `netdev`.
+        family: String,
+        /// Its name.
+        name: String,
+    },
+    /// An nftables chain (#718).
+    NftChain {
+        /// Its table's family.
+        family: String,
+        /// Its table.
+        table: String,
+        /// Its name.
+        name: String,
+    },
+    /// An nftables rule (#718), by its chain and, where it has one, its key.
+    NftRule {
+        /// Its table's family.
+        family: String,
+        /// Its table.
+        table: String,
+        /// Its chain.
+        chain: String,
+        /// The key nlink stores in the rule's comment, if it has one.
+        key: Option<String>,
+    },
+    /// An nftables set or map, or elements of one (#718).
+    NftSet {
+        /// Its table's family.
+        family: String,
+        /// Its table.
+        table: String,
+        /// Its name.
+        name: String,
+    },
+    /// A named nftables object: a counter, quota, limit, … (#718).
+    NftObject {
+        /// Its table's family.
+        family: String,
+        /// Its table.
+        table: String,
+        /// Its name.
+        name: String,
+    },
+    /// An nftables flowtable (#718).
+    NftFlowtable {
+        /// Its table's family.
+        family: String,
+        /// Its table.
+        table: String,
+        /// Its name.
+        name: String,
+    },
 }
 
 impl std::fmt::Display for ErrorObject {
@@ -159,6 +213,39 @@ impl std::fmt::Display for ErrorObject {
             Self::WireguardPeer { dev, public_key } => write!(f, "peer {public_key} on {dev}"),
             Self::Sysctl { key } => write!(f, "sysctl {key}"),
             Self::Namespace { name } => write!(f, "namespace {name}"),
+            Self::NftTable { family, name } => write!(f, "nftables table {family} {name}"),
+            Self::NftChain {
+                family,
+                table,
+                name,
+            } => write!(f, "nftables chain {family} {table}/{name}"),
+            Self::NftRule {
+                family,
+                table,
+                chain,
+                key: Some(key),
+            } => write!(f, "nftables rule {family} {table}/{chain} [{key}]"),
+            Self::NftRule {
+                family,
+                table,
+                chain,
+                ..
+            } => write!(f, "nftables rule {family} {table}/{chain}"),
+            Self::NftSet {
+                family,
+                table,
+                name,
+            } => write!(f, "nftables set {family} {table}/{name}"),
+            Self::NftObject {
+                family,
+                table,
+                name,
+            } => write!(f, "nftables object {family} {table}/{name}"),
+            Self::NftFlowtable {
+                family,
+                table,
+                name,
+            } => write!(f, "nftables flowtable {family} {table}/{name}"),
         }
     }
 }
@@ -226,6 +313,8 @@ impl From<ErrorDetail> for Error {
             ErrorDetail::NamespaceDeleted { path } => Some(ErrorObject::Namespace {
                 name: path.display().to_string(),
             }),
+            // The first refused operation that names something (#718).
+            ErrorDetail::NftBatch { failures } => failures.iter().find_map(|f| f.object.clone()),
             _ => None,
         };
         Self(Box::new(Inner {

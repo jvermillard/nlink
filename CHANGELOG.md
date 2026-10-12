@@ -2397,6 +2397,18 @@ All notable changes to this project will be documented in this file.
   `sibling` has a label; one in the calling thread's namespace has none.
   Errors from checking arguments before anything is sent carry no label.
 
+- **nftables errors name their table, chain, rule, set, object or
+  flowtable (#718).** `ErrorObject` gains `NftTable`, `NftChain`, `NftRule`
+  (its chain, and its key where it has one), `NftSet`, `NftObject` and
+  `NftFlowtable`. Each `NftBatchFailure` carries the object its operation was
+  done to, read from the message nlink sent, in a new `object` field. A
+  refused batch's `Error::object()` is the first one's. The declarative
+  apply's own refusals name theirs too: a table flag the kernel won't
+  change on a live table, a chain recreate that would delete rules nlink
+  did not write, and a set update the kernel kept. Imperative and
+  declarative paths alike can say which rule failed without parsing a
+  message.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

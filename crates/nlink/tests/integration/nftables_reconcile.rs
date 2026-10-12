@@ -1350,6 +1350,15 @@ async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink:
         assert!(diff.to_string().contains("recreate refused"), "{diff}");
         let err = diff.apply(&nft).await.expect_err("the recreate is refused");
         assert!(err.is_not_supported(), "{err}");
+        assert_eq!(
+            err.object(),
+            Some(&nlink::ErrorObject::NftChain {
+                family: "inet".into(),
+                table: "t".into(),
+                name: "c".into(),
+            }),
+            "the refusal names its chain (#718): {err}"
+        );
         let chains = nft.list_chains_in("t", Family::Inet).await?;
         assert_eq!(
             chains
@@ -1789,6 +1798,25 @@ async fn a_refused_batch_names_each_refused_operation() -> nlink::Result<()> {
             panic!("expected Error::NftBatch, got {err:?}");
         };
         assert_eq!(failures.len(), 2, "{shown}");
+        // Each refused operation names its object, and the error the first
+        // one's (#718).
+        let rule = nlink::ErrorObject::NftRule {
+            family: "ip".into(),
+            table: "t".into(),
+            chain: "nochain".into(),
+            key: None,
+        };
+        assert_eq!(failures[0].object.as_ref(), Some(&rule), "{shown}");
+        assert_eq!(
+            failures[1].object,
+            Some(nlink::ErrorObject::NftSet {
+                family: "ip".into(),
+                table: "t".into(),
+                name: "s".into(),
+            }),
+            "{shown}"
+        );
+        assert_eq!(err.object(), Some(&rule), "{shown}");
 
         let tables = conn.list_tables().await?;
         assert!(
