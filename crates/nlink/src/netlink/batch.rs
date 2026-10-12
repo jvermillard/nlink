@@ -394,12 +394,11 @@ impl<'a> Batch<'a> {
     /// Execute all operations, returning the first error encountered.
     pub async fn execute_all(self) -> Result<()> {
         let results = self.execute().await?;
-        for result in &results.results {
-            if let Err(e) = result {
-                return Err(Error::invalid_message(format!(
-                    "batch operation failed: {e}"
-                )));
-            }
+        // The first failure as it was: its errno, so `is_already_exists()`
+        // and the rest still answer. A string of it used to be returned,
+        // which answered none of them (#526).
+        for (i, result) in results.results.into_iter().enumerate() {
+            result.map_err(|e| e.with_context(format!("batch operation {i}")))?;
         }
         Ok(())
     }

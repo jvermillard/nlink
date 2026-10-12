@@ -376,7 +376,7 @@ impl NetnsCommand {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(dir.join("cgroup.procs"))
-                    .map_err(|e| Error::invalid_message(format!("cgroup {}: {e}", dir.display())))?,
+                    .map_err(|e| Error::from(e).with_context(format!("cgroup {}", dir.display())))?,
             ),
             None => None,
         };

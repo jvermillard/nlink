@@ -1172,3 +1172,23 @@ async fn the_macsec_genl_api_reads_and_writes_the_sci_as_the_kernel_does() -> Re
     assert!(shown.contains("0200000000020001"), "{shown}");
     Ok(())
 }
+
+/// #526: `Batch::execute_all` returns the failing operation's error, so
+/// its errno answers the predicates. It returned a string of it, which
+/// answered none of them.
+#[tokio::test]
+async fn a_failed_batch_operation_keeps_its_errno() -> Result<()> {
+    require_root!();
+    let ns = TestNamespace::new("batch-errno")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    let err = conn
+        .batch()
+        .add_link(DummyLink::new("d0"))
+        .execute_all()
+        .await
+        .expect_err("d0 exists");
+    assert!(err.is_already_exists(), "{err}");
+    assert_eq!(err.context(), ["batch operation 0"]);
+    Ok(())
+}

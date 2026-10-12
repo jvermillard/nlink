@@ -186,9 +186,7 @@ impl NetlinkSocket {
                 Ok(socket)
             }
             Ok(Err(e)) => Err(e),
-            Err(_panic) => Err(Error::invalid_message(
-                "namespace socket worker thread panicked".to_string(),
-            )),
+            Err(_panic) => Err(Error::internal("namespace socket worker thread panicked")),
         }
     }
 
