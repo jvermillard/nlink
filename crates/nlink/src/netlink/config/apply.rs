@@ -464,6 +464,9 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
         Step::CreateLink(l) => link(&l.name),
         Step::ModifyLink { name, .. } => link(name),
         Step::ModifyVethPeer(c) => link(&c.peer),
+        Step::SetVrfStrictMode { .. } => ErrorObject::Sysctl {
+            key: super::diff::VRF_STRICT_MODE.to_string(),
+        },
         Step::PinBridgeMtu { bridge, .. } => link(bridge),
         Step::HoldVlanDown { vlan } => link(vlan),
         Step::AddAddress(a) | Step::ChangeAddress(a) | Step::DeleteAddress { address: a, .. } => {
@@ -511,6 +514,9 @@ fn step_operation(step: &Step) -> String {
         }
         Step::ModifyVethPeer(c) => {
             format!("modify veth peer {} in {} ({})", c.peer, c.netns, c.changes.summary())
+        }
+        Step::SetVrfStrictMode { on } => {
+            format!("set {}={}", super::diff::VRF_STRICT_MODE, u8::from(*on))
         }
         Step::PinBridgeMtu { bridge, mtu } => format!("restore bridge {bridge} mtu={mtu}"),
         Step::HoldVlanDown { vlan } => format!("take VLAN {vlan} down"),
@@ -784,6 +790,12 @@ async fn run_step(
         } => {
             modify_link(conn, name, changes, *mtu_already_set).await?;
             Outcome::Changed(format!("Modified link {} ({})", name, changes.summary()), 1)
+        }
+        // In the connection's namespace (#680).
+        Step::SetVrfStrictMode { on } => {
+            let value = if *on { "1" } else { "0" };
+            conn.netns()?.sysctl().set(super::diff::VRF_STRICT_MODE, value)?;
+            Outcome::Changed(format!("Set {}={value}", super::diff::VRF_STRICT_MODE), 1)
         }
         // Through a connection in the peer's namespace (#680).
         Step::ModifyVethPeer(c) => {

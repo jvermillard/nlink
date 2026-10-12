@@ -259,6 +259,9 @@ pub struct ConfigDiff {
     /// Veth peers to change in the namespace they live in (#680): their
     /// declared MAC, MTU and state.
     pub veth_peers_to_modify: Vec<VethPeerChange>,
+    /// The namespace's VRF strict mode to set, where the config declares
+    /// another than it has (#680).
+    pub vrf_strict_mode: Option<bool>,
 
     /// Links the config declares without a kind — so it does not create
     /// them — that do not exist, and that no veth or netkit pair in this
@@ -502,6 +505,7 @@ impl ConfigDiff {
             && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
             && self.veth_peers_to_modify.is_empty()
+            && self.vrf_strict_mode.is_none()
             && self.links_missing.is_empty()
             && self.links_to_remove.is_empty()
             && self.addresses_to_add.is_empty()
@@ -531,6 +535,7 @@ impl ConfigDiff {
             + self.links_to_add.len()
             + self.links_to_modify.len()
             + self.veth_peers_to_modify.len()
+            + usize::from(self.vrf_strict_mode.is_some())
             + self.links_missing.len()
             + self.links_to_remove.len()
             + self.addresses_to_add.len()
@@ -583,6 +588,9 @@ impl ConfigDiff {
         }
         for peer in &self.veth_peers_to_modify {
             lines.push(peer.to_string());
+        }
+        if let Some(on) = self.vrf_strict_mode {
+            lines.push(format!("~ net.vrf.strict_mode -> {}", u8::from(on)));
         }
         for name in &self.links_missing {
             lines.push(format!(
@@ -1138,6 +1146,11 @@ pub struct Snapshot {
     /// [`read`](Self::read), since a peer of ours makes one; the ones a
     /// config sets a peer in for `read_for`.
     peer_links: HashMap<crate::netlink::namespace::NetnsRef, Vec<LinkMessage>>,
+    /// The namespace's `net.vrf.strict_mode` (#680): read by
+    /// [`read`](Self::read), and by `read_for` when its config sets it.
+    /// `None` where it cannot be read: the `vrf` module is not loaded, and
+    /// it is off.
+    vrf_strict_mode: Option<bool>,
 }
 
 impl Snapshot {
@@ -1172,6 +1185,7 @@ impl Snapshot {
             .map(|(r, _)| r.clone())
             .collect();
         snapshot.read_peer_links(linked, false).await?;
+        snapshot.vrf_strict_mode = read_vrf_strict_mode(conn);
         Ok(snapshot)
     }
 
@@ -1301,6 +1315,9 @@ impl Snapshot {
             .filter_map(|l| l.peer_netns().cloned())
             .collect();
         snapshot.read_peer_links(set_peers, true).await?;
+        if config.vrf_strict_mode.is_some() {
+            snapshot.vrf_strict_mode = read_vrf_strict_mode(conn);
+        }
         Ok(snapshot)
     }
 
@@ -1319,6 +1336,7 @@ impl Snapshot {
             rules: Vec::new(),
             netns_ids: HashMap::new(),
             peer_links: HashMap::new(),
+            vrf_strict_mode: None,
             nexthops: Vec::new(),
         })
     }
@@ -1345,6 +1363,16 @@ impl Snapshot {
 }
 
 /// Every nexthop object; none on a kernel without them (before 5.3).
+/// The namespace's `net.vrf.strict_mode`, read where the connection is
+/// (#680); `None` where there is none to read, without the `vrf` module.
+fn read_vrf_strict_mode(conn: &Connection<Route>) -> Option<bool> {
+    let value = conn.netns().ok()?.sysctl().get(VRF_STRICT_MODE).ok()?;
+    Some(value.trim() == "1")
+}
+
+/// The sysctl [`NetworkConfig::vrf_strict_mode`] sets.
+pub(crate) const VRF_STRICT_MODE: &str = "net.vrf.strict_mode";
+
 async fn read_nexthops(conn: &Connection<Route>) -> Result<Vec<crate::netlink::nexthop::Nexthop>> {
     match conn.get_nexthops().await {
         Ok(n) => Ok(n),
@@ -1446,6 +1474,12 @@ pub(crate) fn diff_snapshot(
     // back to a name (Plan 207b H2).
     let flushing = diff_links(config, &link_by_name, &ifindex_to_name, &plan, &mut diff);
     diff_port_vlans(config, &link_by_name, &snapshot.bridge_vlans, &mut diff);
+    // Off, unless the `vrf` module is loaded and says otherwise (#680).
+    if let Some(want) = config.vrf_strict_mode
+        && snapshot.vrf_strict_mode.unwrap_or(false) != want
+    {
+        diff.vrf_strict_mode = Some(want);
+    }
 
     // A veth peer's declared settings, in the namespace it lives in (#680).
     // A veth this apply creates, or creates again, gets them at create.
@@ -3871,6 +3905,7 @@ mod tests {
                 "rules-to-add",
                 "rules-to-remove",
                 "veth-peers-to-modify",
+                "vrf-strict-mode",
             ]
         );
         assert_eq!(

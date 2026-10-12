@@ -2087,6 +2087,44 @@ async fn a_veth_peer_is_set_in_its_namespace() -> nlink::Result<()> {
     Ok(())
 }
 
+/// VRF strict mode around the links, A→B→C (#680): step 1 turns it on
+/// with two VRFs on their own tables; step 2 turns it off and moves green
+/// onto red's table, which needs it off before green is created again;
+/// step 3 moves green away and turns it on after. The namespace's
+/// `/proc/sys/net/vrf/strict_mode` and `ip -d link` show each step.
+#[tokio::test]
+async fn vrf_strict_mode_is_set_around_the_links() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("vrf");
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+
+    let step = |strict: bool, green: u32| {
+        NetworkConfig::new()
+            .vrf_strict_mode(strict)
+            .link("red", |l| l.vrf(10).up())
+            .link("green", move |l| l.vrf(green).up())
+    };
+    let steps = [step(true, 20), step(false, 10), step(true, 30)];
+    let want = [("1", 20), ("0", 10), ("1", 30)];
+    let ns = TestNamespace::new("tr-vrfstrict")?;
+    crate::common::converge::assert_transition(&ns, &steps, false, async |i, _conn| {
+        let strict = ns
+            .exec("cat", &["/proc/sys/net/vrf/strict_mode"])
+            .map_err(|e| e.to_string())?;
+        let table = link_json(&ns, "green")?["linkinfo"]["info_data"]["table"].as_u64();
+        let (want_strict, want_table) = want[i];
+        if (strict.trim(), table) != (want_strict, Some(want_table)) {
+            return Err(format!(
+                "step {}: strict_mode {} and green's table {table:?}, want {want_strict} and {want_table}",
+                i + 1,
+                strict.trim()
+            ));
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Declared nexthop objects and the routes through them, A→B→C→D (#516),
 /// each step applied with the one before as the previous config. Step 2
 /// gives a nexthop another gateway and its group other weights, in place.

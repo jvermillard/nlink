@@ -2510,6 +2510,16 @@ All notable changes to this project will be documented in this file.
   namespace is a link of its own, so validation refuses peer settings
   without a peer namespace and says to declare the peer.
 
+- **VRF strict mode (#680).** `NetworkConfig::vrf_strict_mode(bool)`
+  declares the namespace's `net.vrf.strict_mode`. In strict mode a routing
+  table belongs to one VRF at most. The diff reads the sysctl in the
+  connection's namespace (unreadable means the `vrf` module isn't loaded,
+  so it is off), and a difference is `ConfigDiff::vrf_strict_mode` and a
+  `Step::SetVrfStrictMode`. The apply turns strict mode off before it
+  creates links and on after, since the kernel refuses a VRF on a table
+  another VRF has while strict mode is on. Validation refuses a config that
+  turns it on with two VRFs on one table.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
